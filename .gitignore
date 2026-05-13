@@ -1,0 +1,39 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+
+# IDE/editor artifacts
+.vscode/
+.idea/
+*.swp
+
+# Environment and local config
+.env
+.env.*
+*.local
+
+# Logs and runtime files
+*.log
+*.pid
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Agent sandbox output (keep only README tracked)
+workspace/*
+!workspace/README.md
