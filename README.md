@@ -7,7 +7,7 @@ CortexNode runs a bounded reasoning loop that can call sandboxed tools for file 
 ## Features
 
 - Local LLM orchestration with `ChatOllama`
-- Tool-calling workflow with `LangGraph` (`brain -> tools -> capture_tool_output -> brain`)
+- Tool-calling workflow with `LangGraph` (`planner -> brain -> tools -> capture_tool_output -> brain`)
 - Sandboxed file tools: `list_files`, `read_file`, `write_file`, `make_directory`
 - Sandboxed Python execution tool: `run_python`
 - Git read tools: `git_status`, `git_diff`, `git_log`, `git_show`
@@ -74,10 +74,19 @@ python main.py --model qwen2.5:7b --workspace workspace
 
 1. `main.py` parses CLI args and builds the LangGraph app.
 2. `core/graph.py` assembles tool sets and binds them to `ChatOllama`.
-3. The `brain` node generates the next assistant step.
-4. If tool calls are requested, execution routes through `ToolNode`.
-5. Tool outputs are normalized and fed back into state.
-6. Loop exits when no tool call remains or step limit is reached (max 12 steps per prompt).
+3. The `planner` node analyzes the prompt and creates a step-by-step plan **without** taking actions.
+4. The `brain` node executes the plan by generating tool calls.
+5. If tool calls are requested, execution routes through `ToolNode`.
+6. Tool outputs are normalized and fed back into state.
+7. Loop exits when no tool call remains or step limit is reached (max 12 steps per prompt, after planning).
+
+### Planning Phase
+
+The planner node runs first and creates a clear execution strategy. This improves:
+- **Multi-step task completion:** Complex prompts are broken into logical steps upfront
+- **Step efficiency:** Brain execution is more direct, wasting fewer steps on trial-and-error
+- **Multilingual support:** Planning clarifies non-English prompts before reasoning begins
+- **Reliability:** Reduces repetition errors and ensures all tasks are considered
 
 ## Tool Output Format
 
@@ -124,3 +133,11 @@ cortex-node/
 - Git tools execute in the selected workspace directory and return stdout/stderr/exit code.
 - `current_time` is the preferred path for time/date questions to avoid guessed values.
 - SCADA integrations are currently placeholders and not yet connected to real PLC/telemetry endpoints.
+
+## Best Practices for Prompts
+
+- **Use English:** Simpler prompts in English work best; complex non-ASCII text may confuse tokenization.
+- **One task per prompt:** Bundle logically related steps, but avoid 5+ independent operations.
+- **Be explicit:** State expected output format and verification steps clearly.
+- **Break into steps:** If your prompt requires multiple independent scripts/files, consider running them separately.
+- **Example good prompt:** `"Create sensor.py that reads temperature and saves to temp.json. Run it and show me the output."`
