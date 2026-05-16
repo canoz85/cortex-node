@@ -69,5 +69,22 @@ def get_info_tools(model: str, workspace_dir: str):
 
 
 def update_token_usage(usage: dict) -> None:
-    """Called by brain_node to keep the info tools up to date."""
-    _runtime["token_usage"] = usage
+    """Accumulate token usage across turns; only update non-zero values."""
+    if not usage:
+        return
+    
+    prompt_tokens = usage.get("prompt_tokens", 0) or 0
+    completion_tokens = usage.get("completion_tokens", 0) or 0
+    total_tokens = usage.get("total_tokens", 0) or 0
+    
+    existing = _runtime.get("token_usage", {}) or {}
+    
+    existing_prompt = existing.get("prompt_tokens", 0) or 0
+    existing_completion = existing.get("completion_tokens", 0) or 0
+    existing_total = existing.get("total_tokens", 0) or 0
+    
+    _runtime["token_usage"] = {
+        "prompt_tokens": existing_prompt + prompt_tokens,
+        "completion_tokens": existing_completion + completion_tokens,
+        "total_tokens": existing_total + total_tokens,
+    }

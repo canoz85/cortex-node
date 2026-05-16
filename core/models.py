@@ -28,8 +28,8 @@ class TokenUsage(BaseModel):
     @classmethod
     def from_response_metadata(cls, metadata: dict | None) -> "TokenUsage":
         metadata = metadata or {}
-        prompt_tokens = int(metadata.get("prompt_eval_count", 0) or 0)
-        completion_tokens = int(metadata.get("eval_count", 0) or 0)
+        prompt_tokens = int(metadata.get("prompt_eval_count") or metadata.get("prompt_tokens") or 0)
+        completion_tokens = int(metadata.get("eval_count") or metadata.get("completion_tokens") or 0)
         return cls(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,

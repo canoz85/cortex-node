@@ -12,6 +12,8 @@ CortexNode runs a bounded reasoning loop that can call sandboxed tools for file 
 - Sandboxed Python execution tool: `run_python`
 - Git read tools: `git_status`, `git_diff`, `git_log`, `git_show`
 - Runtime info tools: `agent_info`, `token_usage`, `current_time`
+- Simple local RAG over `.md` and `.json` files in `knowledge/`
+- Retrieval tools: `rag_search`, `rag_refresh_index`
 - SCADA stub tool for planned MQTT/OPC-UA integrations
 - Interactive CLI mode and one-shot prompt mode
 
@@ -19,7 +21,7 @@ CortexNode runs a bounded reasoning loop that can call sandboxed tools for file 
 
 - Python 3.10+
 - Ollama installed and running locally
-- An available Ollama model (default: `qwen2.5:7b`)
+- An available Ollama model (default: `qwen2.5-coder:14b`)
 
 ## Setup
 
@@ -64,21 +66,30 @@ python main.py --prompt "Create hello.py in the workspace and run it"
 python main.py --model qwen2.5:7b --workspace workspace
 ```
 
+### Custom knowledge folder
+
+```bash
+python main.py --knowledge-dir knowledge
+```
+
 ## CLI Arguments
 
 - `--workspace`: Sandbox directory used by tools (default: `workspace`)
+- `--knowledge-dir`: Folder used as the RAG knowledge base (default: `knowledge`)
 - `--model`: Ollama model name (default: `qwen2.5:7b`)
+- `--embedding-model`: Ollama embedding model for retrieval (default: `nomic-embed-text`)
 - `--prompt`: Run one prompt and exit (if omitted, interactive mode starts)
 
 ## How It Works
 
 1. `main.py` parses CLI args and builds the LangGraph app.
-2. `core/graph.py` assembles tool sets and binds them to `ChatOllama`.
+2. `core/graph.py` builds a small RAG index from `knowledge/` and injects retrieved context into the planner and brain prompts.
 3. The `planner` node analyzes the prompt and creates a step-by-step plan **without** taking actions.
 4. The `brain` node executes the plan by generating tool calls.
 5. If tool calls are requested, execution routes through `ToolNode`.
 6. Tool outputs are normalized and fed back into state.
 7. Loop exits when no tool call remains or step limit is reached (max 12 steps per prompt, after planning).
+8. File-generation turns can run a verification pass and automatically repair obvious CLI argument issues before finalizing.
 
 ### Planning Phase
 
@@ -132,6 +143,7 @@ cortex-node/
 - File and execution tools enforce sandbox boundaries relative to the selected workspace.
 - Git tools execute in the selected workspace directory and return stdout/stderr/exit code.
 - `current_time` is the preferred path for time/date questions to avoid guessed values.
+- Generated files and verification artifacts are created inside the sandboxed `workspace/` directory.
 - SCADA integrations are currently placeholders and not yet connected to real PLC/telemetry endpoints.
 
 ## Best Practices for Prompts
