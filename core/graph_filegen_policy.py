@@ -45,7 +45,35 @@ def should_finalize_action_turn(history: list, planner_route: str) -> bool:
 
     successful_names = {str(event.get("name", "")) for event in events if event.get("success")}
     if planner_route == "action:file_generation":
-        return bool(successful_names & MODIFYING_TOOL_NAMES) and bool(successful_names & VERIFICATION_TOOL_NAMES)
+        successful_write_file = any(
+            event.get("success") and str(event.get("name", "")) == "write_file"
+            for event in events
+        )
+        if not successful_write_file:
+            return False
+
+        wrote_python_file = False
+        for event in events:
+            if not event.get("success") or str(event.get("name", "")) != "write_file":
+                continue
+            args = event.get("args", {}) if isinstance(event.get("args"), dict) else {}
+            unwrapped = event.get("unwrapped") if isinstance(event.get("unwrapped"), dict) else {}
+            path = str(args.get("path") or unwrapped.get("path") or "").strip()
+            if path.endswith(".py"):
+                wrote_python_file = True
+                break
+
+        if wrote_python_file:
+            # Require the MOST RECENT run_python to have succeeded — not just any historical one.
+            last_run_python_success: bool | None = None
+            for event in reversed(events):
+                if str(event.get("name", "")) == "run_python":
+                    last_run_python_success = bool(event.get("success"))
+                    break
+            if last_run_python_success is None or not last_run_python_success:
+                return False
+            return bool(successful_names & MODIFYING_TOOL_NAMES)
+        return bool(successful_names & MODIFYING_TOOL_NAMES)
     return bool(successful_names & MODIFYING_TOOL_NAMES)
 
 
@@ -91,6 +119,19 @@ def message_repeats_write_content(message: AIMessage, path: str, content: str) -
     return False
 
 
+def _last_sample_json_path(events: list) -> str:
+    """Return the path of the last non-Python JSON file written successfully this turn, or empty string."""
+    for event in reversed(events):
+        if not event.get("success") or str(event.get("name", "")) != "write_file":
+            continue
+        args = event.get("args", {}) if isinstance(event.get("args"), dict) else {}
+        unwrapped = event.get("unwrapped") if isinstance(event.get("unwrapped"), dict) else {}
+        path = str(args.get("path") or unwrapped.get("path") or "").strip()
+        if path.endswith(".json"):
+            return path
+    return ""
+
+
 def next_file_generation_verification_call(history: list) -> dict | None:
     """If a Python file was just written successfully, deterministically verify it next."""
     events = current_turn_tool_events(history)
@@ -117,9 +158,15 @@ def next_file_generation_verification_call(history: list) -> dict | None:
     if last_successful_write_index == -1 or last_successful_write_index <= last_run_python_index:
         return None
 
+    # If a sample JSON was written this turn, reuse it so CLI tools with required args don't loop.
+    sample_json = _last_sample_json_path(events)
+    run_args: dict = {"path": last_written_python_path}
+    if sample_json:
+        run_args["v__args"] = [sample_json]
+
     return {
         "name": "run_python",
-        "args": {"path": last_written_python_path},
+        "args": run_args,
         "id": f"pseudo-{uuid4()}",
         "type": "tool_call",
     }
@@ -293,3 +340,60 @@ def last_tool_has_args_nameerror(tool_output: dict[str, object] | str) -> bool:
         return False
     lowered = stderr.lower()
     return "nameerror" in lowered and "args" in lowered and "not defined" in lowered
+
+
+def _latest_successful_python_write(history: list) -> tuple[str, str] | None:
+    """Return (path, content) for the latest successful Python write_file in this turn."""
+    events = current_turn_tool_events(history)
+    for event in reversed(events):
+        if not event.get("success") or str(event.get("name", "")) != "write_file":
+            continue
+        args = event.get("args", {}) if isinstance(event.get("args"), dict) else {}
+        unwrapped = event.get("unwrapped") if isinstance(event.get("unwrapped"), dict) else {}
+        path = str(args.get("path") or unwrapped.get("path") or "").strip()
+        if not path.endswith(".py"):
+            continue
+        content = str(args.get("content") or "")
+        return path, content
+    return None
+
+
+def file_generation_quality_issue(history: list, user_prompt: str) -> str | None:
+    """Detect when generated Python output is still a placeholder/incomplete implementation."""
+    latest_write = _latest_successful_python_write(history)
+    if latest_write is None:
+        return "No Python implementation file has been written yet."
+
+    path, content = latest_write
+    lowered_content = content.lower()
+    lowered_prompt = str(user_prompt or "").lower()
+
+    if any(token in lowered_content for token in ("placeholder", "todo", "stub", "not implemented")):
+        return f"{path} still contains placeholder/stub text."
+
+    if re.search(r"(?m)^\s*pass\s*$", content):
+        return f"{path} still contains a pass-only placeholder block."
+
+    requested_cli = any(token in lowered_prompt for token in ("cli", "command line", "argparse"))
+    if requested_cli and "argparse" not in lowered_content:
+        return f"{path} is missing argparse-based CLI argument parsing."
+
+    if "json" in lowered_prompt and "json" not in lowered_content:
+        return f"{path} is missing JSON parsing logic."
+
+    requested_validation = any(token in lowered_prompt for token in ("validate", "validation", "required field"))
+    if requested_validation and not re.search(r"validat|required", lowered_content):
+        return f"{path} is missing required-field validation logic."
+
+    requested_summary = any(token in lowered_prompt for token in ("status summary", "summary", "status"))
+    if requested_summary and not re.search(r"status|summary|print.*?(sensor|data|valid|result|field)", lowered_content):
+        return f"{path} is missing status summary output logic."
+
+    requested_graceful_errors = any(token in lowered_prompt for token in ("invalid input", "graceful", "malformed", "error"))
+    if requested_graceful_errors and not ("try:" in lowered_content and "except" in lowered_content):
+        return f"{path} is missing graceful error handling (try/except)."
+
+    if len(content.strip()) < 180:
+        return f"{path} is too short to satisfy the requested multi-step implementation."
+
+    return None

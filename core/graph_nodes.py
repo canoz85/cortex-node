@@ -5,6 +5,7 @@ from langgraph.graph import END
 from core.graph_constants import MAX_PSEUDO_RETRIES, MAX_REASONING_STEPS, RECENT_MESSAGE_WINDOW
 from core.graph_context import retrieval_message, rolling_summary_message, update_rolling_summary
 from core.graph_filegen_policy import (
+    file_generation_quality_issue,
     file_generation_verification_failures,
     last_failed_verification_rewrite_info,
     last_read_file_snapshot,
@@ -42,6 +43,12 @@ def _direct_discussion_response(
     rolling_summary: str,
     recent_history: list,
 ) -> AIMessage:
+    def _finalize_llm_text(source: AIMessage, content: str) -> AIMessage:
+        metadata = getattr(source, "response_metadata", None)
+        if isinstance(metadata, dict) and metadata:
+            return AIMessage(content=content, response_metadata=metadata)
+        return AIMessage(content=content)
+
     messages = [
         SystemMessage(content=system_prompt),
         *retrieval_messages,
@@ -70,13 +77,32 @@ def _direct_discussion_response(
         )
         fallback_content = normalize_message_content(fallback).strip()
         if fallback_content and not looks_like_pseudo_tool_text(fallback_content):
-            return AIMessage(content=fallback_content)
+            return _finalize_llm_text(fallback, fallback_content)
         return AIMessage(
             content=(
                 "Describe the error message, the JSON input, and the code path that fails, and I will help isolate the parsing bug directly."
             )
         )
-    return AIMessage(content=content)
+    return _finalize_llm_text(response, content)
+
+
+def _planner_execution_brief(route: str, plan_source: str, plan_text: str) -> str:
+    """Return a concise planner brief for the brain LLM on action routes."""
+    normalized_plan = str(plan_text or "").strip()
+    if not normalized_plan:
+        return ""
+
+    if len(normalized_plan) > 1500:
+        normalized_plan = f"{normalized_plan[:1500]}..."
+
+    normalized_source = str(plan_source or "").strip() or "unknown"
+    return (
+        "Planner execution brief below. Use it as guidance, but produce executable next steps now.\n"
+        f"Route: {route}\n"
+        f"Plan source: {normalized_source}\n"
+        "Plan:\n"
+        f"{normalized_plan}"
+    )
 
 
 def create_graph_nodes(
@@ -102,6 +128,7 @@ def create_graph_nodes(
         latest_user_prompt = latest_user_message(history)
         route = planner_route(latest_user_prompt)
         preferred_tool = preferred_info_tool(latest_user_prompt)
+        plan_source = "synthetic"
 
         if route == "info":
             plan_text = f"Info query detected: call {preferred_tool} tool and report the result."
@@ -137,9 +164,11 @@ Be concise. Format as a numbered list."""
 
             plan_response = planner_llm.invoke([*pre_messages, *recent_history])
             plan_text = str(plan_response.content)
+            plan_source = "llm"
 
         return {
             "plan": plan_text,
+            "planner_plan_source": plan_source,
             "planner_route": route,
             "rolling_summary": updated_summary,
             "steps": 0,
@@ -153,11 +182,18 @@ Be concise. Format as a numbered list."""
         recent_history = recent_messages(history, RECENT_MESSAGE_WINDOW)
         rolling_summary = state.get("rolling_summary", "")
         route = str(state.get("planner_route", ""))
+        planner_plan = str(state.get("plan", "") or "")
+        planner_plan_source = str(state.get("planner_plan_source", "") or "")
         latest_user_prompt = latest_user_message(history)
         action_required = requires_action(latest_user_prompt)
         preferred_tool = preferred_info_tool(latest_user_prompt)
         file_generation_requested = route == "action:file_generation" or is_file_generation_request(latest_user_prompt)
         successful_tool_result_in_turn = current_turn_has_successful_tool_result(history)
+        current_filegen_issue = (
+            file_generation_quality_issue(history, latest_user_prompt)
+            if file_generation_requested and successful_tool_result_in_turn
+            else None
+        )
         action_completion_summary = format_action_completion_response(history)
         retrieval_messages = retrieval_message(rag_service, latest_user_message(history), rag_top_k)
 
@@ -242,7 +278,12 @@ Be concise. Format as a numbered list."""
                     "tool_text_retry_used": False,
                 }
 
-        if action_required and action_completion_summary and should_finalize_action_turn(history, route):
+        if (
+            action_required
+            and action_completion_summary
+            and should_finalize_action_turn(history, route)
+            and not (file_generation_requested and current_filegen_issue)
+        ):
             response = AIMessage(content=action_completion_summary)
             meta = getattr(response, "response_metadata", {}) or {}
             usage = TokenUsage.from_response_metadata(meta)
@@ -269,6 +310,10 @@ Be concise. Format as a numbered list."""
             skip_action_enforcement = False
             response_llm = planner_llm if route in {"casual", "coding_discussion", "conversation"} else llm
             allow_tool_recovery = route not in {"casual", "coding_discussion", "conversation"}
+            if route.startswith("action") and not preferred_tool:
+                planner_brief = _planner_execution_brief(route, planner_plan_source, planner_plan)
+                if planner_brief:
+                    pre_messages.append(SystemMessage(content=planner_brief))
             if preferred_tool:
                 pre_messages.append(
                     SystemMessage(
@@ -286,7 +331,22 @@ Be concise. Format as a numbered list."""
                             "This is a concrete file-generation task inside the sandbox workspace. "
                             "Your next response should start with executable tool calls only. "
                             "Prefer write_file or make_directory for implementation, then run_python to verify when possible. "
-                            "Do not explain planned code before taking action."
+                            "Do not explain planned code before taking action. "
+                            "Python code structure rules: "
+                            "All business logic must be inside named functions. "
+                            "The entry point must be a main() function called from 'if __name__ == \"__main__\"'. "
+                            "Do NOT place logic or variable assignments at module level outside of functions."
+                        )
+                    )
+                )
+            if file_generation_requested and current_filegen_issue:
+                pre_messages.append(
+                    SystemMessage(
+                        content=(
+                            "The generated file is not complete for this request yet. "
+                            f"Detected gap: {current_filegen_issue} "
+                            "You must call write_file now with a corrected, fully implemented version of the file that fixes this gap. "
+                            "Do NOT call run_python again until you have first rewritten the file with the missing implementation."
                         )
                     )
                 )
@@ -354,13 +414,24 @@ Be concise. Format as a numbered list."""
                         )
                     )
                 )
-            elif action_required and successful_tool_result_in_turn:
+            elif action_required and successful_tool_result_in_turn and not (file_generation_requested and current_filegen_issue):
                 pre_messages.append(
                     SystemMessage(
                         content=(
                             "A tool has already succeeded during this user turn. "
                             "If that successful result satisfies the request, provide the final concise answer now "
                             "instead of calling more tools. Only call another tool if a specific remaining gap still exists."
+                        )
+                    )
+                )
+            elif file_generation_requested and current_filegen_issue:
+                pre_messages.append(
+                    SystemMessage(
+                        content=(
+                            "A tool succeeded, but the implementation is still incomplete. "
+                            f"Detected gap: {current_filegen_issue} "
+                            "Call write_file now with a corrected, fully implemented version. "
+                            "Do NOT call run_python again before rewriting the file."
                         )
                     )
                 )
@@ -519,55 +590,43 @@ Be concise. Format as a numbered list."""
                         ]
                     )
 
-            if file_generation_requested and not successful_tool_result_in_turn and not getattr(response, "tool_calls", None):
-                response = llm.invoke(
-                    [
-                        *pre_messages,
-                        *recent_history,
-                        response,
-                        SystemMessage(
-                            content=(
-                                "This file-generation request must continue with executable tool calls now. "
-                                "Return tool calls only. Start by creating or updating files in the sandbox, then verify the result."
-                            )
-                        ),
-                    ]
-                )
-                response = finalize_action_response(response, tool_name_set)
+            if not getattr(response, "tool_calls", None):
+                enforcement_prompt = ""
+                if file_generation_requested and not successful_tool_result_in_turn:
+                    enforcement_prompt = (
+                        "This file-generation request must continue with executable tool calls now. "
+                        "Return tool calls only. Start by creating or updating files in the sandbox, then verify the result."
+                    )
+                elif file_generation_requested and current_filegen_issue:
+                    enforcement_prompt = (
+                        "This file-generation request is still incomplete. "
+                        f"Detected gap: {current_filegen_issue}. "
+                        "Call write_file now with a corrected, fully implemented version of the file. "
+                        "Do NOT call run_python again before rewriting the file."
+                    )
+                elif preferred_tool:
+                    enforcement_prompt = (
+                        "You ignored the required info tool. "
+                        f"Call {preferred_tool} now. "
+                        "Do not answer from memory or provide a prose-only response."
+                    )
+                elif action_required and not skip_action_enforcement and not successful_tool_result_in_turn:
+                    enforcement_prompt = (
+                        "The user requested concrete actions. "
+                        "Return at least one executable tool call now. "
+                        "Do not return a prose-only response."
+                    )
 
-            if preferred_tool and not getattr(response, "tool_calls", None):
-                response = llm.invoke(
-                    [
-                        *pre_messages,
-                        *recent_history,
-                        response,
-                        SystemMessage(
-                            content=(
-                                "You ignored the required info tool. "
-                                f"Call {preferred_tool} now. "
-                                "Do not answer from memory or provide a prose-only response."
-                            )
-                        ),
-                    ]
-                )
-                response = finalize_action_response(response, tool_name_set)
-
-            if action_required and not skip_action_enforcement and not successful_tool_result_in_turn and not getattr(response, "tool_calls", None):
-                response = llm.invoke(
-                    [
-                        *pre_messages,
-                        *recent_history,
-                        response,
-                        SystemMessage(
-                            content=(
-                                "The user requested concrete actions. "
-                                "Return at least one executable tool call now. "
-                                "Do not return a prose-only response."
-                            )
-                        ),
-                    ]
-                )
-                response = finalize_action_response(response, tool_name_set)
+                if enforcement_prompt:
+                    response = llm.invoke(
+                        [
+                            *pre_messages,
+                            *recent_history,
+                            response,
+                            SystemMessage(content=enforcement_prompt),
+                        ]
+                    )
+                    response = finalize_action_response(response, tool_name_set)
 
         meta = getattr(response, "response_metadata", {}) or {}
         usage = TokenUsage.from_response_metadata(meta)

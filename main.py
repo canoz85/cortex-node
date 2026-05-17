@@ -30,6 +30,12 @@ def parse_args():
         default="",
         help="Single prompt to run. If omitted, interactive mode starts.",
     )
+    parser.add_argument(
+        "--raw-llm",
+        action="store_true",
+        default=True,
+        help="Show raw LLM responses (debug view) in red/italic ANSI output.",
+    )
     return parser.parse_args()
 
 
@@ -48,7 +54,7 @@ def main():
     print(f"Knowledge: {args.knowledge_dir}")
 
     if args.prompt:
-        run_prompt(app, args.prompt)
+        run_prompt(app, args.prompt, show_raw_llm=args.raw_llm)
         return
 
     print("Interactive mode: type 'exit' to quit.")
@@ -66,6 +72,7 @@ def main():
             user_prompt,
             history=history,
             rolling_summary=rolling_summary,
+            show_raw_llm=args.raw_llm,
         )
 
 

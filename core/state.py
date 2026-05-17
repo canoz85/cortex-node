@@ -18,5 +18,6 @@ class AgentState(TypedDict, total=False):
     steps: int
     token_usage: TokenUsage
     plan: str
+    planner_plan_source: str
     planner_route: str
     rolling_summary: str

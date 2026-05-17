@@ -21,6 +21,14 @@ def _resolve_safe_path(workspace_root: Path, target: str) -> Path:
     return candidate
 
 
+def _append_cli_args(arg_list: list[str], raw_args: object) -> None:
+    if isinstance(raw_args, list):
+        arg_list.extend(str(item) for item in raw_args)
+        return
+    if isinstance(raw_args, str) and raw_args.strip():
+        arg_list.extend(shlex.split(raw_args, posix=False))
+
+
 def get_exec_tools(workspace_dir: str):
     workspace_root = _resolve_workspace(workspace_dir)
 
@@ -40,10 +48,18 @@ def get_exec_tools(workspace_dir: str):
                     message=f"Error: Python file does not exist: {path}",
                 ).to_tool_output()
 
-            arg_list = shlex.split(args, posix=False) if args else []
-            raw_extra_args = extra_kwargs.get("v__args")
-            if isinstance(raw_extra_args, list):
-                arg_list.extend(str(item) for item in raw_extra_args)
+            arg_list: list[str] = []
+            _append_cli_args(arg_list, args)
+
+            # Accept multiple argument shapes produced by different model/tool-calling patterns.
+            _append_cli_args(arg_list, extra_kwargs.get("v__args"))
+            _append_cli_args(arg_list, extra_kwargs.get("args"))
+
+            nested_extra = extra_kwargs.get("extra_kwargs")
+            if isinstance(nested_extra, dict):
+                _append_cli_args(arg_list, nested_extra.get("v__args"))
+                _append_cli_args(arg_list, nested_extra.get("args"))
+
             cmd = [sys.executable, str(script), *arg_list]
             result = subprocess.run(
                 cmd,
