@@ -2,6 +2,7 @@ from pathlib import Path
 
 from langchain_ollama import ChatOllama
 from langgraph.graph import StateGraph
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 
 from core.graph_constants import MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE
@@ -23,11 +24,13 @@ def build_app(
     knowledge_dir: str = "knowledge",
     embedding_model: str = "nomic-embed-text",
     rag_top_k: int = 4,
-):
+) -> CompiledStateGraph:
+    workspace_root = Path(workspace_dir).resolve()
+    workspace_root_str = str(workspace_root)
     knowledge_root = Path(knowledge_dir).resolve()
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         model=model,
-        workspace_dir=workspace_dir,
+        workspace_dir=workspace_root_str,
         knowledge_dir=str(knowledge_root),
         max_steps=MAX_REASONING_STEPS,
     )
@@ -39,12 +42,12 @@ def build_app(
     )
 
     tools = [
-        *get_file_tools(workspace_dir),
-        *get_exec_tools(workspace_dir),
-        *get_git_tools(workspace_dir),
-        *get_info_tools(model=model, workspace_dir=workspace_dir),
+        *get_file_tools(workspace_root_str),
+        *get_exec_tools(workspace_root_str),
+        *get_git_tools(workspace_root_str),
+        *get_info_tools(model=model, workspace_dir=workspace_root_str),
         *get_rag_tools(rag_service),
-        *get_scada_tools(workspace_dir),
+        *get_scada_tools(workspace_root_str),
     ]
     tool_name_set = {getattr(tool, "name", "") for tool in tools}
 
