@@ -43,7 +43,7 @@ pip install -r requirements.txt
 ### 3) Ensure Ollama model is available
 
 ```bash
-ollama pull qwen2.5:7b
+ollama pull qwen2.5-coder:14b
 ```
 
 ## Run
@@ -63,7 +63,7 @@ python main.py --prompt "Create hello.py in the workspace and run it"
 ### Custom model and workspace
 
 ```bash
-python main.py --model qwen2.5:7b --workspace workspace
+python main.py --model qwen2.5-coder:14b --workspace workspace
 ```
 
 ### Custom knowledge folder
@@ -76,8 +76,9 @@ python main.py --knowledge-dir knowledge
 
 - `--workspace`: Sandbox directory used by tools (default: `workspace`)
 - `--knowledge-dir`: Folder used as the RAG knowledge base (default: `knowledge`)
-- `--model`: Ollama model name (default: `qwen2.5:7b`)
+- `--model`: Ollama model name (default: `qwen2.5-coder:14b`)
 - `--embedding-model`: Ollama embedding model for retrieval (default: `nomic-embed-text`)
+- `--raw-llm` / `--no-raw-llm`: Enable or disable raw LLM debug output (default: disabled)
 - `--prompt`: Run one prompt and exit (if omitted, interactive mode starts)
 
 ## How It Works
@@ -88,7 +89,7 @@ python main.py --knowledge-dir knowledge
 4. The `brain` node executes the plan by generating tool calls.
 5. If tool calls are requested, execution routes through `ToolNode`.
 6. Tool outputs are normalized and fed back into state.
-7. Loop exits when no tool call remains or step limit is reached (max 12 steps per prompt, after planning).
+7. Loop exits when no tool call remains or step limit is reached (max 24 steps per prompt, after planning).
 8. File-generation turns can run a verification pass and automatically repair obvious CLI argument issues before finalizing.
 
 ### Planning Phase

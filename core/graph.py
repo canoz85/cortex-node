@@ -30,7 +30,7 @@ def _load_sap_system_prompt(project_root: Path) -> str | None:
 
 def build_app(
     workspace_dir: str = "workspace",
-    model: str = "qwen2.5:7b",
+    model: str = "qwen2.5-coder:14b",
     knowledge_dir: str = "knowledge",
     embedding_model: str = "nomic-embed-text",
     rag_top_k: int = 4,
