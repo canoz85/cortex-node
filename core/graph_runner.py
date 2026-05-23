@@ -2,7 +2,7 @@ import json
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from core.graph_constants import ANSI_GREEN, ANSI_ITALIC, ANSI_RED, ANSI_RESET, MAX_REASONING_STEPS
+from core.graph_constants import ANSI_BLUE, ANSI_GREEN, ANSI_ITALIC, ANSI_RED, ANSI_RESET, MAX_REASONING_STEPS
 from core.graph_messages import normalize_message_content
 from core.graph_response_formatters import format_tool_call_preview
 from core.models import ToolResult
@@ -46,6 +46,7 @@ def run_prompt(
     history: list | None = None,
     rolling_summary: str = "",
     show_raw_llm: bool = False,
+    show_summary: bool = False,
 ) -> tuple[list, str]:
     """Run a single prompt and return updated history with rolling summary."""
     prior_messages = history or []
@@ -115,18 +116,26 @@ def run_prompt(
 
     if latest_step_count >= MAX_REASONING_STEPS:
         print(
-            f"\n[system]\nMax reasoning steps reached ({MAX_REASONING_STEPS}). "
-            "Stopping to avoid unbounded loops."
+            f"\n{ANSI_BLUE}[system]{ANSI_RESET}\n"
+            f"{ANSI_BLUE}Max reasoning steps reached ({MAX_REASONING_STEPS}). "
+            f"Stopping to avoid unbounded loops.{ANSI_RESET}"
         )
 
     if saw_pseudo_stop:
         print(
-            "\n[system]\nThe model returned pseudo tool syntax, so the run was halted without executing those actions."
+            f"\n{ANSI_BLUE}[system]{ANSI_RESET}\n"
+            f"{ANSI_BLUE}The model returned pseudo tool syntax, so the run was halted without executing those actions.{ANSI_RESET}"
         )
 
     if saw_action_stop:
         print(
-            "\n[system]\nRun ended without a final executable tool call. See the last [brain] message for the stop reason."
+            f"\n{ANSI_BLUE}[system]{ANSI_RESET}\n"
+            f"{ANSI_BLUE}Run ended without a final executable tool call. "
+            f"See the last [brain] message for the stop reason.{ANSI_RESET}"
         )
+
+    if show_summary and latest_summary.strip():
+        print(f"\n{ANSI_BLUE}[summary]{ANSI_RESET}")
+        print(f"{ANSI_BLUE}{latest_summary.strip()}{ANSI_RESET}")
 
     return final_messages, latest_summary

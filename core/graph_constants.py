@@ -5,6 +5,7 @@ RECENT_MESSAGE_WINDOW = 12
 MAX_SUMMARY_CHARS = 1800
 ANSI_GREEN = "\033[32m"
 ANSI_RED = "\033[31m"
+ANSI_BLUE = "\033[34m"
 ANSI_ITALIC = "\033[3m"
 ANSI_RESET = "\033[0m"
 MAX_PSEUDO_RETRIES = 2
@@ -69,6 +70,10 @@ CODING_DISCUSSION_QUESTION_PATTERN = re.compile(
 )
 FILE_GENERATION_PATTERN = re.compile(
     r"\b(cli|command line|script|tool|file|module|program|utility|app|sensor|json file)\b",
+    re.IGNORECASE,
+)
+SAP_INTENT_PATTERN = re.compile(
+    r"\b(sap|abap|material master|material|mm|fi|purchase order|po|vendor|mara|marc|table|query|report|rmmg|mfbf|transaction|tcode)\b",
     re.IGNORECASE,
 )
 

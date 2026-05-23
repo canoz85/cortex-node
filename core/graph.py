@@ -15,7 +15,17 @@ from tools.file_ops import get_file_tools
 from tools.git_ops import get_git_tools
 from tools.info_ops import get_info_tools
 from tools.rag_ops import get_rag_tools
+from tools.sap_ops import get_sap_tools
 from tools.scada_ops import get_scada_tools
+
+
+def _load_sap_system_prompt(project_root: Path) -> str | None:
+    """Load SAP-specific system prompt from prompts folder if present."""
+    sap_prompt_path = project_root / "prompts" / "systemprompts_sap.md"
+    if not sap_prompt_path.exists():
+        return None
+    content = sap_prompt_path.read_text(encoding="utf-8").strip()
+    return content or None
 
 
 def build_app(
@@ -25,6 +35,7 @@ def build_app(
     embedding_model: str = "nomic-embed-text",
     rag_top_k: int = 4,
 ) -> CompiledStateGraph:
+    project_root = Path(__file__).resolve().parents[1]
     workspace_root = Path(workspace_dir).resolve()
     workspace_root_str = str(workspace_root)
     knowledge_root = Path(knowledge_dir).resolve()
@@ -40,13 +51,15 @@ def build_app(
         embed_model=embedding_model,
         top_k=rag_top_k,
     )
+    sap_system_prompt = _load_sap_system_prompt(project_root)
 
     tools = [
-        *get_file_tools(workspace_root_str),
+        *get_file_tools(workspace_root_str, knowledge_dir=str(knowledge_root)),
         *get_exec_tools(workspace_root_str),
         *get_git_tools(workspace_root_str),
         *get_info_tools(model=model, workspace_dir=workspace_root_str),
         *get_rag_tools(rag_service),
+        *get_sap_tools(workspace_root_str),
         *get_scada_tools(workspace_root_str),
     ]
     tool_name_set = {getattr(tool, "name", "") for tool in tools}
@@ -60,6 +73,7 @@ def build_app(
         rag_service=rag_service,
         rag_top_k=rag_top_k,
         system_prompt=system_prompt,
+        sap_system_prompt=sap_system_prompt,
         tool_name_set=tool_name_set,
     )
 

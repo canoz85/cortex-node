@@ -1,0 +1,133 @@
+{
+  "sap_query_examples": [
+    {
+      "name": "lookup_material_basic",
+      "description": "Look up basic material master data",
+      "intent": "What is the material master data for material 123456?",
+      "tools": ["lookup_material"],
+      "parameters": {
+        "material_id": "123456",
+        "include_plant_data": false
+      },
+      "expected_output": "Material basic info: description, unit of measure, material type"
+    },
+    {
+      "name": "lookup_material_with_plant",
+      "description": "Look up material with plant-specific data",
+      "intent": "Get material 123456 including plant stock data",
+      "tools": ["lookup_material"],
+      "parameters": {
+        "material_id": "123456",
+        "include_plant_data": true
+      },
+      "expected_output": "Material basic info + plant-specific storage locations and stock levels"
+    },
+    {
+      "name": "query_material_table",
+      "description": "Query MARA (Material Master) table",
+      "intent": "Query all materials with description containing 'Widget'",
+      "tools": ["query_abap_table"],
+      "parameters": {
+        "table_name": "MARA",
+        "fields": "MATNR,MAKTX,MEINS,MTART",
+        "where_clause": "MAKTX LIKE '%Widget%'",
+        "max_rows": 50
+      },
+      "expected_output": "List of materials matching the criteria"
+    },
+    {
+      "name": "query_plant_stock",
+      "description": "Query plant-specific material stock (MARC table)",
+      "intent": "Get stock levels for material 123456 in plant 1000",
+      "tools": ["query_abap_table"],
+      "parameters": {
+        "table_name": "MARC",
+        "fields": "MATNR,WERKS,LGORT,LABST,UMLMC",
+        "where_clause": "MATNR = '123456' AND WERKS = '1000'",
+        "max_rows": 10
+      },
+      "expected_output": "Stock data including storage location and unrestricted stock"
+    },
+    {
+      "name": "execute_material_report",
+      "description": "Execute material master report RMMG100",
+      "intent": "Run RMMG100 report for material 123456",
+      "tools": ["execute_abap_report"],
+      "parameters": {
+        "report_name": "RMMG100",
+        "parameters": {
+          "P_MATNR": "123456"
+        }
+      },
+      "expected_output": "Report execution result with material data"
+    },
+    {
+      "name": "export_report_data",
+      "description": "Export report data to JSON format",
+      "intent": "Export RMMG100 report data as JSON for material 123456",
+      "tools": ["get_report_data"],
+      "parameters": {
+        "report_name": "RMMG100",
+        "output_format": "json",
+        "parameters": {
+          "P_MATNR": "123456"
+        }
+      },
+      "expected_output": "Report data in JSON format ready for further processing"
+    }
+  ],
+  "common_sap_tables": [
+    {
+      "table": "MARA",
+      "description": "Material Master (General Data)",
+      "common_fields": ["MATNR", "MAKTX", "MEINS", "MTART", "ERSDA", "ERNAM"]
+    },
+    {
+      "table": "MARC",
+      "description": "Material Master Plant Data",
+      "common_fields": ["MATNR", "WERKS", "LGORT", "LABST", "UMLMC", "UMLTB"]
+    },
+    {
+      "table": "MAKT",
+      "description": "Material Descriptions (by Language)",
+      "common_fields": ["MATNR", "SPRAS", "MAKTX"]
+    },
+    {
+      "table": "EKPO",
+      "description": "Purchase Order Item",
+      "common_fields": ["EBELN", "EBELP", "MATNR", "MENGE", "MEINS", "NETPR"]
+    },
+    {
+      "table": "VBAK",
+      "description": "Sales Order Header",
+      "common_fields": ["VBELN", "ERDAT", "KUNNR", "NETWR", "WAERK"]
+    },
+    {
+      "table": "LFA1",
+      "description": "Vendor Master (General Data)",
+      "common_fields": ["LIFNR", "NAME1", "ORT01", "LAND1", "KUNNR"]
+    },
+    {
+      "table": "KNA1",
+      "description": "Customer Master (General Data)",
+      "common_fields": ["KUNNR", "NAME1", "ORT01", "LAND1", "KUGAR"]
+    }
+  ],
+  "common_reports": [
+    {
+      "report": "RMMG100",
+      "description": "Material Master Display",
+      "typical_parameters": ["P_MATNR", "P_WERKS"]
+    },
+    {
+      "report": "MFBF",
+      "description": "Material Forecast Backflush",
+      "typical_parameters": ["P_WERKS", "P_MATNR"]
+    },
+    {
+      "report": "RM06BOM",
+      "description": "Display Bill of Material",
+      "typical_parameters": ["P_MATNR", "P_WERKS", "P_STLAN"]
+    }
+  ]
+}

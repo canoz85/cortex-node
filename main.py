@@ -3,38 +3,50 @@ import argparse
 from core.graph import build_app, run_prompt
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="CortexNode local-first AI software agent")
-    parser.add_argument(
+
+    runtime_group = parser.add_argument_group("runtime")
+    runtime_group.add_argument(
         "--workspace",
         default="workspace",
         help="Sandbox directory used by file and execution tools",
     )
-    parser.add_argument(
+    runtime_group.add_argument(
         "--knowledge-dir",
         default="knowledge",
         help="Folder containing .md and .json knowledge sources for RAG",
     )
-    parser.add_argument(
+    runtime_group.add_argument(
         "--model",
         default="qwen2.5-coder:14b",
         help="Ollama model name",
     )
-    parser.add_argument(
+    runtime_group.add_argument(
         "--embedding-model",
         default="nomic-embed-text",
         help="Ollama embedding model used for knowledge retrieval",
     )
-    parser.add_argument(
+
+    input_group = parser.add_argument_group("input")
+    input_group.add_argument(
         "--prompt",
         default="",
         help="Single prompt to run. If omitted, interactive mode starts.",
     )
-    parser.add_argument(
+
+    output_group = parser.add_argument_group("output")
+    output_group.add_argument(
         "--raw-llm",
         action="store_true",
         default=True,
         help="Show raw LLM responses (debug view) in red/italic ANSI output.",
+    )
+    output_group.add_argument(
+        "--show-summary",
+        action="store_true",
+        default=False,
+        help="Show rolling summary output in blue after each run.",
     )
     return parser.parse_args()
 
@@ -54,7 +66,7 @@ def main():
     print(f"Knowledge: {args.knowledge_dir}")
 
     if args.prompt:
-        run_prompt(app, args.prompt, show_raw_llm=args.raw_llm)
+        run_prompt(app, args.prompt, show_raw_llm=args.raw_llm, show_summary=args.show_summary)
         return
 
     print("Interactive mode: type 'exit' to quit.")
@@ -73,6 +85,7 @@ def main():
             history=history,
             rolling_summary=rolling_summary,
             show_raw_llm=args.raw_llm,
+            show_summary=args.show_summary,
         )
 
 

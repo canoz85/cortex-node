@@ -27,8 +27,9 @@ def _resolve_safe_path(workspace_root: Path, target: str) -> Path:
     return candidate
 
 
-def get_file_tools(workspace_dir: str):
+def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
     workspace_root = _resolve_workspace(workspace_dir)
+    knowledge_root = Path(knowledge_dir).resolve() if knowledge_dir else None
 
     @tool
     def list_files(path: str = ".") -> str:
@@ -165,4 +166,48 @@ def get_file_tools(workspace_dir: str):
             )
             return result.to_tool_output()
 
-    return [list_files, read_file, write_file, make_directory]
+    tools = [list_files, read_file, write_file, make_directory]
+
+    if knowledge_root is not None:
+        kr = knowledge_root
+
+        @tool
+        def read_knowledge_file(path: str) -> str:
+            """Read a file from the knowledge folder (read-only). Use this to access knowledge base documents, examples, and rules."""
+            try:
+                request = ReadFileRequest(path=path)
+                candidate = (kr / request.path).resolve()
+                if candidate != kr and kr not in candidate.parents:
+                    result = ReadFileResult(
+                        success=False,
+                        message=f"Error: path '{request.path}' is outside the knowledge folder",
+                        path=request.path,
+                    )
+                    return result.to_tool_output()
+                if not candidate.exists() or not candidate.is_file():
+                    result = ReadFileResult(
+                        success=False,
+                        message=f"Error: file does not exist: {request.path}",
+                        path=request.path,
+                    )
+                    return result.to_tool_output()
+                content = candidate.read_text(encoding="utf-8")
+                result = ReadFileResult(
+                    success=True,
+                    message=f"Read knowledge file: {request.path}",
+                    path=request.path,
+                    content=content,
+                )
+                return result.to_tool_output()
+            except Exception as exc:
+                safe_path = path if isinstance(path, str) and path else ""
+                result = ReadFileResult(
+                    success=False,
+                    message=f"Error reading knowledge file: {exc}",
+                    path=safe_path,
+                )
+                return result.to_tool_output()
+
+        tools.append(read_knowledge_file)
+
+    return tools

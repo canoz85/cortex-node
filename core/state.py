@@ -20,4 +20,7 @@ class AgentState(TypedDict, total=False):
     plan: str
     planner_plan_source: str
     planner_route: str
+    planner_domain: str
+    planner_confidence: float
+    planner_domain_enforced: bool
     rolling_summary: str

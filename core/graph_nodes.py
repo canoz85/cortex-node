@@ -19,7 +19,7 @@ from core.graph_filegen_policy import (
     response_has_unchanged_write,
     should_finalize_action_turn,
 )
-from core.graph_intents import is_file_generation_request, planner_route, preferred_info_tool, requires_action
+from core.graph_intents import is_file_generation_request, planner_routing_decision, preferred_info_tool, requires_action
 from core.graph_messages import is_effectively_empty_response, latest_user_message, normalize_message_content, recent_messages
 from core.graph_pseudo_tools import finalize_action_response, is_pseudo_tool_response, looks_like_pseudo_tool_text, recover_pseudo_tool_response
 from core.graph_response_formatters import format_action_completion_response, format_info_tool_response
@@ -86,6 +86,26 @@ def _direct_discussion_response(
     return _finalize_llm_text(response, content)
 
 
+def _detect_missing_dependency(tool_output_raw: str) -> str | None:
+    """Extract package name from ModuleNotFoundError or ImportError in stderr. Returns package name or None."""
+    if not tool_output_raw:
+        return None
+    stderr = last_tool_stderr(tool_output_raw)
+    if not stderr:
+        return None
+    stderr_lower = stderr.lower()
+    if "modulenotfounderror" in stderr_lower or "importerror" in stderr_lower:
+        # Try to extract the module name from error message
+        # e.g., "No module named 'Crypto'" -> "Crypto"
+        if "no module named" in stderr_lower:
+            start = stderr.find("'") + 1
+            end = stderr.find("'", start)
+            if start > 0 and end > start:
+                return stderr[start:end]
+        return "unknown_module"
+    return None
+
+
 def _planner_execution_brief(route: str, plan_source: str, plan_text: str) -> str:
     """Return a concise planner brief for the brain LLM on action routes."""
     normalized_plan = str(plan_text or "").strip()
@@ -112,6 +132,7 @@ def create_graph_nodes(
     rag_service: WorkspaceRAG,
     rag_top_k: int,
     system_prompt: str,
+    sap_system_prompt: str | None,
     tool_name_set: set[str],
 ):
     def planner_node(state: AgentState):
@@ -126,12 +147,18 @@ def create_graph_nodes(
         )
 
         latest_user_prompt = latest_user_message(history)
-        route = planner_route(latest_user_prompt)
+        routing = planner_routing_decision(latest_user_prompt)
+        route = routing.route
         preferred_tool = preferred_info_tool(latest_user_prompt)
         plan_source = "synthetic"
 
         if route == "info":
             plan_text = f"Info query detected: call {preferred_tool} tool and report the result."
+        elif route == "clarify_domain":
+            plan_text = (
+                "Ambiguous domain detected: ask the user to choose SAP or Python before taking actions. "
+                "Do not call tools until clarified."
+            )
         elif route == "casual":
             plan_text = (
                 "Casual conversation detected: respond directly without tools. "
@@ -170,6 +197,9 @@ Be concise. Format as a numbered list."""
             "plan": plan_text,
             "planner_plan_source": plan_source,
             "planner_route": route,
+            "planner_domain": routing.domain,
+            "planner_confidence": routing.confidence,
+            "planner_domain_enforced": routing.enforced,
             "rolling_summary": updated_summary,
             "steps": 0,
             "last_tool_success": True,
@@ -182,11 +212,16 @@ Be concise. Format as a numbered list."""
         recent_history = recent_messages(history, RECENT_MESSAGE_WINDOW)
         rolling_summary = state.get("rolling_summary", "")
         route = str(state.get("planner_route", ""))
+        planner_domain = str(state.get("planner_domain", "general") or "general")
+        planner_confidence = float(state.get("planner_confidence", 0.0) or 0.0)
+        planner_domain_enforced = bool(state.get("planner_domain_enforced", False))
         planner_plan = str(state.get("plan", "") or "")
         planner_plan_source = str(state.get("planner_plan_source", "") or "")
         latest_user_prompt = latest_user_message(history)
         action_required = requires_action(latest_user_prompt)
         preferred_tool = preferred_info_tool(latest_user_prompt)
+        use_sap_prompt = route == "action:sap" or planner_domain == "sap"
+        active_system_prompt = sap_system_prompt if use_sap_prompt and sap_system_prompt else system_prompt
         file_generation_requested = route == "action:file_generation" or is_file_generation_request(latest_user_prompt)
         successful_tool_result_in_turn = current_turn_has_successful_tool_result(history)
         current_filegen_issue = (
@@ -197,10 +232,28 @@ Be concise. Format as a numbered list."""
         action_completion_summary = format_action_completion_response(history)
         retrieval_messages = retrieval_message(rag_service, latest_user_message(history), rag_top_k)
 
+        if route == "clarify_domain":
+            response = AIMessage(
+                content=(
+                    "Your request could map to both SAP and Python workflows. "
+                    "Please choose one so I can execute correctly: `SAP` or `Python`. "
+                    "Tip: you can force routing with `[domain:sap]` or `[domain:python]` in your prompt."
+                )
+            )
+            meta = getattr(response, "response_metadata", {}) or {}
+            usage = TokenUsage.from_response_metadata(meta)
+            update_token_usage(usage.model_dump())
+            return {
+                "messages": [response],
+                "steps": state.get("steps", 0) + 1,
+                "token_usage": usage,
+                "tool_text_retry_used": False,
+            }
+
         if route in {"casual", "coding_discussion", "conversation"} and not preferred_tool:
             response = _direct_discussion_response(
                 planner_llm=planner_llm,
-                system_prompt=system_prompt,
+                system_prompt=active_system_prompt,
                 retrieval_messages=retrieval_messages,
                 rolling_summary=rolling_summary,
                 recent_history=recent_history,
@@ -303,7 +356,7 @@ Be concise. Format as a numbered list."""
             response = AIMessage(content=formatted_response)
         else:
             pre_messages = [
-                SystemMessage(content=system_prompt),
+                SystemMessage(content=active_system_prompt),
                 *retrieval_messages,
                 *rolling_summary_message(rolling_summary),
             ]
@@ -314,6 +367,35 @@ Be concise. Format as a numbered list."""
                 planner_brief = _planner_execution_brief(route, planner_plan_source, planner_plan)
                 if planner_brief:
                     pre_messages.append(SystemMessage(content=planner_brief))
+            if route == "action:sap" or planner_domain == "sap":
+                sap_enforcement_suffix = (
+                    "This domain is explicitly enforced by the user."
+                    if planner_domain_enforced
+                    else f"Planner confidence for SAP domain: {planner_confidence:.2f}."
+                )
+                pre_messages.append(
+                    SystemMessage(
+                        content=(
+                            "SAP domain execution rules: Prefer SAP tools first "
+                            "(`query_abap_table`, `execute_abap_report`, `lookup_material`, `get_report_data`). "
+                            "Do not use Python file-generation or runtime tools unless the user explicitly requests Python code generation. "
+                            f"{sap_enforcement_suffix}"
+                        )
+                    )
+                )
+                pre_messages.append(
+                    SystemMessage(
+                        content=(
+                            "SAP ABAP correctness checklist before finalizing any code: "
+                            "(1) Do not use SELECT *. Select only required fields. "
+                            "(2) For PO vendor filtering, use EKKO-LIFNR via join EKPO<->EKKO on EBELN; do not use EKPO-LIFNR. "
+                            "(3) Use modern Open SQL host variables with @ for select-options and constants. "
+                            "(4) Avoid obsolete ABAP patterns such as OCCURS/header lines/implicit work areas. "
+                            "(5) For open PO logic, enforce MENGE > WEMNG, LOEKZ = space, ELIKZ = space, and compute remaining quantity in SQL when possible. "
+                            "If any checklist item is not satisfied, correct the solution before responding."
+                        )
+                    )
+                )
             if preferred_tool:
                 pre_messages.append(
                     SystemMessage(
@@ -350,6 +432,27 @@ Be concise. Format as a numbered list."""
                         )
                     )
                 )
+            # Check for missing dependencies (ModuleNotFoundError, ImportError)
+            missing_module = _detect_missing_dependency(state.get("last_tool_output", ""))
+            if missing_module:
+                response = AIMessage(
+                    content=(
+                        f"The code failed with a missing dependency: '{missing_module}'. "
+                        f"Please install it using:\n\n"
+                        f"pip install {missing_module}\n\n"
+                        f"After installation, you can retry the code execution."
+                    )
+                )
+                meta = getattr(response, "response_metadata", {}) or {}
+                usage = TokenUsage.from_response_metadata(meta)
+                update_token_usage(usage.model_dump())
+                return {
+                    "messages": [response],
+                    "steps": state.get("steps", 0) + 1,
+                    "token_usage": usage,
+                    "tool_text_retry_used": False,
+                }
+
             if file_generation_requested and state.get("last_tool_success") is False and last_tool_missing_required_args(state.get("last_tool_output", "")):
                 pre_messages.append(
                     SystemMessage(
