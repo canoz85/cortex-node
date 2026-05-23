@@ -1,13 +1,18 @@
 import json
+import uuid
 
 from langchain_core.messages import AIMessage, HumanMessage
 
 from core.graph_constants import ANSI_BLUE, ANSI_GREEN, ANSI_ITALIC, ANSI_RED, ANSI_RESET, MAX_REASONING_STEPS
+from core.logging_utils import get_logger
 from core.graph_messages import normalize_message_content
 from core.graph_response_formatters import format_tool_call_preview
 from core.models import ToolResult
 from core.state import AgentState
 from core.tool_output import parse_tool_result
+
+
+logger = get_logger(__name__)
 
 
 def _print_raw_llm_response(raw_text: str) -> None:
@@ -50,6 +55,17 @@ def run_prompt(
 ) -> tuple[list, str]:
     """Run a single prompt and return updated history with rolling summary."""
     prior_messages = history or []
+    run_id = uuid.uuid4().hex[:12]
+    logger.info(
+        "Prompt received",
+        extra={
+            "event_name": "prompt_received",
+            "run_id": run_id,
+            "prompt_chars": len(prompt or ""),
+            "history_messages": len(prior_messages),
+        },
+    )
+
     initial_state: AgentState = {
         "messages": [*prior_messages, HumanMessage(content=prompt)],
         "steps": 0,
@@ -62,6 +78,7 @@ def run_prompt(
         "last_tool_success": True,
         "repeat_fail_count": 0,
         "tool_text_retry_used": False,
+        "run_id": run_id,
     }
 
     final_messages = list(initial_state["messages"])
@@ -88,6 +105,16 @@ def run_prompt(
                     if show_raw_llm and plan_source == "llm":
                         _print_raw_llm_response(str(value.get("plan")))
 
+                logger.info(
+                    "Graph node update",
+                    extra={
+                        "event_name": "graph_node_update",
+                        "run_id": run_id,
+                        "node": node_name,
+                        "steps": latest_step_count,
+                    },
+                )
+
             messages = value.get("messages") if isinstance(value, dict) else None
             if not messages:
                 continue
@@ -99,6 +126,17 @@ def run_prompt(
                 _print_raw_llm_response(_raw_ai_message_payload(message))
             if getattr(message, "tool_calls", None):
                 print(format_tool_call_preview(message))
+                tool_calls = getattr(message, "tool_calls", None) or []
+                for call in tool_calls:
+                    logger.info(
+                        "Tool call proposed",
+                        extra={
+                            "event_name": "tool_call_proposed",
+                            "run_id": run_id,
+                            "node": node_name,
+                            "tool_name": call.get("name"),
+                        },
+                    )
             else:
                 raw_content = normalize_message_content(message)
                 if "pseudo tool-call text" in raw_content:
@@ -109,6 +147,16 @@ def run_prompt(
                 parsed = parse_tool_result(raw_content)
                 if parsed is not None:
                     print(parsed.to_pretty_text())
+                    logger.info(
+                        "Tool result captured",
+                        extra={
+                            "event_name": "tool_result",
+                            "run_id": run_id,
+                            "node": node_name,
+                            "success": parsed.success,
+                            "message": parsed.message,
+                        },
+                    )
                 elif summary:
                     print(summary)
                 else:
@@ -137,5 +185,17 @@ def run_prompt(
     if show_summary and latest_summary.strip():
         print(f"\n{ANSI_BLUE}[summary]{ANSI_RESET}")
         print(f"{ANSI_BLUE}{latest_summary.strip()}{ANSI_RESET}")
+
+    logger.info(
+        "Prompt completed",
+        extra={
+            "event_name": "prompt_completed",
+            "run_id": run_id,
+            "steps": latest_step_count,
+            "max_steps_reached": latest_step_count >= MAX_REASONING_STEPS,
+            "stopped_on_pseudo_call": saw_pseudo_stop,
+            "stopped_on_action_stop": saw_action_stop,
+        },
+    )
 
     return final_messages, latest_summary

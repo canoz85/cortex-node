@@ -24,3 +24,4 @@ class AgentState(TypedDict, total=False):
     planner_confidence: float
     planner_domain_enforced: bool
     rolling_summary: str
+    run_id: str

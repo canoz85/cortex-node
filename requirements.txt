@@ -4,3 +4,4 @@ langchain-core>=0.3.0
 pydantic>=2.7.0
 typing-extensions>=4.12.0
 python-dotenv>=1.0.1
+pytest>=8.0.0

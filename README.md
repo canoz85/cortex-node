@@ -72,14 +72,63 @@ python main.py --model qwen2.5-coder:14b --workspace workspace
 python main.py --knowledge-dir knowledge
 ```
 
+### Optional config file (JSON)
+
+```bash
+python main.py --config config.json
+```
+
+Config merge order is: `defaults -> environment -> config file -> CLI`.
+
+Example `config.json`:
+
+```json
+{
+    "workspace": "workspace",
+    "knowledge_dir": "knowledge",
+    "model": "qwen2.5-coder:14b",
+    "embedding_model": "nomic-embed-text",
+    "rag_top_k": 4,
+    "raw_llm": false,
+    "show_summary": false,
+    "log_level": "INFO",
+    "json_logs": false
+}
+```
+
 ## CLI Arguments
 
 - `--workspace`: Sandbox directory used by tools (default: `workspace`)
 - `--knowledge-dir`: Folder used as the RAG knowledge base (default: `knowledge`)
 - `--model`: Ollama model name (default: `qwen2.5-coder:14b`)
 - `--embedding-model`: Ollama embedding model for retrieval (default: `nomic-embed-text`)
+- `--rag-top-k`: Number of retrieved knowledge chunks per query (default: `4`)
 - `--raw-llm` / `--no-raw-llm`: Enable or disable raw LLM debug output (default: disabled)
+- `--show-summary` / `--no-show-summary`: Enable or disable rolling summary output
+- `--log-level`: Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
+- `--json-logs` / `--no-json-logs`: Enable or disable JSON log output
+- `--config`: Optional JSON config file
 - `--prompt`: Run one prompt and exit (if omitted, interactive mode starts)
+
+### Environment variables
+
+- `CORTEX_WORKSPACE`
+- `CORTEX_KNOWLEDGE_DIR`
+- `CORTEX_MODEL`
+- `CORTEX_EMBEDDING_MODEL`
+- `CORTEX_RAG_TOP_K`
+- `CORTEX_RAW_LLM`
+- `CORTEX_SHOW_SUMMARY`
+- `CORTEX_LOG_LEVEL`
+- `CORTEX_JSON_LOGS`
+
+## Tests
+
+Run unit tests:
+
+```bash
+python -m pytest
+```
 
 ## How It Works
 

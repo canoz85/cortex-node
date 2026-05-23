@@ -1,9 +1,9 @@
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_ollama import ChatOllama
-from langgraph.graph import END
 
-from core.graph_constants import MAX_PSEUDO_RETRIES, MAX_REASONING_STEPS, RECENT_MESSAGE_WINDOW
-from core.graph_context import retrieval_message, rolling_summary_message, update_rolling_summary
+from core.graph_capture import create_capture_tool_output_node
+from core.graph_constants import MAX_PSEUDO_RETRIES, RECENT_MESSAGE_WINDOW
+from core.graph_context import retrieval_message, rolling_summary_message
 from core.graph_filegen_policy import (
     file_generation_quality_issue,
     file_generation_verification_failures,
@@ -19,110 +19,25 @@ from core.graph_filegen_policy import (
     response_has_unchanged_write,
     should_finalize_action_turn,
 )
-from core.graph_intents import is_file_generation_request, planner_routing_decision, preferred_info_tool, requires_action
+from core.graph_intents import is_file_generation_request, preferred_info_tool, requires_action
 from core.graph_messages import is_effectively_empty_response, latest_user_message, normalize_message_content, recent_messages
+from core.graph_node_helpers import (
+    detect_missing_dependency,
+    direct_discussion_response,
+    planner_execution_brief,
+    response_with_usage,
+)
+from core.graph_planner import create_planner_node
 from core.graph_pseudo_tools import finalize_action_response, is_pseudo_tool_response, looks_like_pseudo_tool_text, recover_pseudo_tool_response
 from core.graph_response_formatters import format_action_completion_response, format_info_tool_response
+from core.graph_routing import route_after_brain
 from core.graph_tool_events import (
     current_turn_has_successful_tool_result,
-    extract_tool_signature,
     info_tool_already_called,
     message_repeats_signature,
 )
-from core.models import TokenUsage
 from core.rag import WorkspaceRAG
 from core.state import AgentState
-from core.tool_output import parse_tool_result, unwrap_tool_output
-from tools.info_ops import update_token_usage
-
-
-def _direct_discussion_response(
-    planner_llm: ChatOllama,
-    system_prompt: str,
-    retrieval_messages: list[SystemMessage],
-    rolling_summary: str,
-    recent_history: list,
-) -> AIMessage:
-    def _finalize_llm_text(source: AIMessage, content: str) -> AIMessage:
-        metadata = getattr(source, "response_metadata", None)
-        if isinstance(metadata, dict) and metadata:
-            return AIMessage(content=content, response_metadata=metadata)
-        return AIMessage(content=content)
-
-    messages = [
-        SystemMessage(content=system_prompt),
-        *retrieval_messages,
-        *rolling_summary_message(rolling_summary),
-        *recent_history,
-        SystemMessage(
-            content=(
-                "This turn is discussion-only. Answer directly in concise prose. "
-                "Do not call tools, do not propose tool syntax, and do not create or modify files."
-            )
-        ),
-    ]
-    response = planner_llm.invoke(messages)
-    content = normalize_message_content(response).strip()
-    if getattr(response, "tool_calls", None) or looks_like_pseudo_tool_text(content) or not content:
-        fallback = planner_llm.invoke(
-            [
-                *messages,
-                SystemMessage(
-                    content=(
-                        "Your previous reply was not a direct discussion answer. "
-                        "Reply with plain prose only, no code blocks and no tool-like syntax."
-                    )
-                ),
-            ]
-        )
-        fallback_content = normalize_message_content(fallback).strip()
-        if fallback_content and not looks_like_pseudo_tool_text(fallback_content):
-            return _finalize_llm_text(fallback, fallback_content)
-        return AIMessage(
-            content=(
-                "Describe the error message, the JSON input, and the code path that fails, and I will help isolate the parsing bug directly."
-            )
-        )
-    return _finalize_llm_text(response, content)
-
-
-def _detect_missing_dependency(tool_output_raw: str) -> str | None:
-    """Extract package name from ModuleNotFoundError or ImportError in stderr. Returns package name or None."""
-    if not tool_output_raw:
-        return None
-    stderr = last_tool_stderr(tool_output_raw)
-    if not stderr:
-        return None
-    stderr_lower = stderr.lower()
-    if "modulenotfounderror" in stderr_lower or "importerror" in stderr_lower:
-        # Try to extract the module name from error message
-        # e.g., "No module named 'Crypto'" -> "Crypto"
-        if "no module named" in stderr_lower:
-            start = stderr.find("'") + 1
-            end = stderr.find("'", start)
-            if start > 0 and end > start:
-                return stderr[start:end]
-        return "unknown_module"
-    return None
-
-
-def _planner_execution_brief(route: str, plan_source: str, plan_text: str) -> str:
-    """Return a concise planner brief for the brain LLM on action routes."""
-    normalized_plan = str(plan_text or "").strip()
-    if not normalized_plan:
-        return ""
-
-    if len(normalized_plan) > 1500:
-        normalized_plan = f"{normalized_plan[:1500]}..."
-
-    normalized_source = str(plan_source or "").strip() or "unknown"
-    return (
-        "Planner execution brief below. Use it as guidance, but produce executable next steps now.\n"
-        f"Route: {route}\n"
-        f"Plan source: {normalized_source}\n"
-        "Plan:\n"
-        f"{normalized_plan}"
-    )
 
 
 def create_graph_nodes(
@@ -135,77 +50,12 @@ def create_graph_nodes(
     sap_system_prompt: str | None,
     tool_name_set: set[str],
 ):
-    def planner_node(state: AgentState):
-        """First pass: analyze prompt and create a plan WITHOUT taking actions."""
-        history = state.get("messages", [])
-        recent_history = recent_messages(history, RECENT_MESSAGE_WINDOW)
-        previous_summary = state.get("rolling_summary", "")
-        updated_summary = update_rolling_summary(
-            planner_llm=planner_llm,
-            existing_summary=previous_summary,
-            recent_history=recent_history,
-        )
-
-        latest_user_prompt = latest_user_message(history)
-        routing = planner_routing_decision(latest_user_prompt)
-        route = routing.route
-        preferred_tool = preferred_info_tool(latest_user_prompt)
-        plan_source = "synthetic"
-
-        if route == "info":
-            plan_text = f"Info query detected: call {preferred_tool} tool and report the result."
-        elif route == "clarify_domain":
-            plan_text = (
-                "Ambiguous domain detected: ask the user to choose SAP or Python before taking actions. "
-                "Do not call tools until clarified."
-            )
-        elif route == "casual":
-            plan_text = (
-                "Casual conversation detected: respond directly without tools. "
-                "Use conversation context for personal facts already shared and keep the reply brief."
-            )
-        elif route == "coding_discussion":
-            plan_text = (
-                "Coding discussion detected: answer directly unless a targeted tool becomes necessary. "
-                "Use conversation context, retrieved knowledge, and keep the reply concise."
-            )
-        elif route == "conversation":
-            plan_text = "Conversation detected: respond directly and briefly without tools unless the user asks for concrete action."
-        else:
-            retrieval_messages = retrieval_message(rag_service, latest_user_prompt, rag_top_k)
-            summary_message = rolling_summary_message(updated_summary)
-
-            planning_system = """You are a strategic planner. Analyze the user's request and create a clear step-by-step plan.
-DO NOT take any actions yet. Just output:
-1. What needs to be done (list of 2-4 key tasks)
-2. File/tool sequence required
-3. Expected outcome
-
-Be concise. Format as a numbered list."""
-
-            pre_messages = [
-                SystemMessage(content=planning_system),
-                *retrieval_messages,
-                *summary_message,
-            ]
-
-            plan_response = planner_llm.invoke([*pre_messages, *recent_history])
-            plan_text = str(plan_response.content)
-            plan_source = "llm"
-
-        return {
-            "plan": plan_text,
-            "planner_plan_source": plan_source,
-            "planner_route": route,
-            "planner_domain": routing.domain,
-            "planner_confidence": routing.confidence,
-            "planner_domain_enforced": routing.enforced,
-            "rolling_summary": updated_summary,
-            "steps": 0,
-            "last_tool_success": True,
-            "repeat_fail_count": 0,
-            "tool_text_retry_used": False,
-        }
+    planner_node = create_planner_node(
+        planner_llm=planner_llm,
+        rag_service=rag_service,
+        rag_top_k=rag_top_k,
+    )
+    capture_tool_output_node = create_capture_tool_output_node()
 
     def brain_node(state: AgentState):
         history = state.get("messages", [])
@@ -240,33 +90,17 @@ Be concise. Format as a numbered list."""
                     "Tip: you can force routing with `[domain:sap]` or `[domain:python]` in your prompt."
                 )
             )
-            meta = getattr(response, "response_metadata", {}) or {}
-            usage = TokenUsage.from_response_metadata(meta)
-            update_token_usage(usage.model_dump())
-            return {
-                "messages": [response],
-                "steps": state.get("steps", 0) + 1,
-                "token_usage": usage,
-                "tool_text_retry_used": False,
-            }
+            return response_with_usage(state, response)
 
         if route in {"casual", "coding_discussion", "conversation"} and not preferred_tool:
-            response = _direct_discussion_response(
+            response = direct_discussion_response(
                 planner_llm=planner_llm,
                 system_prompt=active_system_prompt,
                 retrieval_messages=retrieval_messages,
                 rolling_summary=rolling_summary,
                 recent_history=recent_history,
             )
-            meta = getattr(response, "response_metadata", {}) or {}
-            usage = TokenUsage.from_response_metadata(meta)
-            update_token_usage(usage.model_dump())
-            return {
-                "messages": [response],
-                "steps": state.get("steps", 0) + 1,
-                "token_usage": usage,
-                "tool_text_retry_used": False,
-            }
+            return response_with_usage(state, response)
 
         if file_generation_requested:
             failed_verifications, latest_verification_error = file_generation_verification_failures(history)
@@ -282,54 +116,22 @@ Be concise. Format as a numbered list."""
                         "I prevented further read/write/run looping. Please retry and I will apply a different repair strategy immediately."
                     )
                 )
-                meta = getattr(response, "response_metadata", {}) or {}
-                usage = TokenUsage.from_response_metadata(meta)
-                update_token_usage(usage.model_dump())
-                return {
-                    "messages": [response],
-                    "steps": state.get("steps", 0) + 1,
-                    "token_usage": usage,
-                    "tool_text_retry_used": False,
-                }
+                return response_with_usage(state, response)
 
             args_scope_fix_call = next_args_scope_autofix_call(history)
             if args_scope_fix_call is not None:
                 response = AIMessage(content="Applying deterministic args-scope repair before re-verification.", tool_calls=[args_scope_fix_call])
-                meta = getattr(response, "response_metadata", {}) or {}
-                usage = TokenUsage.from_response_metadata(meta)
-                update_token_usage(usage.model_dump())
-                return {
-                    "messages": [response],
-                    "steps": state.get("steps", 0) + 1,
-                    "token_usage": usage,
-                    "tool_text_retry_used": False,
-                }
+                return response_with_usage(state, response)
 
             repair_tool_call = next_file_generation_repair_call(state)
             if repair_tool_call is not None:
                 response = AIMessage(content="Inspecting the generated Python file before another verification attempt.", tool_calls=[repair_tool_call])
-                meta = getattr(response, "response_metadata", {}) or {}
-                usage = TokenUsage.from_response_metadata(meta)
-                update_token_usage(usage.model_dump())
-                return {
-                    "messages": [response],
-                    "steps": state.get("steps", 0) + 1,
-                    "token_usage": usage,
-                    "tool_text_retry_used": False,
-                }
+                return response_with_usage(state, response)
 
             verification_tool_call = next_file_generation_verification_call(history)
             if verification_tool_call is not None:
                 response = AIMessage(content="Proceeding to verify the generated Python file.", tool_calls=[verification_tool_call])
-                meta = getattr(response, "response_metadata", {}) or {}
-                usage = TokenUsage.from_response_metadata(meta)
-                update_token_usage(usage.model_dump())
-                return {
-                    "messages": [response],
-                    "steps": state.get("steps", 0) + 1,
-                    "token_usage": usage,
-                    "tool_text_retry_used": False,
-                }
+                return response_with_usage(state, response)
 
         if (
             action_required
@@ -338,15 +140,7 @@ Be concise. Format as a numbered list."""
             and not (file_generation_requested and current_filegen_issue)
         ):
             response = AIMessage(content=action_completion_summary)
-            meta = getattr(response, "response_metadata", {}) or {}
-            usage = TokenUsage.from_response_metadata(meta)
-            update_token_usage(usage.model_dump())
-            return {
-                "messages": [response],
-                "steps": state.get("steps", 0) + 1,
-                "token_usage": usage,
-                "tool_text_retry_used": False,
-            }
+            return response_with_usage(state, response)
 
         info_tool_called = preferred_tool and info_tool_already_called(history, preferred_tool)
 
@@ -364,7 +158,7 @@ Be concise. Format as a numbered list."""
             response_llm = planner_llm if route in {"casual", "coding_discussion", "conversation"} else llm
             allow_tool_recovery = route not in {"casual", "coding_discussion", "conversation"}
             if route.startswith("action") and not preferred_tool:
-                planner_brief = _planner_execution_brief(route, planner_plan_source, planner_plan)
+                planner_brief = planner_execution_brief(route, planner_plan_source, planner_plan)
                 if planner_brief:
                     pre_messages.append(SystemMessage(content=planner_brief))
             if route == "action:sap" or planner_domain == "sap":
@@ -433,7 +227,7 @@ Be concise. Format as a numbered list."""
                     )
                 )
             # Check for missing dependencies (ModuleNotFoundError, ImportError)
-            missing_module = _detect_missing_dependency(state.get("last_tool_output", ""))
+            missing_module = detect_missing_dependency(state.get("last_tool_output", ""))
             if missing_module:
                 response = AIMessage(
                     content=(
@@ -443,15 +237,7 @@ Be concise. Format as a numbered list."""
                         f"After installation, you can retry the code execution."
                     )
                 )
-                meta = getattr(response, "response_metadata", {}) or {}
-                usage = TokenUsage.from_response_metadata(meta)
-                update_token_usage(usage.model_dump())
-                return {
-                    "messages": [response],
-                    "steps": state.get("steps", 0) + 1,
-                    "token_usage": usage,
-                    "tool_text_retry_used": False,
-                }
+                return response_with_usage(state, response)
 
             if file_generation_requested and state.get("last_tool_success") is False and last_tool_missing_required_args(state.get("last_tool_output", "")):
                 pre_messages.append(
@@ -731,89 +517,6 @@ Be concise. Format as a numbered list."""
                     )
                     response = finalize_action_response(response, tool_name_set)
 
-        meta = getattr(response, "response_metadata", {}) or {}
-        usage = TokenUsage.from_response_metadata(meta)
-        update_token_usage(usage.model_dump())
-        return {
-            "messages": [response],
-            "steps": state.get("steps", 0) + 1,
-            "token_usage": usage,
-            "tool_text_retry_used": False,
-        }
-
-    def capture_tool_output_node(state: AgentState):
-        history = state.get("messages", [])
-        if not history:
-            return {
-                "last_tool_output": "",
-                "last_tool_signature": "",
-                "last_tool_success": True,
-                "repeat_fail_count": 0,
-            }
-
-        last_message = history[-1]
-        if isinstance(last_message, ToolMessage):
-            raw_content = str(last_message.content)
-            parsed = parse_tool_result(raw_content)
-            unwrapped = unwrap_tool_output(raw_content)
-            success = parsed.success if parsed is not None else bool(isinstance(unwrapped, dict) and unwrapped.get("success") is True)
-            current_signature = extract_tool_signature(history[:-1], getattr(last_message, "tool_call_id", None))
-
-            previous_signature = state.get("last_tool_signature", "")
-            previous_success = state.get("last_tool_success", True)
-            previous_repeat_count = state.get("repeat_fail_count", 0)
-            if not success and current_signature and previous_signature == current_signature and not previous_success:
-                repeat_fail_count = previous_repeat_count + 1
-            elif not success and current_signature:
-                repeat_fail_count = 1
-            else:
-                repeat_fail_count = 0
-
-            if isinstance(unwrapped, dict):
-                return {
-                    "last_tool_output": unwrapped,
-                    "last_tool_signature": current_signature,
-                    "last_tool_success": success,
-                    "repeat_fail_count": repeat_fail_count,
-                }
-            if isinstance(unwrapped, list):
-                return {
-                    "last_tool_output": {"message": str(unwrapped), "data": unwrapped, "success": success},
-                    "last_tool_signature": current_signature,
-                    "last_tool_success": success,
-                    "repeat_fail_count": repeat_fail_count,
-                }
-            if isinstance(unwrapped, str):
-                return {
-                    "last_tool_output": {"message": unwrapped, "data": None, "success": success},
-                    "last_tool_signature": current_signature,
-                    "last_tool_success": success,
-                    "repeat_fail_count": repeat_fail_count,
-                }
-            return {
-                "last_tool_output": raw_content,
-                "last_tool_signature": current_signature,
-                "last_tool_success": success,
-                "repeat_fail_count": repeat_fail_count,
-            }
-        return {
-            "last_tool_output": state.get("last_tool_output", ""),
-            "last_tool_signature": state.get("last_tool_signature", ""),
-            "last_tool_success": state.get("last_tool_success", True),
-            "repeat_fail_count": state.get("repeat_fail_count", 0),
-        }
-
-    def route_after_brain(state: AgentState):
-        history = state.get("messages", [])
-        if not history:
-            return END
-
-        if state.get("steps", 0) >= MAX_REASONING_STEPS:
-            return END
-
-        last_message = history[-1]
-        if getattr(last_message, "tool_calls", None):
-            return "tools"
-        return END
+        return response_with_usage(state, response)
 
     return planner_node, brain_node, capture_tool_output_node, route_after_brain
