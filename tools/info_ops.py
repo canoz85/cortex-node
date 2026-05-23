@@ -2,6 +2,7 @@ from datetime import datetime
 
 from langchain_core.tools import tool
 
+from core.graph_constants import MAX_REASONING_STEPS
 from core.models import ToolResult
 
 _runtime: dict = {}
@@ -11,7 +12,7 @@ def get_info_tools(model: str, workspace_dir: str):
     _runtime["model"] = model
     _runtime["workspace_dir"] = workspace_dir
     _runtime["context_window"] = "~128k tokens"
-    _runtime["max_steps"] = 12
+    _runtime["max_steps"] = MAX_REASONING_STEPS
 
     @tool
     def agent_info() -> str:

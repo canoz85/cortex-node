@@ -38,9 +38,16 @@ def parse_args() -> argparse.Namespace:
     output_group = parser.add_argument_group("output")
     output_group.add_argument(
         "--raw-llm",
+        dest="raw_llm",
         action="store_true",
-        default=True,
-        help="Show raw LLM responses (debug view) in red/italic ANSI output.",
+        default=False,
+        help="Enable raw LLM responses (debug view) in red/italic ANSI output.",
+    )
+    output_group.add_argument(
+        "--no-raw-llm",
+        dest="raw_llm",
+        action="store_false",
+        help="Disable raw LLM response output.",
     )
     output_group.add_argument(
         "--show-summary",
