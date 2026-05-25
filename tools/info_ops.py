@@ -8,6 +8,14 @@ from core.models import ToolResult
 _runtime: dict = {}
 
 
+def _to_non_negative_int(value: object) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    return max(parsed, 0)
+
+
 def get_info_tools(model: str, workspace_dir: str):
     _runtime["model"] = model
     _runtime["workspace_dir"] = workspace_dir
@@ -73,17 +81,17 @@ def update_token_usage(usage: dict) -> None:
     """Accumulate token usage across turns; only update non-zero values."""
     if not usage:
         return
-    
-    prompt_tokens = usage.get("prompt_tokens", 0) or 0
-    completion_tokens = usage.get("completion_tokens", 0) or 0
-    total_tokens = usage.get("total_tokens", 0) or 0
-    
+
+    prompt_tokens = _to_non_negative_int(usage.get("prompt_tokens", 0))
+    completion_tokens = _to_non_negative_int(usage.get("completion_tokens", 0))
+    total_tokens = _to_non_negative_int(usage.get("total_tokens", 0))
+
     existing = _runtime.get("token_usage", {}) or {}
-    
-    existing_prompt = existing.get("prompt_tokens", 0) or 0
-    existing_completion = existing.get("completion_tokens", 0) or 0
-    existing_total = existing.get("total_tokens", 0) or 0
-    
+
+    existing_prompt = _to_non_negative_int(existing.get("prompt_tokens", 0))
+    existing_completion = _to_non_negative_int(existing.get("completion_tokens", 0))
+    existing_total = _to_non_negative_int(existing.get("total_tokens", 0))
+
     _runtime["token_usage"] = {
         "prompt_tokens": existing_prompt + prompt_tokens,
         "completion_tokens": existing_completion + completion_tokens,

@@ -1,4 +1,4 @@
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 
 
 def latest_user_message(history: list) -> str:
@@ -25,7 +25,7 @@ def recent_messages(history: list, limit: int) -> list:
     return history[-limit:]
 
 
-def normalize_message_content(message: AIMessage) -> str:
+def normalize_message_content(message: object) -> str:
     content = getattr(message, "content", "")
     if isinstance(content, str):
         return content
@@ -36,13 +36,20 @@ def normalize_message_content(message: AIMessage) -> str:
                 text = item.get("text")
                 if text:
                     parts.append(str(text))
+                    continue
+                # Providers may emit text blocks under alternative keys.
+                for fallback_key in ("content", "value"):
+                    fallback_value = item.get(fallback_key)
+                    if fallback_value:
+                        parts.append(str(fallback_value))
+                        break
             else:
                 parts.append(str(item))
         return "\n".join(parts)
     return str(content)
 
 
-def is_effectively_empty_response(message: AIMessage) -> bool:
+def is_effectively_empty_response(message: object) -> bool:
     if getattr(message, "tool_calls", None):
         return False
 

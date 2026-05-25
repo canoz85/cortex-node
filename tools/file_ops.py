@@ -12,23 +12,11 @@ from core.models import (
     WriteFileRequest,
     WriteFileResult,
 )
-
-
-def _resolve_workspace(workspace_dir: str) -> Path:
-    root = Path(workspace_dir).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def _resolve_safe_path(workspace_root: Path, target: str) -> Path:
-    candidate = (workspace_root / target).resolve()
-    if candidate != workspace_root and workspace_root not in candidate.parents:
-        raise ValueError(f"Path '{target}' is outside sandbox workspace")
-    return candidate
+from tools.sandbox_paths import resolve_safe_path, resolve_workspace
 
 
 def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
-    workspace_root = _resolve_workspace(workspace_dir)
+    workspace_root = resolve_workspace(workspace_dir)
     knowledge_root = Path(knowledge_dir).resolve() if knowledge_dir else None
 
     @tool
@@ -36,7 +24,7 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
         """List files and folders inside the sandbox workspace."""
         try:
             request = ListFilesRequest(path=path)
-            target = _resolve_safe_path(workspace_root, request.path)
+            target = resolve_safe_path(workspace_root, request.path)
             if not target.exists():
                 result = ListFilesResult(
                     success=False,
@@ -86,7 +74,7 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
         """Read a UTF-8 text file from inside the sandbox workspace."""
         try:
             request = ReadFileRequest(path=path)
-            target = _resolve_safe_path(workspace_root, request.path)
+            target = resolve_safe_path(workspace_root, request.path)
             if not target.exists() or not target.is_file():
                 result = ReadFileResult(
                     success=False,
@@ -117,7 +105,7 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
         """Write text content to a file in the sandbox workspace."""
         try:
             request = WriteFileRequest(path=path, content=content, overwrite=overwrite)
-            target = _resolve_safe_path(workspace_root, request.path)
+            target = resolve_safe_path(workspace_root, request.path)
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists() and not request.overwrite:
                 result = WriteFileResult(
@@ -149,7 +137,7 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
         """Create a directory in the sandbox workspace."""
         try:
             request = MakeDirectoryRequest(path=path)
-            target = _resolve_safe_path(workspace_root, request.path)
+            target = resolve_safe_path(workspace_root, request.path)
             target.mkdir(parents=True, exist_ok=True)
             result = MakeDirectoryResult(
                 success=True,

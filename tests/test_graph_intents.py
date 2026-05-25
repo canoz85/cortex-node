@@ -1,6 +1,9 @@
 from core.graph_intents import (
+    is_read_only_file_request,
+    is_read_audit_request,
     is_file_generation_request,
     planner_routing_decision,
+    preferred_file_tool,
     preferred_info_tool,
     requires_action,
 )
@@ -15,6 +18,8 @@ def test_preferred_info_tool_detection():
 
 def test_requires_action_detection():
     assert requires_action("create a script") is True
+    assert requires_action("read workspace/is_prime.py and explain the bug") is True
+    assert requires_action("list workspace") is True
     assert requires_action("hello there") is False
 
 
@@ -45,3 +50,35 @@ def test_planner_route_for_mixed_action_requires_clarification():
 def test_planner_route_for_coding_discussion_question():
     decision = planner_routing_decision("how should I refactor this python function?")
     assert decision.route == "coding_discussion"
+
+
+def test_planner_route_for_workspace_file_access_request():
+    decision = planner_routing_decision("analyze workspace/is_prime.py")
+    assert decision.route == "action"
+
+
+def test_read_only_file_request_detection():
+    assert is_read_only_file_request("read workspace/is_prime.py and explain issues") is True
+    assert is_read_only_file_request("edit workspace/is_prime.py") is False
+
+
+def test_preferred_file_tool_for_workspace_listing():
+    assert preferred_file_tool("list workspace") == "list_files"
+    assert preferred_file_tool("show files in workspace") == "list_files"
+    assert preferred_file_tool("hello") is None
+
+
+def test_read_audit_intent_detection():
+    assert is_read_audit_request("which file did you read") is True
+    assert is_read_audit_request("what files did you analyze") is True
+    assert is_read_audit_request("hello there") is False
+
+
+def test_golden_prompt_route_list_workspace():
+    decision = planner_routing_decision("list workspace")
+    assert decision.route == "action"
+
+
+def test_golden_prompt_route_read_audit_query():
+    decision = planner_routing_decision("which file did you read")
+    assert decision.route == "action"

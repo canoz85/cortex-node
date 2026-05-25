@@ -1,5 +1,6 @@
 from langchain_core.messages import ToolMessage
 
+from core.graph_messages import normalize_message_content
 from core.graph_tool_events import extract_tool_signature
 from core.state import AgentState
 from core.tool_output import parse_tool_result, unwrap_tool_output
@@ -18,7 +19,7 @@ def create_capture_tool_output_node():
 
         last_message = history[-1]
         if isinstance(last_message, ToolMessage):
-            raw_content = str(last_message.content)
+            raw_content = normalize_message_content(last_message)
             parsed = parse_tool_result(raw_content)
             unwrapped = unwrap_tool_output(raw_content)
             success = parsed.success if parsed is not None else bool(isinstance(unwrapped, dict) and unwrapped.get("success") is True)

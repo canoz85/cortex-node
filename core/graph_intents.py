@@ -33,6 +33,26 @@ STRONG_PYTHON_PATTERN = re.compile(
     r"\b(python|py|pandas|numpy|pip|venv|pytest|fastapi|flask|django|script|module|package|traceback|import|def|class|json|csv|parse|parsing)\b",
     re.IGNORECASE,
 )
+FILE_PATH_HINT_PATTERN = re.compile(
+    r"(?:^|[\s'\"`(\[])(?:[\w.-]+[\\/])*[\w.-]+\.[a-z0-9]{1,8}(?:$|[\s'\"`)\]])",
+    re.IGNORECASE,
+)
+FILE_READ_INTENT_PATTERN = re.compile(
+    r"\b(read|open|show|inspect|review|check|analy[sz]e|debug|fix|explain)\b",
+    re.IGNORECASE,
+)
+FILE_MUTATION_INTENT_PATTERN = re.compile(
+    r"\b(create|write|edit|update|modify|generate|implement|refactor|delete|remove|rename)\b",
+    re.IGNORECASE,
+)
+LIST_WORKSPACE_INTENT_PATTERN = re.compile(
+    r"\b(list|show|display|ls|dir|enumerate)\b.*\b(workspace|files?|folders?|directories?|directory)\b|\b(workspace|files?|folders?|directories?|directory)\b.*\b(list|show|display|ls|dir|enumerate)\b",
+    re.IGNORECASE,
+)
+READ_AUDIT_INTENT_PATTERN = re.compile(
+    r"\b(which|what|where)\b.*\b(files?|file)\b.*\b(read|reviewed|analy[sz]e(?:d)?)\b|\bdid you read\b",
+    re.IGNORECASE,
+)
 
 
 def _domain_decision(user_text: str) -> tuple[str, float, bool, bool, str]:
@@ -71,7 +91,29 @@ def requires_action(user_text: str) -> bool:
     text = (user_text or "").strip()
     if not text:
         return False
+    if is_read_audit_request(text):
+        return True
+    if requests_workspace_file_access(text):
+        return True
+    if preferred_file_tool(text):
+        return True
     return bool(ACTION_INTENT_PATTERN.search(text))
+
+
+def requests_workspace_file_access(user_text: str) -> bool:
+    text = (user_text or "").strip()
+    if not text:
+        return False
+    if not FILE_PATH_HINT_PATTERN.search(text):
+        return False
+    return bool(FILE_READ_INTENT_PATTERN.search(text))
+
+
+def is_read_only_file_request(user_text: str) -> bool:
+    text = (user_text or "").strip()
+    if not requests_workspace_file_access(text):
+        return False
+    return not bool(FILE_MUTATION_INTENT_PATTERN.search(text))
 
 
 def preferred_info_tool(user_text: str) -> str | None:
@@ -85,6 +127,22 @@ def preferred_info_tool(user_text: str) -> str | None:
     if AGENT_INFO_INTENT_PATTERN.search(text):
         return "agent_info"
     return None
+
+
+def preferred_file_tool(user_text: str) -> str | None:
+    text = (user_text or "").strip()
+    if not text:
+        return None
+    if LIST_WORKSPACE_INTENT_PATTERN.search(text):
+        return "list_files"
+    return None
+
+
+def is_read_audit_request(user_text: str) -> bool:
+    text = (user_text or "").strip()
+    if not text:
+        return False
+    return bool(READ_AUDIT_INTENT_PATTERN.search(text))
 
 
 def _is_casual_chat(user_text: str) -> bool:
@@ -129,6 +187,10 @@ def planner_routing_decision(user_text: str) -> RoutingDecision:
         )
     if preferred_info_tool(text):
         return RoutingDecision("info", "general", 1.0, False, "info intent", False)
+    if preferred_file_tool(text):
+        return RoutingDecision("action", "general", 1.0, False, "workspace listing intent", False)
+    if is_read_audit_request(text):
+        return RoutingDecision("action", "general", 1.0, False, "read audit intent", False)
     if _is_casual_chat(text):
         return RoutingDecision("casual", "general", 1.0, False, "casual chat", False)
 
@@ -139,6 +201,9 @@ def planner_routing_decision(user_text: str) -> RoutingDecision:
 
     if domain == "sap" and requires_action(text):
         return RoutingDecision("action:sap", domain, confidence, enforced, reason, False)
+
+    if requests_workspace_file_access(text):
+        return RoutingDecision("action", domain, max(confidence, 0.7), enforced, "workspace file access request", False)
 
     if CODE_DISCUSSION_PATTERN.search(text) and CODING_DISCUSSION_QUESTION_PATTERN.search(text):
         return RoutingDecision("coding_discussion", domain, max(confidence, 0.7), enforced, reason, False)

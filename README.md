@@ -130,16 +130,29 @@ Run unit tests:
 python -m pytest
 ```
 
+Run the graph-focused regression suite used during orchestration refactors:
+
+```bash
+python -m pytest tests/test_graph_nodes.py tests/test_graph_runner.py tests/test_graph_capture.py tests/test_graph_messages.py tests/test_graph_planner.py tests/test_graph_routing.py tests/test_graph_intents.py
+```
+
 ## How It Works
 
 1. `main.py` parses CLI args and builds the LangGraph app.
 2. `core/graph.py` builds a small RAG index from `knowledge/` and injects retrieved context into the planner and brain prompts.
 3. The `planner` node analyzes the prompt and creates a step-by-step plan **without** taking actions.
-4. The `brain` node executes the plan by generating tool calls.
+4. The `brain` node executes the plan by generating tool calls, but now does so through smaller guardrail helpers for fast-path routing, file-generation recovery, response recovery, and action enforcement.
 5. If tool calls are requested, execution routes through `ToolNode`.
 6. Tool outputs are normalized and fed back into state.
 7. Loop exits when no tool call remains or step limit is reached (max 24 steps per prompt, after planning).
 8. File-generation turns can run a verification pass and automatically repair obvious CLI argument issues before finalizing.
+
+### Brain Node Flow
+
+- Early-return fast path handles domain clarification, read-audit answers, required-first-tool enforcement, direct discussion turns, file-generation deterministic next steps, and action completion summaries.
+- Pre-message assembly builds route-aware guidance for SAP, read-only analysis, file generation, preferred tool usage, and failure recovery.
+- Response recovery normalizes pseudo-tool text, retries empty outputs, and suppresses accidental tool calls on discussion-only turns.
+- Post-response guards prevent repeated tool signatures, unsafe read-only mutations, unchanged rewrites after failed verification, fabricated workspace-analysis claims, and plain-text action loops.
 
 ### Planning Phase
 
@@ -165,32 +178,86 @@ This format allows both readable terminal output and reliable parsing in the age
 
 ```text
 cortex-node/
-|-- .gitignore
 |-- README.md
 |-- main.py
+|-- pytest.ini
 |-- requirements.txt
 |-- core/
 |   |-- __init__.py
+|   |-- graph_capture.py
+|   |-- graph_constants.py
+|   |-- graph_context.py
+|   |-- graph_filegen_policy.py
+|   |-- graph_intents.py
+|   |-- graph_messages.py
+|   |-- graph_node_helpers.py
+|   |-- graph_nodes.py
+|   |-- graph_planner.py
+|   |-- graph_pseudo_tools.py
+|   |-- graph_response_formatters.py
+|   |-- graph_routing.py
+|   |-- graph_runner.py
+|   |-- graph_tool_events.py
 |   |-- graph.py
+|   |-- logging_utils.py
 |   |-- models.py
+|   |-- rag.py
 |   |-- state.py
 |   `-- tool_output.py
+|-- knowledge/
+|   |-- example_rules.md
+|   |-- examples.json
+|   |-- sap_examples.json
+|   `-- sap_rules.md
+|-- prompts/
+|   `-- systemprompts_sap.md
 |-- scripts/
 |   `-- hello.py
+|-- tests/
+|   |-- conftest.py
+|   |-- test_exec_ops.py
+|   |-- test_file_ops.py
+|   |-- test_git_ops.py
+|   |-- test_graph_capture.py
+|   |-- test_graph_intents.py
+|   |-- test_graph_messages.py
+|   |-- test_graph_node_helpers.py
+|   |-- test_graph_nodes.py
+|   |-- test_graph_planner.py
+|   |-- test_graph_routing.py
+|   |-- test_graph_runner.py
+|   |-- test_graph_tool_events.py
+|   `-- test_info_ops.py
 |-- tools/
 |   |-- __init__.py
 |   |-- exec_ops.py
 |   |-- file_ops.py
 |   |-- git_ops.py
 |   |-- info_ops.py
+|   |-- rag_ops.py
+|   |-- sap_ops.py
 |   `-- scada_ops.py
-`-- workspace/
-    `-- version2.md
+|-- workspace/
+|   |-- sandbox files created or modified by the agent
+|   |-- is_prime.py
+|   |-- lcm_calculator.py
+|   `-- lcm_calculator_cli.py
 ```
+
+### Core Module Guide
+
+- `core/graph.py`: graph wiring, model setup, and app construction.
+- `core/graph_nodes.py`: planner/brain node orchestration and execution guardrails.
+- `core/graph_filegen_policy.py`: deterministic file-generation verification and repair helpers.
+- `core/graph_messages.py` and `core/graph_tool_events.py`: message normalization and tool-event extraction.
+- `core/graph_response_formatters.py`: deterministic completion and info-tool response formatting.
+- `tools/`: sandboxed file, execution, git, info, RAG, SAP, and SCADA tool implementations.
+- `tests/`: focused unit and graph regression coverage for planner, brain, routing, capture, and tool behavior.
 
 ## Notes
 
 - File and execution tools enforce sandbox boundaries relative to the selected workspace.
+- `brain_node` in `core/graph_nodes.py` has been decomposed into smaller helpers to make guardrail behavior easier to test and evolve.
 - Git tools execute in the selected workspace directory and return stdout/stderr/exit code.
 - `current_time` is the preferred path for time/date questions to avoid guessed values.
 - Generated files and verification artifacts are created inside the sandboxed `workspace/` directory.

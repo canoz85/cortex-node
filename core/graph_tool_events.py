@@ -2,7 +2,7 @@ import json
 
 from langchain_core.messages import AIMessage, ToolMessage
 
-from core.graph_messages import current_turn_messages
+from core.graph_messages import current_turn_messages, normalize_message_content
 from core.tool_output import parse_tool_result, unwrap_tool_output
 
 
@@ -94,7 +94,7 @@ def current_turn_tool_events(history: list) -> list[dict]:
     for message in current_turn:
         if not isinstance(message, ToolMessage):
             continue
-        raw_content = str(message.content)
+        raw_content = normalize_message_content(message)
         parsed = parse_tool_result(raw_content)
         unwrapped = unwrap_tool_output(raw_content)
         tool_call = tool_call_lookup.get(getattr(message, "tool_call_id", ""), {})
@@ -152,7 +152,63 @@ def current_turn_has_successful_tool_result(history: list) -> bool:
     for message in reversed(current_turn):
         if not isinstance(message, ToolMessage):
             continue
-        parsed = parse_tool_result(str(message.content))
+        parsed = parse_tool_result(normalize_message_content(message))
         if parsed is not None and parsed.success:
             return True
     return False
+
+
+def current_turn_has_successful_tool_name(history: list, tool_name: str) -> bool:
+    """Return True when a specific tool has succeeded in the latest user turn."""
+    if not tool_name:
+        return False
+
+    for event in current_turn_tool_events(history):
+        if event.get("success") and event.get("name") == tool_name:
+            return True
+    return False
+
+
+def successful_read_file_paths(history: list) -> list[str]:
+    """Return unique paths from successful read_file tool results across history."""
+    if not history:
+        return []
+
+    tool_call_lookup: dict[str, dict] = {}
+    for message in history:
+        if not isinstance(message, AIMessage):
+            continue
+        for call in getattr(message, "tool_calls", None) or []:
+            call_id = call.get("id")
+            if call_id:
+                tool_call_lookup[call_id] = call
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    for message in history:
+        if not isinstance(message, ToolMessage):
+            continue
+
+        raw_content = normalize_message_content(message)
+        parsed = parse_tool_result(raw_content)
+        if parsed is None or not parsed.success:
+            continue
+
+        unwrapped = unwrap_tool_output(raw_content)
+        tool_call = tool_call_lookup.get(getattr(message, "tool_call_id", ""), {})
+        tool_name = str(tool_call.get("name", "") or _infer_tool_name(unwrapped))
+        if tool_name != "read_file":
+            continue
+
+        path = ""
+        if isinstance(unwrapped, dict):
+            path = str(unwrapped.get("path", "") or "")
+            if not path:
+                data = unwrapped.get("data")
+                if isinstance(data, dict):
+                    path = str(data.get("path", "") or "")
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+
+    return paths

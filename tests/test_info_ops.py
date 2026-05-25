@@ -40,3 +40,32 @@ def test_update_token_usage_accumulates_values():
     assert result["data"]["prompt_tokens"] == 15
     assert result["data"]["completion_tokens"] == 5
     assert result["data"]["total_tokens"] == 20
+
+
+def test_update_token_usage_handles_string_values():
+    get_info_tools(model="qwen", workspace_dir="workspace")
+    update_token_usage({"prompt_tokens": "10", "completion_tokens": "3", "total_tokens": "13"})
+    update_token_usage({"prompt_tokens": "5", "completion_tokens": "2", "total_tokens": "7"})
+
+    tools = get_info_tools(model="qwen", workspace_dir="workspace")
+    token_usage = get_tool(tools, "token_usage")
+    result = parse_result(token_usage.invoke({}))
+
+    assert result["success"] is True
+    assert result["data"]["prompt_tokens"] == 15
+    assert result["data"]["completion_tokens"] == 5
+    assert result["data"]["total_tokens"] == 20
+
+
+def test_update_token_usage_ignores_invalid_or_negative_values():
+    get_info_tools(model="qwen", workspace_dir="workspace")
+    update_token_usage({"prompt_tokens": "bad", "completion_tokens": -2, "total_tokens": None})
+
+    tools = get_info_tools(model="qwen", workspace_dir="workspace")
+    token_usage = get_tool(tools, "token_usage")
+    result = parse_result(token_usage.invoke({}))
+
+    assert result["success"] is True
+    assert result["data"]["prompt_tokens"] == 0
+    assert result["data"]["completion_tokens"] == 0
+    assert result["data"]["total_tokens"] == 0

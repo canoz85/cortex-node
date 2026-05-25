@@ -154,7 +154,7 @@ def run_prompt(
                             "run_id": run_id,
                             "node": node_name,
                             "success": parsed.success,
-                            "message": parsed.message,
+                            "tool_message": parsed.message,
                         },
                     )
                 elif summary:

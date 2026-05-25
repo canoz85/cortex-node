@@ -1,24 +1,11 @@
 import shlex
 import subprocess
 import sys
-from pathlib import Path
 
 from langchain_core.tools import tool
 
 from core.models import ToolResult
-
-
-def _resolve_workspace(workspace_dir: str) -> Path:
-    root = Path(workspace_dir).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def _resolve_safe_path(workspace_root: Path, target: str) -> Path:
-    candidate = (workspace_root / target).resolve()
-    if candidate != workspace_root and workspace_root not in candidate.parents:
-        raise ValueError(f"Path '{target}' is outside sandbox workspace")
-    return candidate
+from tools.sandbox_paths import resolve_safe_path, resolve_workspace
 
 
 def _append_cli_args(arg_list: list[str], raw_args: object) -> None:
@@ -30,7 +17,7 @@ def _append_cli_args(arg_list: list[str], raw_args: object) -> None:
 
 
 def get_exec_tools(workspace_dir: str):
-    workspace_root = _resolve_workspace(workspace_dir)
+    workspace_root = resolve_workspace(workspace_dir)
 
     @tool
     def run_python(
@@ -41,7 +28,7 @@ def get_exec_tools(workspace_dir: str):
     ) -> str:
         """Run a Python file from the sandbox workspace and return output."""
         try:
-            script = _resolve_safe_path(workspace_root, path)
+            script = resolve_safe_path(workspace_root, path)
             if not script.exists() or script.suffix != ".py":
                 return ToolResult(
                     success=False,

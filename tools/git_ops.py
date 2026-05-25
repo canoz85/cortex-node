@@ -4,12 +4,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from core.models import ToolResult
-
-
-def _resolve_workspace(workspace_dir: str) -> Path:
-    root = Path(workspace_dir).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+from tools.sandbox_paths import resolve_workspace
 
 
 def _run_git(workspace_root: Path, args: list[str], timeout_seconds: int = 20) -> str:
@@ -49,7 +44,7 @@ def _run_git(workspace_root: Path, args: list[str], timeout_seconds: int = 20) -
 
 
 def get_git_tools(workspace_dir: str):
-    workspace_root = _resolve_workspace(workspace_dir)
+    workspace_root = resolve_workspace(workspace_dir)
 
     @tool
     def git_status() -> str:
