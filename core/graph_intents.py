@@ -9,6 +9,7 @@ from core.graph_constants import (
     CODING_DISCUSSION_QUESTION_PATTERN,
     CURRENT_TIME_INTENT_PATTERN,
     FILE_GENERATION_PATTERN,
+    MATH_INTENT_PATTERN,
     TOKEN_USAGE_INTENT_PATTERN,
 )
 
@@ -124,6 +125,8 @@ def preferred_info_tool(user_text: str) -> str | None:
         return "token_usage"
     if CURRENT_TIME_INTENT_PATTERN.search(text):
         return "current_time"
+    if MATH_INTENT_PATTERN.search(text):
+        return "solve_math"
     if AGENT_INFO_INTENT_PATTERN.search(text):
         return "agent_info"
     return None

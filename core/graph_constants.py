@@ -31,12 +31,12 @@ Constraints:
 """
 
 PSEUDO_TOOL_CALL_PATTERN = re.compile(
-    r"\b(?:list_files|read_file|write_file|make_directory|run_python|git_status|git_diff|git_log|git_show|agent_info|token_usage|current_time|scada_status|rag_search|rag_refresh_index|query_abap_table|execute_abap_report|lookup_material|get_report_data)\s*\(",
+    r"\b(?:list_files|read_file|write_file|make_directory|run_python|git_status|git_diff|git_log|git_show|agent_info|token_usage|current_time|solve_math|scada_status|rag_search|rag_refresh_index|query_abap_table|execute_abap_report|lookup_material|get_report_data)\s*\(",
     re.IGNORECASE,
 )
 
 PSEUDO_JSON_TOOL_CALL_PATTERN = re.compile(
-    r'\{\s*"name"\s*:\s*"(?:list_files|read_file|write_file|make_directory|run_python|git_status|git_diff|git_log|git_show|agent_info|token_usage|current_time|scada_status|rag_search|rag_refresh_index|query_abap_table|execute_abap_report|lookup_material|get_report_data)"\s*,\s*"arguments"\s*:',
+    r'\{\s*"name"\s*:\s*"(?:list_files|read_file|write_file|make_directory|run_python|git_status|git_diff|git_log|git_show|agent_info|token_usage|current_time|solve_math|scada_status|rag_search|rag_refresh_index|query_abap_table|execute_abap_report|lookup_material|get_report_data)"\s*,\s*"arguments"\s*:',
     re.IGNORECASE,
 )
 
@@ -54,6 +54,10 @@ CURRENT_TIME_INTENT_PATTERN = re.compile(
 )
 AGENT_INFO_INTENT_PATTERN = re.compile(
     r"\b(model|runtime|context window|max steps|agent info|configuration)\b",
+    re.IGNORECASE,
+)
+MATH_INTENT_PATTERN = re.compile(
+    r"(^\s*[-+*/().\d\s]+\s*$)|(\bwhat\s+is\s+[-+*/().\d\s]+\??\s*$)|(\b(?:what\s+is|how\s+much(?:\s+is)?)\s+\d+(?:\.\d+)?\s*[a-zA-Z]+(?:\s*(?:in|to)\s*[a-zA-Z]+)?\s*\??\s*$)|(\b\d+(?:\.\d+)?\s*[a-zA-Z]+\b.*\b(?:is|=|equals?)\b.*\b\d+(?:\.\d+)?\s*[a-zA-Z]+\b.*\b(?:what\s+is|how\s+much\s+is|calculate)\b.*\b\d+(?:\.\d+)?\s*[a-zA-Z]+\b)",
     re.IGNORECASE,
 )
 CASUAL_CHAT_PATTERN = re.compile(

@@ -38,13 +38,12 @@ from core.graph_node_helpers import (
 )
 from core.graph_planner import create_planner_node
 from core.graph_pseudo_tools import finalize_action_response, is_pseudo_tool_response, looks_like_pseudo_tool_text, recover_pseudo_tool_response
-from core.graph_response_formatters import format_action_completion_response, format_info_tool_response
+from core.graph_response_formatters import format_action_completion_response, format_preferred_tool_response
 from core.graph_routing import route_after_brain
 from core.graph_tool_events import (
     current_turn_tool_events,
     current_turn_has_successful_tool_name,
     current_turn_has_successful_tool_result,
-    info_tool_already_called,
     message_repeats_signature,
     successful_read_file_paths,
 )
@@ -55,6 +54,14 @@ from core.state import AgentState
 READ_ONLY_TOOL_NAMES = {"list_files", "read_file", "read_knowledge_file", "rag_search", "rag_refresh_index"}
 
 
+def _preferred_required_tool(preferred_info_tool_name: str | None, preferred_file_tool_name: str | None) -> tuple[str | None, str | None]:
+    if preferred_info_tool_name:
+        return preferred_info_tool_name, "info"
+    if preferred_file_tool_name:
+        return preferred_file_tool_name, "file"
+    return None, None
+
+
 def _read_audit_response(history: list) -> AIMessage:
     read_paths = successful_read_file_paths(history)
     if read_paths:
@@ -63,8 +70,13 @@ def _read_audit_response(history: list) -> AIMessage:
     return AIMessage(content="I have not successfully read any file in this session yet.")
 
 
-def _required_first_tool_response(required_first_tool: str) -> AIMessage:
-    tool_args = {"path": "."} if required_first_tool == "list_files" else {}
+def _required_first_tool_response(required_first_tool: str, latest_user_prompt: str = "") -> AIMessage:
+    if required_first_tool == "list_files":
+        tool_args = {"path": "."}
+    elif required_first_tool == "solve_math":
+        tool_args = {"question": latest_user_prompt}
+    else:
+        tool_args = {}
     return AIMessage(
         content=f"Calling {required_first_tool} to answer your request.",
         tool_calls=[
@@ -473,8 +485,9 @@ def _apply_action_enforcement(
     file_generation_requested: bool,
     successful_tool_result_in_turn: bool,
     current_filegen_issue: str | None,
-    preferred_tool: str | None,
-    preferred_file_tool_name: str | None,
+    preferred_required_tool_name: str | None,
+    preferred_required_tool_kind: str | None,
+    preferred_required_tool_pending: bool,
     action_required: bool,
     skip_action_enforcement: bool,
 ) -> AIMessage:
@@ -486,10 +499,8 @@ def _apply_action_enforcement(
         enforcement_prompt = _file_generation_enforcement_prompt()
     elif file_generation_requested and current_filegen_issue:
         enforcement_prompt = _file_generation_incomplete_enforcement_prompt(str(current_filegen_issue))
-    elif preferred_tool:
-        enforcement_prompt = _required_tool_enforcement_prompt(preferred_tool, "info")
-    elif preferred_file_tool_name:
-        enforcement_prompt = _required_tool_enforcement_prompt(preferred_file_tool_name, "file")
+    elif preferred_required_tool_name and preferred_required_tool_pending and preferred_required_tool_kind:
+        enforcement_prompt = _required_tool_enforcement_prompt(preferred_required_tool_name, preferred_required_tool_kind)
     elif action_required and not skip_action_enforcement and not successful_tool_result_in_turn:
         enforcement_prompt = _action_required_enforcement_prompt()
 
@@ -609,8 +620,8 @@ def _build_pre_messages(
     retrieval_messages: list[SystemMessage],
     rolling_summary: str,
     route: str,
-    preferred_tool: str | None,
-    preferred_file_tool_name: str | None,
+    preferred_required_tool_name: str | None,
+    preferred_required_tool_pending: bool,
     planner_plan_source: str,
     planner_plan: str,
     planner_domain: str,
@@ -629,7 +640,7 @@ def _build_pre_messages(
         *rolling_summary_message(rolling_summary),
     ]
 
-    if route.startswith("action") and not preferred_tool:
+    if route.startswith("action"):
         planner_brief = planner_execution_brief(route, planner_plan_source, planner_plan)
         if planner_brief:
             pre_messages.append(SystemMessage(content=planner_brief))
@@ -664,24 +675,13 @@ def _build_pre_messages(
             )
         )
 
-    if preferred_tool:
+    if preferred_required_tool_name and preferred_required_tool_pending:
         pre_messages.append(
             SystemMessage(
                 content=(
                     "This request must be answered by calling the "
-                    f"{preferred_tool} tool first. "
+                    f"{preferred_required_tool_name} tool first. "
                     "Do not answer from memory. Use the tool and then respond from its output."
-                )
-            )
-        )
-
-    if preferred_file_tool_name:
-        pre_messages.append(
-            SystemMessage(
-                content=(
-                    "This request must be answered by calling the "
-                    f"{preferred_file_tool_name} tool first. "
-                    "Do not answer from memory. Use the tool output to respond with concrete file listings."
                 )
             )
         )
@@ -785,8 +785,7 @@ def _apply_brain_fast_path(
     active_system_prompt: str,
     retrieval_messages: list[SystemMessage],
     rolling_summary: str,
-    preferred_tool: str | None,
-    preferred_file_tool_name: str | None,
+    preferred_required_tool_name: str | None,
     tool_name_set: set[str],
     file_generation_requested: bool,
     current_filegen_issue: str | None,
@@ -806,15 +805,15 @@ def _apply_brain_fast_path(
     if is_read_audit_request(latest_user_prompt):
         return _read_audit_response(history)
 
-    required_first_tool = preferred_tool or preferred_file_tool_name
+    required_first_tool = preferred_required_tool_name
     if (
         required_first_tool
         and required_first_tool in tool_name_set
         and not current_turn_has_successful_tool_name(history, required_first_tool)
     ):
-        return _required_first_tool_response(required_first_tool)
+        return _required_first_tool_response(required_first_tool, latest_user_prompt)
 
-    if route in {"casual", "coding_discussion", "conversation"} and not preferred_tool:
+    if route in {"casual", "coding_discussion", "conversation"} and not preferred_required_tool_name:
         return direct_discussion_response(
             planner_llm=planner_llm,
             system_prompt=active_system_prompt,
@@ -843,13 +842,154 @@ def _apply_brain_fast_path(
     return None
 
 
-def _apply_info_tool_fast_path(*, preferred_tool: str | None, history: list, state: AgentState) -> AIMessage | None:
-    if not preferred_tool or not info_tool_already_called(history, preferred_tool):
+def _apply_preferred_tool_fast_path(
+    *,
+    preferred_tool_name: str | None,
+    read_only_file_request: bool,
+    history: list,
+    state: AgentState,
+) -> AIMessage | None:
+    tool_name = ""
+    if preferred_tool_name and current_turn_has_successful_tool_name(history, preferred_tool_name):
+        tool_name = preferred_tool_name
+    elif read_only_file_request:
+        for event in reversed(current_turn_tool_events(history)):
+            name = str(event.get("name", ""))
+            if event.get("success") and name in READ_ONLY_TOOL_NAMES:
+                tool_name = name
+                break
+
+    if not tool_name:
         return None
 
     last_tool_result = state.get("last_tool_output", "")
-    formatted_response = format_info_tool_response(preferred_tool, last_tool_result)
+    formatted_response = format_preferred_tool_response(last_tool_result)
     return AIMessage(content=formatted_response)
+
+
+def _run_main_execution_branch(
+    *,
+    llm: ChatOllama,
+    planner_llm: ChatOllama,
+    state: AgentState,
+    history: list,
+    recent_history: list,
+    route: str,
+    active_system_prompt: str,
+    retrieval_messages: list[SystemMessage],
+    rolling_summary: str,
+    preferred_required_tool_name: str | None,
+    preferred_required_tool_kind: str | None,
+    preferred_required_tool_pending: bool,
+    planner_plan_source: str,
+    planner_plan: str,
+    planner_domain: str,
+    planner_domain_enforced: bool,
+    planner_confidence: float,
+    file_generation_requested: bool,
+    successful_tool_result_in_turn: bool,
+    current_filegen_issue: str | None,
+    read_only_file_request: bool,
+    action_required: bool,
+    tool_name_set: set[str],
+) -> AIMessage:
+    skip_action_enforcement = False
+    response_llm = planner_llm if route in {"casual", "coding_discussion", "conversation"} else llm
+    allow_tool_recovery = route not in {"casual", "coding_discussion", "conversation"}
+    pre_messages, early_response = _build_pre_messages(
+        active_system_prompt=active_system_prompt,
+        retrieval_messages=retrieval_messages,
+        rolling_summary=rolling_summary,
+        route=route,
+        preferred_required_tool_name=preferred_required_tool_name,
+        preferred_required_tool_pending=preferred_required_tool_pending,
+        planner_plan_source=planner_plan_source,
+        planner_plan=planner_plan,
+        planner_domain=planner_domain,
+        planner_domain_enforced=planner_domain_enforced,
+        planner_confidence=planner_confidence,
+        file_generation_requested=file_generation_requested,
+        successful_tool_result_in_turn=successful_tool_result_in_turn,
+        current_filegen_issue=current_filegen_issue,
+        read_only_file_request=read_only_file_request,
+        action_required=action_required,
+        state=state,
+    )
+    if early_response is not None:
+        return early_response
+
+    response = response_llm.invoke([*pre_messages, *recent_history])
+
+    response = _apply_response_recovery(
+        response_llm=response_llm,
+        planner_llm=planner_llm,
+        pre_messages=pre_messages,
+        recent_history=recent_history,
+        response=response,
+        allow_tool_recovery=allow_tool_recovery,
+        route=route,
+        tool_name_set=tool_name_set,
+    )
+
+    response = _apply_read_only_response_guard(
+        llm=llm,
+        pre_messages=pre_messages,
+        recent_history=recent_history,
+        response=response,
+        read_only_file_request=read_only_file_request,
+        tool_name_set=tool_name_set,
+    )
+
+    response = _apply_repeated_signature_guard(
+        llm=llm,
+        pre_messages=pre_messages,
+        recent_history=recent_history,
+        response=response,
+        action_required=action_required,
+        state=state,
+    )
+
+    response, unchanged_write_stopped = _apply_unchanged_write_guard(
+        llm=llm,
+        pre_messages=pre_messages,
+        recent_history=recent_history,
+        response=response,
+        state=state,
+        file_generation_requested=file_generation_requested,
+        tool_name_set=tool_name_set,
+    )
+    skip_action_enforcement = skip_action_enforcement or unchanged_write_stopped
+
+    response = _apply_failed_rewrite_guard(
+        llm=llm,
+        pre_messages=pre_messages,
+        recent_history=recent_history,
+        history=history,
+        response=response,
+        state=state,
+    )
+
+    response = _apply_action_enforcement(
+        llm=llm,
+        pre_messages=pre_messages,
+        recent_history=recent_history,
+        response=response,
+        tool_name_set=tool_name_set,
+        file_generation_requested=file_generation_requested,
+        successful_tool_result_in_turn=successful_tool_result_in_turn,
+        current_filegen_issue=current_filegen_issue,
+        preferred_required_tool_name=preferred_required_tool_name,
+        preferred_required_tool_kind=preferred_required_tool_kind,
+        preferred_required_tool_pending=preferred_required_tool_pending,
+        action_required=action_required,
+        skip_action_enforcement=skip_action_enforcement,
+    )
+
+    return _apply_workspace_claim_guard(
+        history=history,
+        response=response,
+        tool_name_set=tool_name_set,
+    )
 
 
 def create_graph_nodes(
@@ -881,8 +1021,16 @@ def create_graph_nodes(
         planner_plan_source = str(state.get("planner_plan_source", "") or "")
         latest_user_prompt = latest_user_message(history)
         action_required = requires_action(latest_user_prompt)
-        preferred_tool = preferred_info_tool(latest_user_prompt)
+        preferred_info_tool_name = preferred_info_tool(latest_user_prompt)
         preferred_file_tool_name = preferred_file_tool(latest_user_prompt)
+        preferred_required_tool_name, preferred_required_tool_kind = _preferred_required_tool(
+            preferred_info_tool_name,
+            preferred_file_tool_name,
+        )
+        preferred_required_tool_pending = bool(
+            preferred_required_tool_name
+            and not current_turn_has_successful_tool_name(history, preferred_required_tool_name)
+        )
         use_sap_prompt = route == "action:sap" or planner_domain == "sap"
         active_system_prompt = sap_system_prompt if use_sap_prompt and sap_system_prompt else system_prompt
         file_generation_requested = route == "action:file_generation" or is_file_generation_request(latest_user_prompt)
@@ -905,8 +1053,7 @@ def create_graph_nodes(
             active_system_prompt=active_system_prompt,
             retrieval_messages=retrieval_messages,
             rolling_summary=rolling_summary,
-            preferred_tool=preferred_tool,
-            preferred_file_tool_name=preferred_file_tool_name,
+            preferred_required_tool_name=preferred_required_tool_name,
             tool_name_set=tool_name_set,
             file_generation_requested=file_generation_requested,
             current_filegen_issue=current_filegen_issue,
@@ -917,25 +1064,29 @@ def create_graph_nodes(
         if fast_path_response is not None:
             return response_with_usage(state, fast_path_response)
 
-        info_tool_response = _apply_info_tool_fast_path(
-            preferred_tool=preferred_tool,
+        preferred_tool_response = _apply_preferred_tool_fast_path(
+            preferred_tool_name=preferred_required_tool_name,
+            read_only_file_request=read_only_file_request,
             history=history,
             state=state,
         )
 
-        if info_tool_response is not None:
-            response = info_tool_response
+        if preferred_tool_response is not None:
+            response = preferred_tool_response
         else:
-            skip_action_enforcement = False
-            response_llm = planner_llm if route in {"casual", "coding_discussion", "conversation"} else llm
-            allow_tool_recovery = route not in {"casual", "coding_discussion", "conversation"}
-            pre_messages, early_response = _build_pre_messages(
+            response = _run_main_execution_branch(
+                llm=llm,
+                planner_llm=planner_llm,
+                state=state,
+                history=history,
+                recent_history=recent_history,
+                route=route,
                 active_system_prompt=active_system_prompt,
                 retrieval_messages=retrieval_messages,
                 rolling_summary=rolling_summary,
-                route=route,
-                preferred_tool=preferred_tool,
-                preferred_file_tool_name=preferred_file_tool_name,
+                preferred_required_tool_name=preferred_required_tool_name,
+                preferred_required_tool_kind=preferred_required_tool_kind,
+                preferred_required_tool_pending=preferred_required_tool_pending,
                 planner_plan_source=planner_plan_source,
                 planner_plan=planner_plan,
                 planner_domain=planner_domain,
@@ -946,81 +1097,6 @@ def create_graph_nodes(
                 current_filegen_issue=current_filegen_issue,
                 read_only_file_request=read_only_file_request,
                 action_required=action_required,
-                state=state,
-            )
-            if early_response is not None:
-                response = early_response
-                return response_with_usage(state, response)
-
-            response = response_llm.invoke([*pre_messages, *recent_history])
-
-            response = _apply_response_recovery(
-                response_llm=response_llm,
-                planner_llm=planner_llm,
-                pre_messages=pre_messages,
-                recent_history=recent_history,
-                response=response,
-                allow_tool_recovery=allow_tool_recovery,
-                route=route,
-                tool_name_set=tool_name_set,
-            )
-
-            response = _apply_read_only_response_guard(
-                llm=llm,
-                pre_messages=pre_messages,
-                recent_history=recent_history,
-                response=response,
-                read_only_file_request=read_only_file_request,
-                tool_name_set=tool_name_set,
-            )
-
-            response = _apply_repeated_signature_guard(
-                llm=llm,
-                pre_messages=pre_messages,
-                recent_history=recent_history,
-                response=response,
-                action_required=action_required,
-                state=state,
-            )
-
-            response, unchanged_write_stopped = _apply_unchanged_write_guard(
-                llm=llm,
-                pre_messages=pre_messages,
-                recent_history=recent_history,
-                response=response,
-                state=state,
-                file_generation_requested=file_generation_requested,
-                tool_name_set=tool_name_set,
-            )
-            skip_action_enforcement = skip_action_enforcement or unchanged_write_stopped
-
-            response = _apply_failed_rewrite_guard(
-                llm=llm,
-                pre_messages=pre_messages,
-                recent_history=recent_history,
-                history=history,
-                response=response,
-                state=state,
-            )
-
-            response = _apply_action_enforcement(
-                llm=llm,
-                pre_messages=pre_messages,
-                recent_history=recent_history,
-                response=response,
-                tool_name_set=tool_name_set,
-                file_generation_requested=file_generation_requested,
-                successful_tool_result_in_turn=successful_tool_result_in_turn,
-                current_filegen_issue=current_filegen_issue,
-                preferred_tool=preferred_tool,
-                preferred_file_tool_name=preferred_file_tool_name,
-                action_required=action_required,
-                skip_action_enforcement=skip_action_enforcement,
-            )
-
-            response = _apply_workspace_claim_guard(
-                history=history,
-                response=response,
                 tool_name_set=tool_name_set,
             )
 

@@ -11,9 +11,61 @@ TOOL_RESULT_MARKER = "<tool_result_json>"
 class ToolSerializableModel(BaseModel):
     """Base model for tool payloads that need summary + JSON output."""
 
+    display: str | None = None
+
+    @staticmethod
+    def _default_display_from_payload(payload: dict[str, Any], summary: str) -> str:
+        data = payload.get("data")
+        data_dict = data if isinstance(data, dict) else {}
+
+        entries = payload.get("entries")
+        if not isinstance(entries, list):
+            entries = data_dict.get("entries")
+        if isinstance(entries, list):
+            path = str(payload.get("path", "") or data_dict.get("path", "") or ".")
+            if not entries:
+                return f"No files found under {path}."
+            lines = "\n".join(f"- {entry}" for entry in entries)
+            return f"Files under {path}:\n{lines}"
+
+        content = payload.get("content")
+        if not isinstance(content, str):
+            content = data_dict.get("content")
+        if isinstance(content, str):
+            path_label = str(payload.get("path", "") or data_dict.get("path", "") or "file")
+            max_chars = 4000
+            if len(content) > max_chars:
+                return f"Contents of {path_label}:\n{content[:max_chars]}\n\n...[truncated]"
+            return f"Contents of {path_label}:\n{content}"
+
+        if {"prompt_tokens", "completion_tokens", "total_tokens"}.issubset(data_dict.keys()):
+            prompt = data_dict.get("prompt_tokens", 0)
+            completion = data_dict.get("completion_tokens", 0)
+            total = data_dict.get("total_tokens", 0)
+            return f"Token usage: {prompt} prompt tokens, {completion} completion tokens ({total} total)"
+
+        if "formatted" in data_dict:
+            return f"The current time is: {data_dict.get('formatted', '')}"
+
+        if {"model", "context_window", "workspace"}.issubset(data_dict.keys()):
+            model = data_dict.get("model", "unknown")
+            context = data_dict.get("context_window", "unknown")
+            workspace = data_dict.get("workspace", "unknown")
+            return f"Agent info: Model={model}, Context window={context}, Workspace={workspace}"
+
+        if summary and data is not None:
+            if isinstance(data, str):
+                return f"{summary}\nData: {data}"
+            if isinstance(data, (dict, list)):
+                return f"{summary}\nData:\n{json.dumps(data, indent=2, ensure_ascii=True)}"
+        return summary
+
     def to_tool_output(self) -> str:
         summary = getattr(self, "message", self.__class__.__name__)
-        return f"{summary}\n{TOOL_RESULT_MARKER}\n{self.model_dump_json()}"
+        payload = self.model_dump()
+        if not isinstance(payload.get("display"), str) or not str(payload.get("display") or "").strip():
+            payload["display"] = self._default_display_from_payload(payload, str(summary))
+        return f"{summary}\n{TOOL_RESULT_MARKER}\n{json.dumps(payload, ensure_ascii=True)}"
 
 
 class TokenUsage(BaseModel):

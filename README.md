@@ -11,7 +11,7 @@ CortexNode runs a bounded reasoning loop that can call sandboxed tools for file 
 - Sandboxed file tools: `list_files`, `read_file`, `write_file`, `make_directory`
 - Sandboxed Python execution tool: `run_python`
 - Git read tools: `git_status`, `git_diff`, `git_log`, `git_show`
-- Runtime info tools: `agent_info`, `token_usage`, `current_time`
+- Runtime info tools: `agent_info`, `token_usage`, `current_time`, `solve_math`
 - Simple local RAG over `.md` and `.json` files in `knowledge/`
 - Retrieval tools: `rag_search`, `rag_refresh_index`
 - SCADA stub tool for planned MQTT/OPC-UA integrations
@@ -260,6 +260,7 @@ cortex-node/
 - `brain_node` in `core/graph_nodes.py` has been decomposed into smaller helpers to make guardrail behavior easier to test and evolve.
 - Git tools execute in the selected workspace directory and return stdout/stderr/exit code.
 - `current_time` is the preferred path for time/date questions to avoid guessed values.
+- `solve_math` handles deterministic arithmetic and proportional math; proportional conversions are premise-based and reuse user-stated relations within the session.
 - Generated files and verification artifacts are created inside the sandboxed `workspace/` directory.
 - SCADA integrations are currently placeholders and not yet connected to real PLC/telemetry endpoints.
 

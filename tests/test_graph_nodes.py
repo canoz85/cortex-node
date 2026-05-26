@@ -5,8 +5,8 @@ from core.graph_nodes import (
     _apply_action_enforcement,
     _apply_brain_fast_path,
     _apply_failed_rewrite_guard,
+    _apply_preferred_tool_fast_path,
     _apply_file_generation_fast_path,
-    _apply_info_tool_fast_path,
     _apply_read_only_response_guard,
     _apply_repeated_signature_guard,
     _apply_response_recovery,
@@ -113,6 +113,18 @@ def test_required_first_tool_response_for_other_tools_has_empty_args():
     call = response.tool_calls[0]
     assert call["name"] == "token_usage"
     assert call["args"] == {}
+    assert call["type"] == "tool_call"
+    assert call["id"].startswith("guard-required-tool-")
+
+
+def test_required_first_tool_response_for_solve_math_passes_question():
+    response = _required_first_tool_response("solve_math", "1 meter is 150 cm. what is 10 meter")
+
+    assert response.content == "Calling solve_math to answer your request."
+    assert len(response.tool_calls) == 1
+    call = response.tool_calls[0]
+    assert call["name"] == "solve_math"
+    assert call["args"] == {"question": "1 meter is 150 cm. what is 10 meter"}
     assert call["type"] == "tool_call"
     assert call["id"].startswith("guard-required-tool-")
 
@@ -685,8 +697,9 @@ def test_apply_action_enforcement_returns_original_response_when_tool_calls_alre
         file_generation_requested=False,
         successful_tool_result_in_turn=False,
         current_filegen_issue=None,
-        preferred_tool=None,
-        preferred_file_tool_name=None,
+        preferred_required_tool_name=None,
+        preferred_required_tool_kind=None,
+        preferred_required_tool_pending=False,
         action_required=True,
         skip_action_enforcement=False,
     )
@@ -709,8 +722,9 @@ def test_apply_action_enforcement_uses_required_info_tool_prompt_and_finalizes_p
         file_generation_requested=False,
         successful_tool_result_in_turn=False,
         current_filegen_issue=None,
-        preferred_tool="token_usage",
-        preferred_file_tool_name=None,
+        preferred_required_tool_name="token_usage",
+        preferred_required_tool_kind="info",
+        preferred_required_tool_pending=True,
         action_required=False,
         skip_action_enforcement=False,
     )
@@ -739,8 +753,9 @@ def test_apply_action_enforcement_prefers_incomplete_file_generation_prompt_over
         file_generation_requested=True,
         successful_tool_result_in_turn=True,
         current_filegen_issue="missing validation",
-        preferred_tool=None,
-        preferred_file_tool_name=None,
+        preferred_required_tool_name=None,
+        preferred_required_tool_kind=None,
+        preferred_required_tool_pending=False,
         action_required=True,
         skip_action_enforcement=False,
     )
@@ -765,10 +780,35 @@ def test_apply_action_enforcement_skips_generic_action_prompt_when_skip_flag_set
         file_generation_requested=False,
         successful_tool_result_in_turn=False,
         current_filegen_issue=None,
-        preferred_tool=None,
-        preferred_file_tool_name=None,
+        preferred_required_tool_name=None,
+        preferred_required_tool_kind=None,
+        preferred_required_tool_pending=False,
         action_required=True,
         skip_action_enforcement=True,
+    )
+
+    assert guarded is response
+    assert llm.invocations == []
+
+
+def test_apply_action_enforcement_does_not_reenforce_file_tool_after_success():
+    response = AIMessage(content="final listing answer")
+    llm = DummyLLM(AIMessage(content="unused"))
+
+    guarded = _apply_action_enforcement(
+        llm=llm,
+        pre_messages=[],
+        recent_history=[],
+        response=response,
+        tool_name_set={"list_files"},
+        file_generation_requested=False,
+        successful_tool_result_in_turn=True,
+        current_filegen_issue=None,
+        preferred_required_tool_name="list_files",
+        preferred_required_tool_kind="file",
+        preferred_required_tool_pending=False,
+        action_required=True,
+        skip_action_enforcement=False,
     )
 
     assert guarded is response
@@ -947,8 +987,8 @@ def test_build_pre_messages_returns_missing_dependency_response_when_detected():
         retrieval_messages=[],
         rolling_summary="",
         route="action",
-        preferred_tool=None,
-        preferred_file_tool_name=None,
+        preferred_required_tool_name=None,
+        preferred_required_tool_pending=False,
         planner_plan_source="planner",
         planner_plan="inspect and fix",
         planner_domain="general",
@@ -975,8 +1015,8 @@ def test_build_pre_messages_adds_action_brief_and_read_only_guidance():
         retrieval_messages=retrieval_messages,
         rolling_summary="summary text",
         route="action",
-        preferred_tool=None,
-        preferred_file_tool_name="list_files",
+        preferred_required_tool_name="list_files",
+        preferred_required_tool_pending=True,
         planner_plan_source="planner",
         planner_plan="1. inspect files\n2. summarize",
         planner_domain="general",
@@ -999,14 +1039,40 @@ def test_build_pre_messages_adds_action_brief_and_read_only_guidance():
     assert any("read-only file analysis request" in content for content in contents)
 
 
+def test_build_pre_messages_skips_file_tool_first_guidance_when_already_satisfied():
+    pre_messages, early_response = _build_pre_messages(
+        active_system_prompt="system",
+        retrieval_messages=[],
+        rolling_summary="",
+        route="action",
+        preferred_required_tool_name="list_files",
+        preferred_required_tool_pending=False,
+        planner_plan_source="planner",
+        planner_plan="1. list files\n2. answer",
+        planner_domain="general",
+        planner_domain_enforced=False,
+        planner_confidence=0.0,
+        file_generation_requested=False,
+        successful_tool_result_in_turn=True,
+        current_filegen_issue=None,
+        read_only_file_request=True,
+        action_required=True,
+        state={},
+    )
+
+    assert early_response is None
+    contents = [message.content for message in pre_messages]
+    assert not any("must be answered by calling the list_files tool first" in content for content in contents)
+
+
 def test_build_pre_messages_adds_failure_guidance_for_stderr_and_args_scope():
     pre_messages, early_response = _build_pre_messages(
         active_system_prompt="system",
         retrieval_messages=[],
         rolling_summary="",
         route="action:file_generation",
-        preferred_tool=None,
-        preferred_file_tool_name=None,
+        preferred_required_tool_name=None,
+        preferred_required_tool_pending=False,
         planner_plan_source="planner",
         planner_plan="repair file",
         planner_domain="general",
@@ -1164,8 +1230,7 @@ def test_apply_brain_fast_path_returns_clarify_domain_response():
         active_system_prompt="system",
         retrieval_messages=[],
         rolling_summary="",
-        preferred_tool=None,
-        preferred_file_tool_name=None,
+        preferred_required_tool_name=None,
         tool_name_set=set(),
         file_generation_requested=False,
         current_filegen_issue=None,
@@ -1188,8 +1253,7 @@ def test_apply_brain_fast_path_returns_required_first_tool_response():
         active_system_prompt="system",
         retrieval_messages=[],
         rolling_summary="",
-        preferred_tool="token_usage",
-        preferred_file_tool_name=None,
+        preferred_required_tool_name="token_usage",
         tool_name_set={"token_usage"},
         file_generation_requested=False,
         current_filegen_issue=None,
@@ -1215,8 +1279,7 @@ def test_apply_brain_fast_path_returns_direct_discussion_response_for_conversati
         active_system_prompt="system",
         retrieval_messages=[],
         rolling_summary="",
-        preferred_tool=None,
-        preferred_file_tool_name=None,
+        preferred_required_tool_name=None,
         tool_name_set=set(),
         file_generation_requested=False,
         current_filegen_issue=None,
@@ -1253,8 +1316,7 @@ def test_apply_brain_fast_path_returns_read_audit_response():
         active_system_prompt="system",
         retrieval_messages=[],
         rolling_summary="",
-        preferred_tool=None,
-        preferred_file_tool_name=None,
+        preferred_required_tool_name=None,
         tool_name_set=set(),
         file_generation_requested=False,
         current_filegen_issue=None,
@@ -1289,8 +1351,7 @@ def test_apply_brain_fast_path_returns_action_completion_summary_when_ready():
         active_system_prompt="system",
         retrieval_messages=[],
         rolling_summary="",
-        preferred_tool=None,
-        preferred_file_tool_name=None,
+        preferred_required_tool_name=None,
         tool_name_set={"write_file"},
         file_generation_requested=False,
         current_filegen_issue=None,
@@ -1303,9 +1364,10 @@ def test_apply_brain_fast_path_returns_action_completion_summary_when_ready():
     assert response.content == "Completed action summary"
 
 
-def test_apply_info_tool_fast_path_returns_none_when_preferred_tool_missing():
-    response = _apply_info_tool_fast_path(
-        preferred_tool=None,
+def test_apply_preferred_tool_fast_path_returns_none_when_preferred_tool_missing():
+    response = _apply_preferred_tool_fast_path(
+        preferred_tool_name=None,
+        read_only_file_request=False,
         history=[],
         state={},
     )
@@ -1313,7 +1375,7 @@ def test_apply_info_tool_fast_path_returns_none_when_preferred_tool_missing():
     assert response is None
 
 
-def test_apply_info_tool_fast_path_formats_last_tool_output_when_info_tool_already_called():
+def test_apply_preferred_tool_fast_path_formats_last_tool_output_when_info_tool_already_called():
     tool_call = AIMessage(
         content="",
         tool_calls=[{"name": "token_usage", "args": {}, "id": "info-1", "type": "tool_call"}],
@@ -1327,12 +1389,14 @@ def test_apply_info_tool_fast_path_formats_last_tool_output_when_info_tool_alrea
         tool_call_id="info-1",
     )
 
-    response = _apply_info_tool_fast_path(
-        preferred_tool="token_usage",
+    response = _apply_preferred_tool_fast_path(
+        preferred_tool_name="token_usage",
+        read_only_file_request=False,
         history=[tool_call, tool_result],
         state={
             "last_tool_output": {
                 "message": "Token usage retrieved",
+                "display": "Token usage: 10 prompt tokens, 4 completion tokens (14 total)",
                 "data": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
             }
         },
@@ -1340,3 +1404,81 @@ def test_apply_info_tool_fast_path_formats_last_tool_output_when_info_tool_alrea
 
     assert response is not None
     assert response.content == "Token usage: 10 prompt tokens, 4 completion tokens (14 total)"
+
+
+def test_apply_preferred_tool_fast_path_returns_none_when_preferred_file_tool_missing():
+    response = _apply_preferred_tool_fast_path(
+        preferred_tool_name=None,
+        read_only_file_request=False,
+        history=[],
+        state={},
+    )
+
+    assert response is None
+
+
+def test_apply_preferred_tool_fast_path_formats_last_tool_output_when_list_files_already_called():
+    tool_call = AIMessage(
+        content="",
+        tool_calls=[{"name": "list_files", "args": {"path": "."}, "id": "file-1", "type": "tool_call"}],
+    )
+    tool_result = ToolMessage(
+        content=ToolResult(
+            success=True,
+            message="Listing for .",
+            data={"path": ".", "entries": ["workspace/", "README.md"]},
+        ).to_tool_output(),
+        tool_call_id="file-1",
+    )
+
+    response = _apply_preferred_tool_fast_path(
+        preferred_tool_name="list_files",
+        read_only_file_request=False,
+        history=[tool_call, tool_result],
+        state={
+            "last_tool_output": {
+                "success": True,
+                "message": "Listing for .",
+                "display": "Files under .:\n- workspace/\n- README.md",
+                "path": ".",
+                "entries": ["workspace/", "README.md"],
+            }
+        },
+    )
+
+    assert response is not None
+    assert response.content == "Files under .:\n- workspace/\n- README.md"
+
+
+def test_apply_preferred_tool_fast_path_formats_read_only_read_file_without_preferred_tool():
+    tool_call = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "input.txt"}, "id": "file-2", "type": "tool_call"}],
+    )
+    tool_result = ToolMessage(
+        content=ReadFileResult(
+            success=True,
+            message="Read file: input.txt",
+            path="input.txt",
+            content="hello",
+        ).to_tool_output(),
+        tool_call_id="file-2",
+    )
+
+    response = _apply_preferred_tool_fast_path(
+        preferred_tool_name=None,
+        read_only_file_request=True,
+        history=[tool_call, tool_result],
+        state={
+            "last_tool_output": {
+                "success": True,
+                "message": "Read file: input.txt",
+                "display": "Contents of input.txt:\nhello",
+                "path": "input.txt",
+                "content": "hello",
+            }
+        },
+    )
+
+    assert response is not None
+    assert response.content == "Contents of input.txt:\nhello"

@@ -69,3 +69,55 @@ def test_update_token_usage_ignores_invalid_or_negative_values():
     assert result["data"]["prompt_tokens"] == 0
     assert result["data"]["completion_tokens"] == 0
     assert result["data"]["total_tokens"] == 0
+
+
+def test_solve_math_handles_proportional_question_deterministically():
+    tools = get_info_tools(model="qwen", workspace_dir="workspace")
+    solve_math = get_tool(tools, "solve_math")
+
+    result = parse_result(solve_math.invoke({"question": "1 meter is 150 cm. what is 10 meter"}))
+
+    assert result["success"] is True
+    assert result["data"]["method"] == "proportional"
+    assert result["data"]["result"] == 1500
+    assert "Based on your stated relation (assumption)" in result["display"]
+    assert "Used only the relationship provided in the question." in result["display"]
+    assert result["data"]["warning"] is None
+
+
+def test_solve_math_handles_arithmetic_expression():
+    tools = get_info_tools(model="qwen", workspace_dir="workspace")
+    solve_math = get_tool(tools, "solve_math")
+
+    result = parse_result(solve_math.invoke({"question": "what is 12 / (3 + 1)"}))
+
+    assert result["success"] is True
+    assert result["data"]["method"] == "arithmetic"
+    assert result["data"]["result"] == 3
+    assert result["display"] == "Result: 3"
+
+
+def test_solve_math_proportional_without_canonical_uses_assumption_note_only():
+    tools = get_info_tools(model="qwen", workspace_dir="workspace")
+    solve_math = get_tool(tools, "solve_math")
+
+    result = parse_result(solve_math.invoke({"question": "1 widget is 3 sprockets. what is 5 widget"}))
+
+    assert result["success"] is True
+    assert result["data"]["method"] == "proportional"
+    assert result["data"]["warning"] is None
+    assert "Based on your stated relation (assumption)" in result["display"]
+    assert "Used only the relationship provided in the question." in result["display"]
+
+
+def test_solve_math_reuses_previously_stated_relation_in_followup_question():
+    tools = get_info_tools(model="qwen", workspace_dir="workspace")
+    solve_math = get_tool(tools, "solve_math")
+
+    parse_result(solve_math.invoke({"question": "1 meter is 150 cm. what is 10 meter"}))
+    follow_up = parse_result(solve_math.invoke({"question": "how much is 1 meter"}))
+
+    assert follow_up["success"] is True
+    assert follow_up["data"]["method"] == "proportional_from_context"
+    assert follow_up["data"]["result"] == 150
+    assert "Used the previously stated relationship from this session." in follow_up["display"]

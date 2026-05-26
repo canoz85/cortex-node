@@ -12,6 +12,10 @@ from core.graph_intents import (
 def test_preferred_info_tool_detection():
     assert preferred_info_tool("show token usage") == "token_usage"
     assert preferred_info_tool("what time is it now") == "current_time"
+    assert preferred_info_tool("1 meter is 150 cm. what is 10 meter") == "solve_math"
+    assert preferred_info_tool("what is 12 / (3 + 1)") == "solve_math"
+    assert preferred_info_tool("how much is 1 meter") == "solve_math"
+    assert preferred_info_tool("what is polymorphism in OOP") is None
     assert preferred_info_tool("show model runtime configuration") == "agent_info"
     assert preferred_info_tool("write a script") is None
 

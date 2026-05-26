@@ -79,31 +79,21 @@ def format_action_completion_response(history: list) -> str | None:
     return " ".join(parts).strip()
 
 
-def format_info_tool_response(tool_name: str, tool_result: dict) -> str:
-    """Format info tool ToolResult into a readable response using message + data fields."""
+def format_tool_result_response(tool_result: dict) -> str:
+    """Format tool output from canonical display text produced at tool serialization."""
     if not isinstance(tool_result, dict):
         return str(tool_result)
 
-    message = tool_result.get("message", "")
-    data = tool_result.get("data", {})
+    display = tool_result.get("display")
+    if isinstance(display, str) and display.strip():
+        return display
+    message = str(tool_result.get("message", "") or "")
+    return message or "Tool completed successfully."
 
-    if tool_name == "current_time" and isinstance(data, dict):
-        formatted = data.get("formatted", "")
-        return f"The current time is: {formatted}"
 
-    if tool_name == "token_usage" and isinstance(data, dict):
-        prompt = data.get("prompt_tokens", 0)
-        completion = data.get("completion_tokens", 0)
-        total = data.get("total_tokens", 0)
-        return f"Token usage: {prompt} prompt tokens, {completion} completion tokens ({total} total)"
-
-    if tool_name == "agent_info" and isinstance(data, dict):
-        model = data.get("model", "unknown")
-        context = data.get("context_window", "unknown")
-        workspace = data.get("workspace", "unknown")
-        return f"Agent info: Model={model}, Context window={context}, Workspace={workspace}"
-
-    return message
+def format_preferred_tool_response(tool_result: dict) -> str:
+    """Backwards-compatible alias for shape-driven tool formatting."""
+    return format_tool_result_response(tool_result)
 
 
 def format_tool_call_preview(message: AIMessage) -> str:
