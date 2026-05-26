@@ -1,3 +1,5 @@
+import logging
+
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from core.graph_constants import MAX_REASONING_STEPS
@@ -98,3 +100,58 @@ def test_run_prompt_emits_max_step_warning(capsys):
 
     output = capsys.readouterr().out
     assert "Max reasoning steps reached" in output
+
+
+def test_run_prompt_logs_completion_metrics(caplog):
+    planner_event = {
+        "planner": {
+            "steps": 1,
+            "planner_route": "action",
+            "plan": "1. call list_files",
+        }
+    }
+    brain_with_tool_call = {
+        "brain": {
+            "steps": 2,
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "list_files", "args": {"path": "."}, "id": "call-1", "type": "tool_call"}],
+                )
+            ],
+        }
+    }
+    tools_event = {
+        "tools": {
+            "steps": 3,
+            "messages": [
+                ToolMessage(
+                    content=ToolResult(success=True, message="Listing for .", data={"entries": ["a.py"]}).to_tool_output(),
+                    tool_call_id="call-1",
+                )
+            ],
+        }
+    }
+    final_brain_event = {
+        "brain": {
+            "steps": 4,
+            "messages": [AIMessage(content="Completed")],
+        }
+    }
+
+    app = FakeApp([planner_event, brain_with_tool_call, tools_event, final_brain_event])
+    with caplog.at_level(logging.INFO):
+        run_prompt(app, "list files")
+
+    completed_records = [record for record in caplog.records if getattr(record, "event_name", "") == "prompt_completed"]
+    assert len(completed_records) == 1
+    completed = completed_records[0]
+    assert completed.node_updates == 4
+    assert completed.tool_call_messages == 1
+    assert completed.tool_call_count == 1
+    assert completed.tool_result_messages == 1
+    assert completed.duration_ms >= 0
+    assert completed.stop_reason == "completed"
+    assert completed.max_steps_reached is False
+    assert completed.stopped_on_pseudo_call is False
+    assert completed.stopped_on_action_stop is False

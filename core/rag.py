@@ -139,6 +139,7 @@ class WorkspaceRAG:
         self.top_k = top_k
         self._embeddings: OllamaEmbeddings | None = None
         self._chunks: list[RagChunk] = []
+        self._search_cache: dict[tuple[str, int], list[RagMatch]] = {}
         self.refresh()
 
     def _get_embeddings(self) -> OllamaEmbeddings:
@@ -185,6 +186,7 @@ class WorkspaceRAG:
 
     def refresh(self) -> int:
         self._chunks = self._build_chunks()
+        self._search_cache.clear()
         if not self._chunks:
             return 0
 
@@ -220,6 +222,11 @@ class WorkspaceRAG:
         if not query_text:
             return []
 
+        cache_key = (query_text, effective_top_k)
+        cached_matches = self._search_cache.get(cache_key)
+        if cached_matches is not None:
+            return list(cached_matches)
+
         matches: list[RagMatch] = []
         try:
             query_embedding = list(self._get_embeddings().embed_query(query_text))
@@ -239,7 +246,9 @@ class WorkspaceRAG:
                     matches.append(RagMatch(chunk=chunk, score=score))
 
         matches.sort(key=lambda item: item.score, reverse=True)
-        return matches[:effective_top_k]
+        cached = matches[:effective_top_k]
+        self._search_cache[cache_key] = list(cached)
+        return cached
 
     def format_context(self, query: str, top_k: int | None = None) -> str:
         matches = self.search(query, top_k=top_k)

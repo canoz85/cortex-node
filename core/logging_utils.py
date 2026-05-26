@@ -66,3 +66,17 @@ def configure_logging(level: str = "INFO", json_logs: bool = False) -> None:
 
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
+
+
+def log_event(
+    logger: logging.Logger,
+    level: int,
+    message: str,
+    *,
+    event_name: str | None = None,
+    **fields,
+) -> None:
+    extra = {key: value for key, value in fields.items() if value is not None}
+    if event_name:
+        extra["event_name"] = event_name
+    logger.log(level, message, extra=extra)

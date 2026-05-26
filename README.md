@@ -258,6 +258,8 @@ cortex-node/
 
 - File and execution tools enforce sandbox boundaries relative to the selected workspace.
 - `brain_node` in `core/graph_nodes.py` has been decomposed into smaller helpers to make guardrail behavior easier to test and evolve.
+- `core/rag.py` caches search results per query and `top_k`, and `refresh()` clears that cache when the knowledge base changes.
+- `core/graph_runner.py` logs run-level observability counters on completion, including node updates, tool-call counts, tool-result counts, duration, and stop reason.
 - Git tools execute in the selected workspace directory and return stdout/stderr/exit code.
 - `current_time` is the preferred path for time/date questions to avoid guessed values.
 - `solve_math` handles deterministic arithmetic and proportional math; proportional conversions are premise-based and reuse user-stated relations within the session.
