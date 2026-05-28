@@ -1,0 +1,35 @@
+[
+  {
+    "id": "eval_info_identity",
+    "prompt": "Who are you and what tools can you use?",
+    "expected_substrings": ["agent", "tool"],
+    "max_latency_ms": 15000,
+    "weights": {
+      "content": 0.8,
+      "latency": 0.2
+    },
+    "tags": ["info", "baseline"]
+  },
+  {
+    "id": "eval_file_read_explain",
+    "prompt": "Read workspace/is_prime.py and explain what it does.",
+    "expected_substrings": ["is_prime", "workspace"],
+    "max_latency_ms": 15000,
+    "weights": {
+      "content": 0.8,
+      "latency": 0.2
+    },
+    "tags": ["file", "analysis"]
+  },
+  {
+    "id": "eval_math_proportional",
+    "prompt": "1 meter is 150 cm, what is 10 meter?",
+    "expected_substrings": ["1500", "cm"],
+    "max_latency_ms": 12000,
+    "weights": {
+      "content": 0.85,
+      "latency": 0.15
+    },
+    "tags": ["math", "deterministic"]
+  }
+]

@@ -190,6 +190,30 @@ Generate trend markdown from benchmark result JSON files:
 python scripts/benchmark_trend.py --results-dir benchmarks/results --output benchmarks/results/trend.md
 ```
 
+## Evaluation Dataset And Scoring Dashboard
+
+Evaluation dataset file:
+
+- `benchmarks/evaluation_dataset.json`
+
+Run validation-only evaluation (dataset/schema check):
+
+```bash
+python scripts/run_evaluation.py --dataset benchmarks/evaluation_dataset.json
+```
+
+Run live evaluation and generate dashboard outputs:
+
+```bash
+python scripts/run_evaluation.py --live --dataset benchmarks/evaluation_dataset.json --output benchmarks/results/evaluation-latest.json --dashboard-md benchmarks/results/evaluation-dashboard.md --dashboard-json benchmarks/results/evaluation-dashboard.json
+```
+
+Use one-command local checks including evaluation:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File run-checks.ps1 -RunEvaluation -EvaluationMaxCases 3
+```
+
 ## How It Works
 
 1. `main.py` parses CLI args and builds the LangGraph app.

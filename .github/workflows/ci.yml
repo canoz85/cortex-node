@@ -49,6 +49,15 @@ jobs:
             --results-dir benchmarks/results \
             --output benchmarks/results/trend.md
 
+      - name: Run evaluation dataset validation and dashboard build
+        run: |
+          python scripts/run_evaluation.py \
+            --dataset benchmarks/evaluation_dataset.json \
+            --max-cases 0 \
+            --output benchmarks/results/evaluation-latest.json \
+            --dashboard-md benchmarks/results/evaluation-dashboard.md \
+            --dashboard-json benchmarks/results/evaluation-dashboard.json
+
       - name: Upload benchmark artifacts
         uses: actions/upload-artifact@v4
         with:
