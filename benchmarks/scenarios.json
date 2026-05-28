@@ -1,0 +1,20 @@
+[
+  {
+    "id": "info_agent_identity",
+    "prompt": "Who are you and what tools can you use?",
+    "expected_substrings": ["agent", "tool"],
+    "tags": ["info", "smoke"]
+  },
+  {
+    "id": "file_read_intent",
+    "prompt": "Read workspace/is_prime.py and explain what it does.",
+    "expected_substrings": ["is_prime", "workspace"],
+    "tags": ["file", "read"]
+  },
+  {
+    "id": "math_intent",
+    "prompt": "1 meter is 150 cm, what is 10 meter?",
+    "expected_substrings": ["1500", "cm"],
+    "tags": ["math", "deterministic"]
+  }
+]

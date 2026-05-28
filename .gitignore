@@ -29,6 +29,13 @@ dist/
 # Logs and runtime files
 *.log
 *.pid
+.coverage
+coverage.json
+
+# Benchmark outputs
+benchmarks/results/*.json
+benchmarks/results/*.md
+!benchmarks/results/.gitkeep
 
 # OS artifacts
 .DS_Store

@@ -130,10 +130,64 @@ Run unit tests:
 python -m pytest
 ```
 
+Coverage is enforced via `pytest.ini` with:
+
+- `--cov=core --cov=tools`
+- `--cov-report=term-missing`
+- `--cov-fail-under=69` (baseline gate, intended to be raised over time)
+
+Ratcheting policy is configured in `.github/coverage-policy.json`.
+Run policy check manually:
+
+```bash
+python scripts/coverage_ratchet.py --coverage-json coverage.json --policy .github/coverage-policy.json
+```
+
 Run the graph-focused regression suite used during orchestration refactors:
 
 ```bash
 python -m pytest tests/test_graph_nodes.py tests/test_graph_runner.py tests/test_graph_capture.py tests/test_graph_messages.py tests/test_graph_planner.py tests/test_graph_routing.py tests/test_graph_intents.py
+```
+
+## CI
+
+GitHub Actions workflow: `.github/workflows/ci.yml`
+
+CI runs:
+
+- dependency installation
+- full pytest run with coverage gate
+- benchmark skeleton smoke run (dry mode)
+
+## PR/Release Checklist
+
+Before merging a change, confirm:
+
+- Tests pass locally and in CI.
+- Coverage gate passes and ratchet status is reviewed (`benchmarks/results/coverage-ratchet.md`).
+- Benchmark smoke run passes and trend delta is checked (`benchmarks/results/trend.md`).
+- If ratchet status is ready-to-ratchet, raise `--cov-fail-under` in `pytest.ini` and update `.github/coverage-policy.json`.
+
+## Benchmark Skeleton
+
+Benchmark scenarios live in `benchmarks/scenarios.json` and are executed by `scripts/benchmark.py`.
+
+Dry-run validation (CI-safe):
+
+```bash
+python scripts/benchmark.py --cases benchmarks/scenarios.json --output benchmarks/results/local-skeleton.json
+```
+
+Live benchmark execution:
+
+```bash
+python scripts/benchmark.py --live --cases benchmarks/scenarios.json --output benchmarks/results/local-live.json
+```
+
+Generate trend markdown from benchmark result JSON files:
+
+```bash
+python scripts/benchmark_trend.py --results-dir benchmarks/results --output benchmarks/results/trend.md
 ```
 
 ## How It Works
