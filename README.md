@@ -134,7 +134,7 @@ Coverage is enforced via `pytest.ini` with:
 
 - `--cov=core --cov=tools`
 - `--cov-report=term-missing`
-- `--cov-fail-under=69` (baseline gate, intended to be raised over time)
+- `--cov-fail-under=71` (baseline gate, intended to be raised over time)
 
 Ratcheting policy is configured in `.github/coverage-policy.json`.
 Run policy check manually:
