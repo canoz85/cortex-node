@@ -158,6 +158,7 @@ CI runs:
 - dependency installation
 - full pytest run with coverage gate
 - benchmark skeleton smoke run (dry mode)
+- evaluation dataset validation with route/global policy checks (`.github/evaluation-policy.json`)
 
 ## PR/Release Checklist
 
@@ -205,7 +206,7 @@ python scripts/run_evaluation.py --dataset benchmarks/evaluation_dataset.json
 Run live evaluation and generate dashboard outputs:
 
 ```bash
-python scripts/run_evaluation.py --live --dataset benchmarks/evaluation_dataset.json --output benchmarks/results/evaluation-latest.json --dashboard-md benchmarks/results/evaluation-dashboard.md --dashboard-json benchmarks/results/evaluation-dashboard.json
+python scripts/run_evaluation.py --live --semantic-scoring --semantic-model nomic-embed-text --dataset benchmarks/evaluation_dataset.json --policy .github/evaluation-policy.json --enforce-policy --output benchmarks/results/evaluation-latest.json --dashboard-md benchmarks/results/evaluation-dashboard.md --dashboard-json benchmarks/results/evaluation-dashboard.json
 ```
 
 Use one-command local checks including evaluation:

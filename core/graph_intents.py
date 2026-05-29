@@ -54,6 +54,11 @@ READ_AUDIT_INTENT_PATTERN = re.compile(
     r"\b(which|what|where)\b.*\b(files?|file)\b.*\b(read|reviewed|analy[sz]e(?:d)?)\b|\bdid you read\b",
     re.IGNORECASE,
 )
+FILE_FACT_EXTRACTION_INTENT_PATTERN = re.compile(
+    r"\b(what|which|show|tell)\b.*\b(device[_\s-]?id|id|temperature|pressure|value|status|field|json|data|latest)\b"
+    r"|\b(device[_\s-]?id|temperature|pressure)\b",
+    re.IGNORECASE,
+)
 
 
 def _domain_decision(user_text: str) -> tuple[str, float, bool, bool, str]:
@@ -97,6 +102,8 @@ def requires_action(user_text: str) -> bool:
     if requests_workspace_file_access(text):
         return True
     if preferred_file_tool(text):
+        return True
+    if is_file_fact_extraction_request(text):
         return True
     return bool(ACTION_INTENT_PATTERN.search(text))
 
@@ -148,6 +155,17 @@ def is_read_audit_request(user_text: str) -> bool:
     return bool(READ_AUDIT_INTENT_PATTERN.search(text))
 
 
+def is_file_fact_extraction_request(user_text: str) -> bool:
+    text = (user_text or "").strip()
+    if not text:
+        return False
+    if is_read_audit_request(text) or requests_workspace_file_access(text):
+        return False
+    if FILE_MUTATION_INTENT_PATTERN.search(text):
+        return False
+    return bool(FILE_FACT_EXTRACTION_INTENT_PATTERN.search(text))
+
+
 def _is_casual_chat(user_text: str) -> bool:
     """Return True for social/identity chat that should skip planning/tool routing."""
     text = (user_text or "").strip()
@@ -194,6 +212,8 @@ def planner_routing_decision(user_text: str) -> RoutingDecision:
         return RoutingDecision("action", "general", 1.0, False, "workspace listing intent", False)
     if is_read_audit_request(text):
         return RoutingDecision("action", "general", 1.0, False, "read audit intent", False)
+    if is_file_fact_extraction_request(text):
+        return RoutingDecision("action", "general", 0.9, False, "file fact extraction intent", False)
     if _is_casual_chat(text):
         return RoutingDecision("casual", "general", 1.0, False, "casual chat", False)
 

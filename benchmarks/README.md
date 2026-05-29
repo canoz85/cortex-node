@@ -45,3 +45,27 @@ python scripts/run_evaluation.py --live --dataset benchmarks/evaluation_dataset.
 ```
 
 This command writes both per-case scoring metrics and a summary dashboard.
+
+Evaluation dataset entries now support richer quality checks beyond plain substring matching:
+
+- route: route label used for route-level score breakdowns (for example: info, action, coding_discussion).
+- semantic_reference: canonical answer target used by semantic similarity scoring.
+- checks.all / checks.any: required and optional substring checks.
+- checks.regex_all / checks.regex_any: regex-based checks for output shape.
+- checks.forbidden_substrings: phrases that should not appear.
+- checks.min_output_chars: minimum response size gate.
+- dimension_weights: weighted blend for content score dimensions (substring, checks, semantic, safety, format).
+
+Semantic scoring can be enabled in live runs:
+
+```bash
+python scripts/run_evaluation.py --live --semantic-scoring --semantic-model nomic-embed-text
+```
+
+Policy guardrails can be enforced with `.github/evaluation-policy.json`:
+
+```bash
+python scripts/run_evaluation.py --dataset benchmarks/evaluation_dataset.json --policy .github/evaluation-policy.json --enforce-policy
+```
+
+Dashboards include both per-case metrics and route-level summary tables.

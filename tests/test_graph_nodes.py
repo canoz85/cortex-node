@@ -1,9 +1,10 @@
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from core.graph_nodes import (
     _action_required_enforcement_prompt,
     _apply_action_enforcement,
     _apply_brain_fast_path,
+    _apply_file_fact_grounding_guard,
     _apply_failed_rewrite_guard,
     _apply_preferred_tool_fast_path,
     _apply_file_generation_fast_path,
@@ -35,6 +36,7 @@ from core.graph_nodes import (
     _read_only_guard_correction_prompt,
     _read_only_guard_fallback_response,
     _repeated_signature_correction_prompt,
+    _repeated_success_final_answer_prompt,
     _required_tool_enforcement_prompt,
     _required_first_tool_response,
     _stderr_repair_guidance,
@@ -316,6 +318,13 @@ def test_repeated_signature_correction_prompt_mentions_reason_and_signature():
     assert 'Repeated signature: run_python:{"path":"a.py"}.' in prompt.content
     assert "That signature already failed." in prompt.content
     assert "Do not emit that same tool call again." in prompt.content
+
+
+def test_repeated_success_final_answer_prompt_blocks_tool_calls():
+    prompt = _repeated_success_final_answer_prompt('read_file:{"path":"workspace/a.py"}')
+
+    assert 'Repeated signature: read_file:{"path":"workspace/a.py"}.' in prompt.content
+    assert "Do not call any tools now." in prompt.content
 
 
 def test_read_only_analysis_guidance_blocks_mutating_tools():
@@ -864,6 +873,168 @@ def test_apply_workspace_claim_guard_keeps_response_when_file_events_exist():
     assert guarded is response
 
 
+def test_apply_file_fact_grounding_guard_keeps_response_when_not_fact_extraction():
+    response = AIMessage(content="General response")
+    llm = DummyLLM(AIMessage(content="unused"))
+
+    guarded = _apply_file_fact_grounding_guard(
+        llm=llm,
+        pre_messages=[],
+        recent_history=[],
+        history=[],
+        response=response,
+        latest_user_prompt="hello there",
+        route="action",
+    )
+
+    assert guarded is response
+    assert llm.invocations == []
+
+
+def test_apply_file_fact_grounding_guard_keeps_response_when_file_event_exists_this_turn():
+    read_call = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "workspace/dummy_input.json"}, "id": "read-1", "type": "tool_call"}],
+    )
+    read_result = ToolMessage(
+        content=ReadFileResult(
+            success=True,
+            message="Read file: workspace/dummy_input.json",
+            path="workspace/dummy_input.json",
+            content='{"device_id":"DEV_001","pressure":1.2}',
+        ).to_tool_output(),
+        tool_call_id="read-1",
+    )
+    response = AIMessage(content="device_id is DEV_001 and pressure is 1.2")
+    llm = DummyLLM(AIMessage(content="unused"))
+
+    guarded = _apply_file_fact_grounding_guard(
+        llm=llm,
+        pre_messages=[],
+        recent_history=[],
+        history=[HumanMessage(content="what is device_id and pressure"), read_call, read_result],
+        response=response,
+        latest_user_prompt="what is device_id and pressure",
+        route="action",
+    )
+
+    assert guarded is response
+    assert llm.invocations == []
+
+
+def test_apply_file_fact_grounding_guard_forces_grounding_when_no_file_evidence_this_turn():
+    response = AIMessage(content="device_id is sensor_01 and pressure is 29.56 psi")
+    llm = DummyLLM(AIMessage(content="unused"))
+
+    guarded = _apply_file_fact_grounding_guard(
+        llm=llm,
+        pre_messages=[],
+        recent_history=[],
+        history=[HumanMessage(content="what is pressure")],
+        response=response,
+        latest_user_prompt="what is pressure",
+        route="action",
+    )
+
+    assert guarded is not response
+    assert guarded.tool_calls[0]["name"] == "list_files"
+    assert guarded.tool_calls[0]["args"] == {"path": "."}
+    assert llm.invocations == []
+
+
+def test_apply_file_fact_grounding_guard_skips_file_generation_route():
+    response = AIMessage(content="plain text")
+    llm = DummyLLM(AIMessage(content="unused"))
+
+    guarded = _apply_file_fact_grounding_guard(
+        llm=llm,
+        pre_messages=[],
+        recent_history=[],
+        history=[HumanMessage(content="create script validating pressure")],
+        response=response,
+        latest_user_prompt="create script validating pressure",
+        route="action:file_generation",
+    )
+
+    assert guarded is response
+    assert llm.invocations == []
+
+
+def test_apply_file_fact_grounding_guard_finalizes_when_response_retries_read_after_successful_evidence():
+    read_call = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "workspace/dummy.json"}, "id": "read-1", "type": "tool_call"}],
+    )
+    read_result = ToolMessage(
+        content=ReadFileResult(
+            success=True,
+            message="Read file: workspace/dummy.json",
+            path="workspace/dummy.json",
+            content='{"device_id":"DEV_001"}',
+        ).to_tool_output(),
+        tool_call_id="read-1",
+    )
+    repeated_read_response = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "workspace/dummy.json"}, "id": "read-2", "type": "tool_call"}],
+    )
+    finalized = AIMessage(content="device_id is DEV_001")
+    llm = DummyLLM(finalized)
+
+    guarded = _apply_file_fact_grounding_guard(
+        llm=llm,
+        pre_messages=[],
+        recent_history=[],
+        history=[HumanMessage(content="what is device id"), read_call, read_result],
+        response=repeated_read_response,
+        latest_user_prompt="what is device id",
+        route="action",
+    )
+
+    assert guarded is finalized
+    assert len(llm.invocations) == 1
+    assert "Do not call list_files or read_file again" in llm.invocations[0][-1].content
+
+
+def test_apply_file_fact_grounding_guard_fallback_when_model_keeps_tool_calls_after_finalize_prompt():
+    read_call = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "workspace/dummy.json"}, "id": "read-1", "type": "tool_call"}],
+    )
+    read_result = ToolMessage(
+        content=ReadFileResult(
+            success=True,
+            message="Read file: workspace/dummy.json",
+            path="workspace/dummy.json",
+            content='{"device_id":"DEV_001"}',
+        ).to_tool_output(),
+        tool_call_id="read-1",
+    )
+    repeated_list_response = AIMessage(
+        content="",
+        tool_calls=[{"name": "list_files", "args": {"path": "."}, "id": "list-2", "type": "tool_call"}],
+    )
+    still_tool_call = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "workspace/dummy.json"}, "id": "read-3", "type": "tool_call"}],
+    )
+    llm = DummyLLM(still_tool_call)
+
+    guarded = _apply_file_fact_grounding_guard(
+        llm=llm,
+        pre_messages=[],
+        recent_history=[],
+        history=[HumanMessage(content="what is device id"), read_call, read_result],
+        response=repeated_list_response,
+        latest_user_prompt="what is device id",
+        route="action",
+    )
+
+    assert guarded.tool_calls == []
+    assert "already gathered file evidence" in guarded.content
+    assert len(llm.invocations) == 1
+
+
 def test_apply_repeated_signature_guard_returns_original_response_when_signature_not_repeated():
     response = AIMessage(
         content="",
@@ -909,6 +1080,62 @@ def test_apply_repeated_signature_guard_requests_different_step_for_repeated_sig
     prompt = llm.invocations[0][-1]
     assert 'Repeated signature: run_python:{"path": "a.py"}.' in prompt.content
     assert "That signature already failed." in prompt.content
+
+
+def test_apply_repeated_signature_guard_forces_final_answer_when_success_signature_repeats_again():
+    repeated_response = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "workspace/a.py"}, "id": "call-1", "type": "tool_call"}],
+    )
+    still_repeated_response = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "workspace/a.py"}, "id": "call-2", "type": "tool_call"}],
+    )
+    final_answer = AIMessage(content="device_id is DEV_001")
+    llm = SequenceLLM([still_repeated_response, final_answer])
+
+    guarded = _apply_repeated_signature_guard(
+        llm=llm,
+        pre_messages=[],
+        recent_history=[],
+        response=repeated_response,
+        action_required=True,
+        state={"last_tool_signature": 'read_file:{"path": "workspace/a.py"}', "last_tool_success": True},
+    )
+
+    assert guarded is final_answer
+    assert len(llm.invocations) == 2
+    assert "already succeeded" in llm.invocations[0][-1].content
+    assert "Do not call any tools now." in llm.invocations[1][-1].content
+
+
+def test_apply_repeated_signature_guard_returns_fallback_when_success_repeat_persists_after_finalization():
+    repeated_response = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "workspace/a.py"}, "id": "call-1", "type": "tool_call"}],
+    )
+    still_repeated_response = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "workspace/a.py"}, "id": "call-2", "type": "tool_call"}],
+    )
+    still_tool_call_after_finalization = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "workspace/a.py"}, "id": "call-3", "type": "tool_call"}],
+    )
+    llm = SequenceLLM([still_repeated_response, still_tool_call_after_finalization])
+
+    guarded = _apply_repeated_signature_guard(
+        llm=llm,
+        pre_messages=[],
+        recent_history=[],
+        response=repeated_response,
+        action_required=True,
+        state={"last_tool_signature": 'read_file:{"path": "workspace/a.py"}', "last_tool_success": True},
+    )
+
+    assert guarded.tool_calls == []
+    assert "will not repeat" in guarded.content
+    assert len(llm.invocations) == 2
 
 
 def test_apply_response_recovery_returns_pseudo_tool_fallback_when_unrecoverable():
@@ -1328,6 +1555,126 @@ def test_apply_brain_fast_path_returns_read_audit_response():
     assert response is not None
     assert "I successfully read these files in this session:" in response.content
     assert "- workspace/a.py" in response.content
+
+
+def test_apply_brain_fast_path_for_file_fact_request_reads_latest_known_file():
+    prior_user = HumanMessage(content="read workspace/dummy_input.json")
+    read_call = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": "workspace/dummy_input.json"}, "id": "read-1", "type": "tool_call"}],
+    )
+    read_result = ToolMessage(
+        content=ToolResult(
+            success=True,
+            message="Read file: workspace/dummy_input.json",
+            data={"path": "workspace/dummy_input.json", "content": '{"pressure": 1.2}'},
+        ).to_tool_output(),
+        tool_call_id="read-1",
+    )
+    latest_user = HumanMessage(content="what is the pressure value")
+
+    response = _apply_brain_fast_path(
+        planner_llm=DummyLLM(AIMessage(content="unused")),
+        history=[prior_user, read_call, read_result, latest_user],
+        recent_history=[],
+        route="action",
+        latest_user_prompt="what is the pressure value",
+        active_system_prompt="system",
+        retrieval_messages=[],
+        rolling_summary="",
+        preferred_required_tool_name=None,
+        tool_name_set={"read_file", "list_files"},
+        file_generation_requested=False,
+        current_filegen_issue=None,
+        action_required=False,
+        action_completion_summary="",
+        state={},
+    )
+
+    assert response is not None
+    assert response.tool_calls[0]["name"] == "read_file"
+    assert response.tool_calls[0]["args"] == {"path": "workspace/dummy_input.json"}
+
+
+def test_apply_brain_fast_path_for_file_fact_request_lists_files_when_no_read_history():
+    response = _apply_brain_fast_path(
+        planner_llm=DummyLLM(AIMessage(content="unused")),
+        history=[],
+        recent_history=[],
+        route="action",
+        latest_user_prompt="what is device_id from latest json data",
+        active_system_prompt="system",
+        retrieval_messages=[],
+        rolling_summary="",
+        preferred_required_tool_name=None,
+        tool_name_set={"read_file", "list_files"},
+        file_generation_requested=False,
+        current_filegen_issue=None,
+        action_required=False,
+        action_completion_summary="",
+        state={},
+    )
+
+    assert response is not None
+    assert response.tool_calls[0]["name"] == "list_files"
+    assert response.tool_calls[0]["args"] == {"path": "."}
+
+
+def test_apply_brain_fast_path_file_fact_request_does_not_repeat_after_list_success():
+    list_call = AIMessage(
+        content="",
+        tool_calls=[{"name": "list_files", "args": {"path": "."}, "id": "list-1", "type": "tool_call"}],
+    )
+    list_result = ToolMessage(
+        content=ToolResult(
+            success=True,
+            message="Listing for .",
+            data={"path": ".", "entries": ["workspace/"]},
+        ).to_tool_output(),
+        tool_call_id="list-1",
+    )
+
+    response = _apply_brain_fast_path(
+        planner_llm=DummyLLM(AIMessage(content="unused")),
+        history=[HumanMessage(content="what is pressure"), list_call, list_result],
+        recent_history=[],
+        route="action",
+        latest_user_prompt="what is pressure",
+        active_system_prompt="system",
+        retrieval_messages=[],
+        rolling_summary="",
+        preferred_required_tool_name=None,
+        tool_name_set={"read_file", "list_files"},
+        file_generation_requested=False,
+        current_filegen_issue=None,
+        action_required=False,
+        action_completion_summary="",
+        state={},
+    )
+
+    assert response is None
+
+
+def test_apply_brain_fast_path_file_generation_not_hijacked_by_fact_extraction_tokens():
+    response = _apply_brain_fast_path(
+        planner_llm=DummyLLM(AIMessage(content="unused")),
+        history=[],
+        recent_history=[],
+        route="action:file_generation",
+        latest_user_prompt="Create script and print STATUS: OK and STATUS: CRITICAL with pressure checks",
+        active_system_prompt="system",
+        retrieval_messages=[],
+        rolling_summary="",
+        preferred_required_tool_name=None,
+        tool_name_set={"read_file", "list_files", "write_file", "run_python"},
+        file_generation_requested=True,
+        current_filegen_issue=None,
+        action_required=True,
+        action_completion_summary="",
+        state={},
+    )
+
+    assert response is None
 
 
 def test_apply_brain_fast_path_returns_action_completion_summary_when_ready():

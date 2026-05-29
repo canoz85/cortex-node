@@ -1,4 +1,5 @@
 from core.graph_intents import (
+    is_file_fact_extraction_request,
     is_read_only_file_request,
     is_read_audit_request,
     is_file_generation_request,
@@ -18,6 +19,7 @@ def test_preferred_info_tool_detection():
     assert preferred_info_tool("what is polymorphism in OOP") is None
     assert preferred_info_tool("show model runtime configuration") == "agent_info"
     assert preferred_info_tool("write a script") is None
+    assert preferred_info_tool("what worked? what failed? what should be avoided next time?") is None
 
 
 def test_requires_action_detection():
@@ -78,6 +80,18 @@ def test_read_audit_intent_detection():
     assert is_read_audit_request("hello there") is False
 
 
+def test_file_fact_extraction_intent_detection():
+    assert is_file_fact_extraction_request("what is the pressure value?") is True
+    assert is_file_fact_extraction_request("tell me the device_id from latest data") is True
+    assert is_file_fact_extraction_request("which file did you read") is False
+    assert is_file_fact_extraction_request("create a script that validates pressure and status") is False
+
+
+def test_planner_route_for_file_fact_extraction_request():
+    decision = planner_routing_decision("what is the pressure value")
+    assert decision.route == "action"
+
+
 def test_golden_prompt_route_list_workspace():
     decision = planner_routing_decision("list workspace")
     assert decision.route == "action"
@@ -86,3 +100,8 @@ def test_golden_prompt_route_list_workspace():
 def test_golden_prompt_route_read_audit_query():
     decision = planner_routing_decision("which file did you read")
     assert decision.route == "action"
+
+
+def test_reflection_prompt_routes_to_conversation_not_info():
+    decision = planner_routing_decision("what worked? what failed? what should be avoided next time?")
+    assert decision.route == "conversation"

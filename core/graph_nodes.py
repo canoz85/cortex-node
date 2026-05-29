@@ -23,6 +23,7 @@ from core.graph_filegen_policy import (
 )
 from core.graph_intents import (
     is_file_generation_request,
+    is_file_fact_extraction_request,
     is_read_audit_request,
     is_read_only_file_request,
     preferred_file_tool,
@@ -68,6 +69,44 @@ def _read_audit_response(history: list) -> AIMessage:
         lines = "\n".join(f"- {path}" for path in read_paths)
         return AIMessage(content=f"I successfully read these files in this session:\n{lines}")
     return AIMessage(content="I have not successfully read any file in this session yet.")
+
+
+def _file_fact_grounding_response(history: list) -> AIMessage:
+    read_paths = successful_read_file_paths(history)
+    if read_paths:
+        return AIMessage(
+            content="Reading the latest file context to ground the requested facts.",
+            tool_calls=[
+                {
+                    "name": "read_file",
+                    "args": {"path": read_paths[-1]},
+                    "id": f"guard-file-fact-{uuid.uuid4().hex}",
+                    "type": "tool_call",
+                }
+            ],
+        )
+
+    return AIMessage(
+        content="Listing workspace files first so I can ground the requested facts.",
+        tool_calls=[
+            {
+                "name": "list_files",
+                "args": {"path": "."},
+                "id": f"guard-file-fact-{uuid.uuid4().hex}",
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def _file_fact_finalize_prompt() -> SystemMessage:
+    return SystemMessage(
+        content=(
+            "File-fact extraction guard: at least one file read/list already succeeded in this turn. "
+            "Do not call list_files or read_file again for this question. "
+            "Return the final concise factual answer now using the latest successful file output."
+        )
+    )
 
 
 def _required_first_tool_response(required_first_tool: str, latest_user_prompt: str = "") -> AIMessage:
@@ -296,6 +335,17 @@ def _repeated_signature_correction_prompt(repeated_signature: str, repeat_reason
             f"That signature {repeat_reason}. "
             "Do not emit that same tool call again. "
             "Choose the next distinct step now, such as fixing the file, reading the error output, creating sample input, verifying with different arguments, or giving the final answer if the task is complete."
+        )
+    )
+
+
+def _repeated_success_final_answer_prompt(repeated_signature: str) -> SystemMessage:
+    return SystemMessage(
+        content=(
+            "The repeated tool call already succeeded earlier in this turn and must not be emitted again. "
+            f"Repeated signature: {repeated_signature}. "
+            "Do not call any tools now. "
+            "Return a concise final answer using the tool outputs already in context."
         )
     )
 
@@ -535,6 +585,54 @@ def _apply_workspace_claim_guard(*, history: list, response: AIMessage, tool_nam
     return _workspace_claim_guard_response()
 
 
+def _apply_file_fact_grounding_guard(
+    *,
+    llm: ChatOllama,
+    pre_messages: list,
+    recent_history: list,
+    history: list,
+    response: AIMessage,
+    latest_user_prompt: str,
+    route: str,
+) -> AIMessage:
+    if route == "action:file_generation":
+        return response
+
+    if not is_file_fact_extraction_request(latest_user_prompt):
+        return response
+
+    tool_events = current_turn_tool_events(history)
+    has_file_evidence = _has_successful_file_events(tool_events)
+
+    if has_file_evidence and getattr(response, "tool_calls", None):
+        requested_tools = {str(call.get("name", "")) for call in getattr(response, "tool_calls", None) or []}
+        if requested_tools.intersection({"list_files", "read_file"}):
+            finalized = llm.invoke(
+                [
+                    *pre_messages,
+                    *recent_history,
+                    response,
+                    _file_fact_finalize_prompt(),
+                ]
+            )
+            if getattr(finalized, "tool_calls", None):
+                return AIMessage(
+                    content=(
+                        "I already gathered file evidence for this question and will stop additional file-tool calls. "
+                        "I need to provide the final extracted fact answer from the last successful read."
+                    )
+                )
+            return finalized
+
+    if has_file_evidence:
+        return response
+
+    if getattr(response, "tool_calls", None):
+        return response
+
+    return _file_fact_grounding_response(history)
+
+
 def _apply_repeated_signature_guard(
     *,
     llm: ChatOllama,
@@ -552,7 +650,7 @@ def _apply_repeated_signature_guard(
         return response
 
     repeat_reason = "already succeeded" if state.get("last_tool_success") is True else "already failed"
-    return llm.invoke(
+    corrected_response = llm.invoke(
         [
             *pre_messages,
             *recent_history,
@@ -560,6 +658,26 @@ def _apply_repeated_signature_guard(
             _repeated_signature_correction_prompt(last_tool_signature, repeat_reason),
         ]
     )
+
+    # if state.get("last_tool_success") is True and message_repeats_signature(corrected_response, last_tool_signature):
+    #     final_response = llm.invoke(
+    #         [
+    #             *pre_messages,
+    #             *recent_history,
+    #             corrected_response,
+    #             _repeated_success_final_answer_prompt(last_tool_signature),
+    #         ]
+    #     )
+    #     if getattr(final_response, "tool_calls", None):
+    #         return AIMessage(
+    #             content=(
+    #                 "I already ran this tool call successfully and will not repeat it in this turn. "
+    #                 "Using the existing tool output, I can continue with a direct answer next."
+    #             )
+    #         )
+    #     return final_response
+
+    return corrected_response
 
 
 def _apply_response_recovery(
@@ -805,6 +923,13 @@ def _apply_brain_fast_path(
     if is_read_audit_request(latest_user_prompt):
         return _read_audit_response(history)
 
+    if (
+        route != "action:file_generation"
+        and is_file_fact_extraction_request(latest_user_prompt)
+        and not _has_successful_file_events(current_turn_tool_events(history))
+    ):
+        return _file_fact_grounding_response(history)
+
     required_first_tool = preferred_required_tool_name
     if (
         required_first_tool
@@ -892,6 +1017,7 @@ def _run_main_execution_branch(
     read_only_file_request: bool,
     action_required: bool,
     tool_name_set: set[str],
+    latest_user_prompt: str,
 ) -> AIMessage:
     skip_action_enforcement = False
     response_llm = planner_llm if route in {"casual", "coding_discussion", "conversation"} else llm
@@ -983,6 +1109,16 @@ def _run_main_execution_branch(
         preferred_required_tool_pending=preferred_required_tool_pending,
         action_required=action_required,
         skip_action_enforcement=skip_action_enforcement,
+    )
+
+    response = _apply_file_fact_grounding_guard(
+        llm=llm,
+        pre_messages=pre_messages,
+        recent_history=recent_history,
+        history=history,
+        response=response,
+        latest_user_prompt=latest_user_prompt,
+        route=route,
     )
 
     return _apply_workspace_claim_guard(
@@ -1098,6 +1234,7 @@ def create_graph_nodes(
                 read_only_file_request=read_only_file_request,
                 action_required=action_required,
                 tool_name_set=tool_name_set,
+                latest_user_prompt=latest_user_prompt,
             )
 
         return response_with_usage(state, response)

@@ -64,6 +64,200 @@ def _escape_newlines_inside_strings(text: str) -> str:
     return "".join(result)
 
 
+def _extract_balanced_object(text: str, start_index: int = 0) -> str | None:
+    if not text:
+        return None
+
+    try:
+        open_index = text.index("{", start_index)
+    except ValueError:
+        return None
+
+    depth = 0
+    in_string = False
+    quote_char = ""
+    escaped = False
+
+    for index in range(open_index, len(text)):
+        char = text[index]
+
+        if escaped:
+            escaped = False
+            continue
+
+        if char == "\\":
+            escaped = True
+            continue
+
+        if in_string:
+            if char == quote_char:
+                in_string = False
+                quote_char = ""
+            continue
+
+        if char in {'"', "'"}:
+            in_string = True
+            quote_char = char
+            continue
+
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_index : index + 1]
+
+    return None
+
+
+def _as_recovered_tool_call(parsed: object, allowed_tool_names: set[str]) -> dict | None:
+    candidate = parsed
+    if isinstance(parsed, dict) and isinstance(parsed.get("tool_calls"), list):
+        tool_calls = parsed.get("tool_calls") or []
+        if tool_calls and isinstance(tool_calls[0], dict):
+            first_call = tool_calls[0]
+            if isinstance(first_call.get("function"), dict):
+                function_payload = first_call.get("function") or {}
+                candidate = {
+                    "name": function_payload.get("name"),
+                    "arguments": function_payload.get("arguments", {}),
+                }
+            else:
+                candidate = first_call
+
+    if not isinstance(candidate, dict):
+        return None
+
+    name = candidate.get("name")
+    if not isinstance(name, str) or name not in allowed_tool_names:
+        return None
+
+    arguments = candidate.get("arguments", candidate.get("args", {}))
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except Exception:
+            return None
+    if not isinstance(arguments, dict):
+        return None
+
+    return {
+        "name": name,
+        "args": arguments,
+        "id": f"pseudo-{uuid4()}",
+        "type": "tool_call",
+    }
+
+
+def _extract_json_field_slice(text: str, field_name: str) -> str | None:
+    field_match = re.search(rf'["\']{re.escape(field_name)}["\']\s*:\s*', text, flags=re.IGNORECASE)
+    if not field_match:
+        return None
+    return text[field_match.end() :]
+
+
+def _scan_relaxed_quoted_value(text: str, quote_char: str) -> tuple[str, int]:
+    result: list[str] = []
+    escaped = False
+
+    for index, char in enumerate(text):
+        if escaped:
+            result.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            result.append(char)
+            escaped = True
+            continue
+        if char == quote_char:
+            trailer = text[index + 1 :]
+            # Accept as a closing quote only at likely value boundaries.
+            if re.match(r"\s*(?:,\s*[\"\'][a-zA-Z_][a-zA-Z0-9_]*[\"\']\s*:|[}\]])", trailer):
+                return "".join(result), index + 1
+            result.append(char)
+            continue
+        result.append(char)
+
+    # No reliable closing quote found; salvage the rest as a partial value.
+    return "".join(result), len(text)
+
+
+def _extract_relaxed_string_field(text: str, field_name: str) -> str | None:
+    tail = _extract_json_field_slice(text, field_name)
+    if tail is None:
+        return None
+    stripped = tail.lstrip()
+    if not stripped or stripped[0] not in {'"', "'"}:
+        return None
+    quote_char = stripped[0]
+    raw_value, _ = _scan_relaxed_quoted_value(stripped[1:], quote_char)
+    try:
+        return json.loads(f'"{raw_value}"')
+    except Exception:
+        return (
+            raw_value.replace("\\n", "\n")
+            .replace("\\r", "\r")
+            .replace('\\"', '"')
+            .replace("\\'", "'")
+        )
+
+
+def _extract_relaxed_bool_field(text: str, field_name: str) -> bool | None:
+    tail = _extract_json_field_slice(text, field_name)
+    if tail is None:
+        return None
+    lowered = tail.lstrip().lower()
+    if lowered.startswith("true"):
+        return True
+    if lowered.startswith("false"):
+        return False
+    return None
+
+
+def _extract_relaxed_json_tool_call(content: str, allowed_tool_names: set[str]) -> dict | None:
+    if not content:
+        return None
+
+    name = _extract_relaxed_string_field(content, "name")
+    if not name or name not in allowed_tool_names:
+        return None
+
+    arguments_tail = _extract_json_field_slice(content, "arguments")
+    arguments_text = arguments_tail if arguments_tail is not None else content
+
+    if name == "write_file":
+        path = _extract_relaxed_string_field(arguments_text, "path")
+        content_value = _extract_relaxed_string_field(arguments_text, "content")
+        if not path or content_value is None:
+            return None
+        overwrite = _extract_relaxed_bool_field(arguments_text, "overwrite")
+        args: dict[str, object] = {"path": path, "content": content_value}
+        if overwrite is not None:
+            args["overwrite"] = overwrite
+        return {
+            "name": name,
+            "args": args,
+            "id": f"pseudo-{uuid4()}",
+            "type": "tool_call",
+        }
+
+    path = _extract_relaxed_string_field(arguments_text, "path")
+    if path:
+        return {
+            "name": name,
+            "args": {"path": path},
+            "id": f"pseudo-{uuid4()}",
+            "type": "tool_call",
+        }
+
+    return {
+        "name": name,
+        "args": {},
+        "id": f"pseudo-{uuid4()}",
+        "type": "tool_call",
+    }
+
+
 def _extract_json_pseudo_tool_call(content: str, allowed_tool_names: set[str]) -> dict | None:
     """Best-effort parse for pseudo tool text shaped like JSON."""
     if not content:
@@ -74,13 +268,17 @@ def _extract_json_pseudo_tool_call(content: str, allowed_tool_names: set[str]) -
     if stripped.startswith("{") and stripped.endswith("}"):
         candidates.append(stripped)
 
-    fenced_match = re.search(r"```[a-zA-Z0-9_-]*\s*(\{.*?\})\s*```", content, flags=re.DOTALL | re.IGNORECASE)
+    fenced_match = re.search(r"```[a-zA-Z0-9_-]*\s*(.*?)\s*```", content, flags=re.DOTALL | re.IGNORECASE)
     if fenced_match:
-        candidates.append(fenced_match.group(1).strip())
+        fenced_candidate = _extract_balanced_object(fenced_match.group(1))
+        if fenced_candidate:
+            candidates.append(fenced_candidate.strip())
 
-    inline_match = re.search(r"(\{\s*\"name\"\s*:\s*\".*?\"\s*,\s*\"arguments\"\s*:.*\})", content, flags=re.DOTALL)
-    if inline_match:
-        candidates.append(inline_match.group(1).strip())
+    inline_name_index = content.find('"name"')
+    if inline_name_index >= 0:
+        inline_candidate = _extract_balanced_object(content, max(0, inline_name_index - 1))
+        if inline_candidate:
+            candidates.append(inline_candidate.strip())
 
     for candidate in candidates:
         sanitized_candidate = _escape_newlines_inside_strings(candidate)
@@ -95,23 +293,13 @@ def _extract_json_pseudo_tool_call(content: str, allowed_tool_names: set[str]) -
             except Exception:
                 continue
 
-        if not isinstance(parsed, dict):
-            continue
+        recovered = _as_recovered_tool_call(parsed, allowed_tool_names)
+        if recovered is not None:
+            return recovered
 
-        name = parsed.get("name")
-        if not isinstance(name, str) or name not in allowed_tool_names:
-            continue
-
-        arguments = parsed.get("arguments", parsed.get("args", {}))
-        if not isinstance(arguments, dict):
-            continue
-
-        return {
-            "name": name,
-            "args": arguments,
-            "id": f"pseudo-{uuid4()}",
-            "type": "tool_call",
-        }
+    relaxed_recovered = _extract_relaxed_json_tool_call(content, allowed_tool_names)
+    if relaxed_recovered is not None:
+        return relaxed_recovered
 
     return None
 

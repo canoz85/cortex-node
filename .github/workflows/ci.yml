@@ -54,6 +54,8 @@ jobs:
           python scripts/run_evaluation.py \
             --dataset benchmarks/evaluation_dataset.json \
             --max-cases 0 \
+            --policy .github/evaluation-policy.json \
+            --enforce-policy \
             --output benchmarks/results/evaluation-latest.json \
             --dashboard-md benchmarks/results/evaluation-dashboard.md \
             --dashboard-json benchmarks/results/evaluation-dashboard.json

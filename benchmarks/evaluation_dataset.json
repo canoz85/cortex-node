@@ -1,8 +1,22 @@
 [
   {
     "id": "eval_info_identity",
+    "route": "info",
     "prompt": "Who are you and what tools can you use?",
+    "semantic_reference": "I am CortexNode, a local-first AI software engineering agent. I can use tools for files, Python execution, git inspection, runtime info, and retrieval.",
     "expected_substrings": ["agent", "tool"],
+    "checks": {
+      "all": ["tool"],
+      "any": ["cortexnode", "agent"],
+      "forbidden_substrings": ["pseudo tool-call text"],
+      "min_output_chars": 80
+    },
+    "dimension_weights": {
+      "substring": 0.4,
+      "checks": 0.4,
+      "safety": 0.1,
+      "format": 0.1
+    },
     "max_latency_ms": 15000,
     "weights": {
       "content": 0.8,
@@ -12,8 +26,21 @@
   },
   {
     "id": "eval_file_read_explain",
+    "route": "action",
     "prompt": "Read workspace/is_prime.py and explain what it does.",
+    "semantic_reference": "The file defines an is_prime function that checks if a number is prime and explains the logic from the workspace file.",
     "expected_substrings": ["is_prime", "workspace"],
+    "checks": {
+      "any": ["read", "function", "prime"],
+      "forbidden_substrings": ["cannot access files", "pseudo tool-call text"],
+      "min_output_chars": 60
+    },
+    "dimension_weights": {
+      "substring": 0.45,
+      "checks": 0.35,
+      "safety": 0.1,
+      "format": 0.1
+    },
     "max_latency_ms": 15000,
     "weights": {
       "content": 0.8,
@@ -23,13 +50,155 @@
   },
   {
     "id": "eval_math_proportional",
+    "route": "info",
     "prompt": "1 meter is 150 cm, what is 10 meter?",
+    "semantic_reference": "Using the provided proportion, 10 meter equals 1500 cm.",
     "expected_substrings": ["1500", "cm"],
+    "checks": {
+      "all": ["1500"],
+      "any": ["assumption", "based on your stated relation"],
+      "forbidden_substrings": ["could not parse"],
+      "min_output_chars": 40
+    },
+    "dimension_weights": {
+      "substring": 0.5,
+      "checks": 0.3,
+      "safety": 0.1,
+      "format": 0.1
+    },
     "max_latency_ms": 12000,
     "weights": {
       "content": 0.85,
       "latency": 0.15
     },
     "tags": ["math", "deterministic"]
+  },
+  {
+    "id": "eval_time_query",
+    "route": "info",
+    "prompt": "What time is it right now?",
+    "semantic_reference": "Return the current local time using the time tool with a formatted timestamp.",
+    "expected_substrings": ["time"],
+    "checks": {
+      "any": ["current", "time", "formatted"],
+      "regex_any": ["\\d{2}:\\d{2}"],
+      "forbidden_substrings": ["i think", "guess"],
+      "min_output_chars": 20
+    },
+    "max_latency_ms": 12000,
+    "weights": {
+      "content": 0.8,
+      "latency": 0.2
+    },
+    "tags": ["info", "time"]
+  },
+  {
+    "id": "eval_conversation_casual",
+    "route": "casual",
+    "prompt": "hello there",
+    "semantic_reference": "Respond with a brief friendly greeting without using tools.",
+    "expected_substrings": ["hello"],
+    "checks": {
+      "any": ["hello", "hi", "assist"],
+      "forbidden_substrings": ["calling", "tool"],
+      "min_output_chars": 8
+    },
+    "max_latency_ms": 10000,
+    "weights": {
+      "content": 0.85,
+      "latency": 0.15
+    },
+    "tags": ["conversation", "casual"]
+  },
+  {
+    "id": "eval_workspace_listing",
+    "route": "action",
+    "prompt": "list files in workspace",
+    "semantic_reference": "List files from the workspace directory and present the result clearly.",
+    "expected_substrings": ["workspace"],
+    "checks": {
+      "any": ["files", "workspace", "under"],
+      "forbidden_substrings": ["cannot access files", "pseudo tool-call text"],
+      "min_output_chars": 20
+    },
+    "max_latency_ms": 14000,
+    "weights": {
+      "content": 0.8,
+      "latency": 0.2
+    },
+    "tags": ["action", "file"]
+  },
+  {
+    "id": "eval_agent_info_runtime",
+    "route": "info",
+    "prompt": "Show me your runtime configuration",
+    "semantic_reference": "Provide runtime configuration including model, workspace, context window, and max steps.",
+    "expected_substrings": ["model", "workspace"],
+    "checks": {
+      "all": ["model"],
+      "any": ["workspace", "context", "max steps"],
+      "forbidden_substrings": ["no token usage recorded yet"],
+      "min_output_chars": 30
+    },
+    "max_latency_ms": 13000,
+    "weights": {
+      "content": 0.82,
+      "latency": 0.18
+    },
+    "tags": ["info", "runtime"]
+  },
+  {
+    "id": "eval_read_audit",
+    "route": "action",
+    "prompt": "which file did you read?",
+    "semantic_reference": "Answer deterministically with files read in the current session, or state none were read.",
+    "expected_substrings": ["read"],
+    "checks": {
+      "any": ["have not successfully read", "successfully read these files"],
+      "forbidden_substrings": ["pseudo tool-call text"],
+      "min_output_chars": 20
+    },
+    "max_latency_ms": 12000,
+    "weights": {
+      "content": 0.85,
+      "latency": 0.15
+    },
+    "tags": ["audit", "deterministic"]
+  },
+  {
+    "id": "eval_coding_discussion",
+    "route": "coding_discussion",
+    "prompt": "How should I improve routing confidence in this agent?",
+    "semantic_reference": "Suggest improving routing confidence with better intent signals, thresholds, fallback behavior, and evaluation-driven tuning.",
+    "expected_substrings": ["routing", "confidence"],
+    "checks": {
+      "any": ["intent", "threshold", "evaluation", "fallback"],
+      "forbidden_substrings": ["calling", "tool"],
+      "min_output_chars": 50
+    },
+    "max_latency_ms": 12000,
+    "weights": {
+      "content": 0.85,
+      "latency": 0.15
+    },
+    "tags": ["discussion", "routing"]
+  },
+  {
+    "id": "eval_filegen_simple",
+    "route": "action:file_generation",
+    "prompt": "Create workspace/hello_eval.py that prints hello",
+    "semantic_reference": "Create hello_eval.py in workspace, verify execution, and summarize implementation and verification.",
+    "expected_substrings": ["workspace/hello_eval.py", "verified"],
+    "checks": {
+      "any": ["implemented", "verified", "python"],
+      "forbidden_substrings": ["pseudo tool-call text", "cannot access files"],
+      "min_output_chars": 30
+    },
+    "max_latency_ms": 20000,
+    "weights": {
+      "content": 0.75,
+      "latency": 0.25
+    },
+    "tags": ["file_generation", "action"]
   }
 ]

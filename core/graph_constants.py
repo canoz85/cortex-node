@@ -49,7 +49,20 @@ TOKEN_USAGE_INTENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CURRENT_TIME_INTENT_PATTERN = re.compile(
-    r"\b(time|date|datetime|today|now|current time|current date)\b",
+    r"\b(?:"
+    r"what\s+time\s+is\s+it|"
+    r"what(?:'s|\s+is)\s+the\s+time|"
+    r"current\s+time|"
+    r"time\s+now|"
+    r"now\b.*\btime|"
+    r"what\s+date\s+is\s+it|"
+    r"what(?:'s|\s+is)\s+(?:today'?s\s+)?date|"
+    r"current\s+date|"
+    r"today'?s\s+date|"
+    r"date\s+today|"
+    r"current\s+datetime|"
+    r"date\s+and\s+time"
+    r")\b",
     re.IGNORECASE,
 )
 AGENT_INFO_INTENT_PATTERN = re.compile(

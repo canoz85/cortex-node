@@ -25,7 +25,7 @@ def rolling_summary_message(summary: str) -> list[SystemMessage]:
     return [
         SystemMessage(
             content=(
-                "Rolling summary from earlier turns (authoritative context):\n"
+                "Rolling summary from earlier turns (context hints, verify file facts with tools):\n"
                 f"{compact}"
             )
         )
