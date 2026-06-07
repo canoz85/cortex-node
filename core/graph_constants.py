@@ -6,12 +6,17 @@ MAX_SUMMARY_CHARS = 1800
 ANSI_GREEN = "\033[32m"
 ANSI_RED = "\033[31m"
 ANSI_BLUE = "\033[34m"
+ANSI_YELLOW = "\033[33m"
 ANSI_ITALIC = "\033[3m"
 ANSI_RESET = "\033[0m"
-MAX_PSEUDO_RETRIES = 2
+MAX_PSEUDO_RETRIES = 10
 
 SYSTEM_PROMPT_TEMPLATE = """You are CortexNode, a local-first autonomous software engineering agent.
 You can reason, use tools, and iterate until the task is complete.
+
+AVAILABLE AGENT TOOLS:
+{available_tools}
+
 Runtime info:
 - Model: {model}
 - Context window: ~128k tokens

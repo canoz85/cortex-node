@@ -14,7 +14,7 @@ DEFAULT_SETTINGS = {
     "model": "qwen2.5-coder:14b",
     "embedding_model": "nomic-embed-text",
     "rag_top_k": 4,
-    "raw_llm": False,
+    "raw_llm": True,
     "show_summary": False,
     "log_level": "INFO",
     "json_logs": False,

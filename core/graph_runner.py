@@ -6,12 +6,12 @@ from time import perf_counter
 from langchain_core.messages import AIMessage, HumanMessage
 
 from core.graph_constants import ANSI_BLUE, ANSI_GREEN, ANSI_ITALIC, ANSI_RED, ANSI_RESET, MAX_REASONING_STEPS
-from core.logging_utils import get_logger, log_event
 from core.graph_messages import normalize_message_content
-from core.graph_response_formatters import format_tool_call_preview
+from core.graph_response_formatters import format_preferred_tool_response, format_tool_call_preview
+from core.logging_utils import get_logger, log_event
 from core.models import ToolResult
 from core.state import AgentState
-from core.tool_output import parse_tool_result
+from core.tool_output import parse_tool_result, unwrap_tool_output
 
 
 logger = get_logger(__name__)
@@ -23,6 +23,7 @@ def _print_raw_llm_response(raw_text: str) -> None:
         text = "<empty>"
     print(f"{ANSI_RED}{ANSI_ITALIC}[raw-llm]{ANSI_RESET}")
     print(f"{ANSI_RED}{ANSI_ITALIC}{text}{ANSI_RESET}")
+
 
 
 def _raw_ai_message_payload(message: AIMessage) -> str:
@@ -45,6 +46,55 @@ def _is_llm_generated_message(message: AIMessage) -> bool:
     tool_calls = getattr(message, "tool_calls", None) or []
     content = (getattr(message, "content", "") or "").strip()
     return bool(tool_calls) and not content
+
+
+def _handle_non_tool_call_message(
+    *,
+    raw_content: str,
+    logger_obj,
+    run_id: str,
+    node_name: str,
+) -> bool:
+    """Render one non-tool-call message and log tool-result events when present.
+
+    Returns True if a structured tool result was captured, otherwise False.
+    """
+    unwrapped = unwrap_tool_output(raw_content)
+    if isinstance(unwrapped, dict) and ("success" in unwrapped or "message" in unwrapped):
+        print(format_preferred_tool_response(unwrapped))
+        log_event(
+            logger_obj,
+            logging.INFO,
+            "Tool result captured",
+            event_name="tool_result",
+            run_id=run_id,
+            node=node_name,
+            success=bool(unwrapped.get("success", False)),
+            tool_message=str(unwrapped.get("message", "")),
+        )
+        return True
+
+    parsed = parse_tool_result(raw_content)
+    if parsed is not None:
+        print(parsed.to_pretty_text())
+        log_event(
+            logger_obj,
+            logging.INFO,
+            "Tool result captured",
+            event_name="tool_result",
+            run_id=run_id,
+            node=node_name,
+            success=parsed.success,
+            tool_message=parsed.message,
+        )
+        return True
+
+    summary, _ = ToolResult.split_tool_output(raw_content)
+    if summary:
+        print(summary)
+    else:
+        print(raw_content)
+    return False
 
 
 def run_prompt(
@@ -73,10 +123,10 @@ def run_prompt(
         "messages": [*prior_messages, HumanMessage(content=prompt)],
         "steps": 0,
         "plan": "",
-        "planner_plan_source": "",
         "planner_route": "",
         "rolling_summary": rolling_summary,
         "last_tool_output": "",
+        "last_tool_rendered": "",
         "last_tool_signature": "",
         "last_tool_success": True,
         "repeat_fail_count": 0,
@@ -109,8 +159,7 @@ def run_prompt(
                         header = f"[planner:{current_route}]"
                     print(f"\n{ANSI_GREEN}{header}{ANSI_RESET}")
                     print(str(value.get("plan")))
-                    plan_source = str(value.get("planner_plan_source") or "")
-                    if show_raw_llm and plan_source == "llm":
+                    if show_raw_llm:
                         _print_raw_llm_response(str(value.get("plan")))
 
                 log_event(
@@ -149,48 +198,20 @@ def run_prompt(
                     )
             else:
                 raw_content = normalize_message_content(message)
-                if "pseudo tool-call text" in raw_content:
-                    saw_pseudo_stop = True
-                if "Action-required run stopped" in raw_content:
-                    saw_action_stop = True
-                summary, _ = ToolResult.split_tool_output(raw_content)
-                parsed = parse_tool_result(raw_content)
-                if parsed is not None:
+                captured = _handle_non_tool_call_message(
+                    raw_content=raw_content,
+                    logger_obj=logger,
+                    run_id=run_id,
+                    node_name=node_name,
+                )
+                if captured:
                     tool_result_messages += 1
-                    print(parsed.to_pretty_text())
-                    log_event(
-                        logger,
-                        logging.INFO,
-                        "Tool result captured",
-                        event_name="tool_result",
-                        run_id=run_id,
-                        node=node_name,
-                        success=parsed.success,
-                        tool_message=parsed.message,
-                    )
-                elif summary:
-                    print(summary)
-                else:
-                    print(raw_content)
 
     if latest_step_count >= MAX_REASONING_STEPS:
         print(
             f"\n{ANSI_BLUE}[system]{ANSI_RESET}\n"
             f"{ANSI_BLUE}Max reasoning steps reached ({MAX_REASONING_STEPS}). "
             f"Stopping to avoid unbounded loops.{ANSI_RESET}"
-        )
-
-    if saw_pseudo_stop:
-        print(
-            f"\n{ANSI_BLUE}[system]{ANSI_RESET}\n"
-            f"{ANSI_BLUE}The model returned pseudo tool syntax, so the run was halted without executing those actions.{ANSI_RESET}"
-        )
-
-    if saw_action_stop:
-        print(
-            f"\n{ANSI_BLUE}[system]{ANSI_RESET}\n"
-            f"{ANSI_BLUE}Run ended without a final executable tool call. "
-            f"See the last [brain] message for the stop reason.{ANSI_RESET}"
         )
 
     if show_summary and latest_summary.strip():

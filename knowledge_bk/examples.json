@@ -1,0 +1,22 @@
+{
+  "examples": [
+    {
+      "name": "simple_python_cli",
+      "goal": "Build a Python CLI that reads a prompt and prints a result.",
+      "notes": [
+        "Use argparse for command-line arguments.",
+        "Keep business logic in a function.",
+        "Avoid unnecessary abstractions."
+      ]
+    },
+    {
+      "name": "small_code_generator",
+      "goal": "Generate code from a user request using retrieved context.",
+      "notes": [
+        "Load knowledge from markdown and json files.",
+        "Retrieve top matches with embeddings.",
+        "Inject retrieved context into the prompt before generation."
+      ]
+    }
+  ]
+}

@@ -11,6 +11,7 @@ class AgentState(TypedDict, total=False):
 
     messages: Annotated[list[BaseMessage], add_messages]
     last_tool_output: dict[str, Any] | str
+    last_tool_rendered: str
     last_tool_signature: str
     last_tool_success: bool
     repeat_fail_count: int
@@ -18,7 +19,6 @@ class AgentState(TypedDict, total=False):
     steps: int
     token_usage: TokenUsage
     plan: str
-    planner_plan_source: str
     planner_route: str
     planner_domain: str
     planner_confidence: float

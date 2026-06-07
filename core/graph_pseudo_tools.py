@@ -355,7 +355,7 @@ def recover_pseudo_tool_response(message: AIMessage, allowed_tool_names: set[str
     if recovered_tool_call is None:
         recovered_tool_call = _extract_function_pseudo_tool_call(content, allowed_tool_names)
     if recovered_tool_call is not None:
-        return AIMessage(content="Recovered pseudo tool-call text into executable tool call.", tool_calls=[recovered_tool_call])
+        return AIMessage(content="", tool_calls=[recovered_tool_call])
     return message
 
 

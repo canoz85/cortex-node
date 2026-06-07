@@ -67,7 +67,8 @@ def test_run_prompt_handles_tool_flow_and_updates_summary(capsys):
 
     output = capsys.readouterr().out
     assert "[planner:action]" in output
-    assert "Success: True" in output
+    assert "Files under .:" in output
+    assert "- a.py" in output
 
 
 def test_run_prompt_emits_pseudo_tool_stop_warning(capsys):

@@ -75,18 +75,23 @@ def build_app(
     workspace_root = Path(workspace_dir).resolve()
     workspace_root_str = str(workspace_root)
     knowledge_root = Path(knowledge_dir).resolve()
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        model=model,
-        workspace_dir=workspace_root_str,
-        knowledge_dir=str(knowledge_root),
-        max_steps=MAX_REASONING_STEPS,
-    )
 
     rag_service = rag_factory(knowledge_root, embedding_model, rag_top_k)
     sap_system_prompt = _load_sap_system_prompt(app_root)
 
     tools = tool_list_factory(workspace_root_str, str(knowledge_root), rag_service, model)
     tool_name_set = {getattr(tool, "name", "") for tool in tools}
+
+    # Format the available tools into a clean, scannable string block
+    tools_list_str = "\n".join([f"- {name}" for name in sorted(tool_name_set) if name])
+
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        model=model,
+        workspace_dir=workspace_root_str,
+        knowledge_dir=str(knowledge_root),
+        max_steps=MAX_REASONING_STEPS,
+        available_tools=tools_list_str,
+    )
 
     llm = chat_model_factory(model, 0).bind_tools(tools)
     planner_llm = chat_model_factory(model, 0)

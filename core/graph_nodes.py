@@ -1,10 +1,10 @@
 import uuid
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
 
 from core.graph_capture import create_capture_tool_output_node
-from core.graph_constants import MAX_PSEUDO_RETRIES, RECENT_MESSAGE_WINDOW
+from core.graph_constants import ANSI_BLUE, ANSI_ITALIC, ANSI_RED, ANSI_GREEN, ANSI_YELLOW, ANSI_RESET, MAX_PSEUDO_RETRIES, RECENT_MESSAGE_WINDOW
 from core.graph_context import retrieval_message, rolling_summary_message
 from core.graph_filegen_policy import (
     file_generation_quality_issue,
@@ -43,10 +43,8 @@ from core.graph_response_formatters import format_action_completion_response, fo
 from core.graph_routing import route_after_brain
 from core.graph_tool_events import (
     current_turn_tool_events,
-    current_turn_has_successful_tool_name,
-    current_turn_has_successful_tool_result,
     message_repeats_signature,
-    successful_read_file_paths,
+    parse_tool_signature,
 )
 from core.rag import WorkspaceRAG
 from core.state import AgentState
@@ -55,58 +53,72 @@ from core.state import AgentState
 READ_ONLY_TOOL_NAMES = {"list_files", "read_file", "read_knowledge_file", "rag_search", "rag_refresh_index"}
 
 
-def _preferred_required_tool(preferred_info_tool_name: str | None, preferred_file_tool_name: str | None) -> tuple[str | None, str | None]:
-    if preferred_info_tool_name:
-        return preferred_info_tool_name, "info"
-    if preferred_file_tool_name:
-        return preferred_file_tool_name, "file"
-    return None, None
+def _latest_tool_context(history: list[BaseMessage]) -> list[BaseMessage]:
+    """Return latest AI tool-call + ToolMessage pair for grounding when needed."""
+    if not history:
+        return []
+
+    for index in range(len(history) - 1, -1, -1):
+        message = history[index]
+        if not isinstance(message, ToolMessage):
+            continue
+
+        context: list[BaseMessage] = []
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if tool_call_id:
+            for prior in range(index - 1, -1, -1):
+                candidate = history[prior]
+                if not isinstance(candidate, AIMessage):
+                    continue
+                tool_calls = getattr(candidate, "tool_calls", None) or []
+                if any(call.get("id") == tool_call_id for call in tool_calls):
+                    context.append(candidate)
+                    break
+        context.append(message)
+        return context
+    return []
 
 
-def _read_audit_response(history: list) -> AIMessage:
-    read_paths = successful_read_file_paths(history)
-    if read_paths:
-        lines = "\n".join(f"- {path}" for path in read_paths)
-        return AIMessage(content=f"I successfully read these files in this session:\n{lines}")
-    return AIMessage(content="I have not successfully read any file in this session yet.")
+def _ensure_tool_message_visible(history: list[BaseMessage], recent_history: list[BaseMessage]) -> list[BaseMessage]:
+    """Ensure brain prompt always carries latest tool result context."""
+    if any(isinstance(message, ToolMessage) for message in recent_history):
+        return recent_history
+
+    stitched = list(recent_history)
+    for message in _latest_tool_context(history):
+        if message not in stitched:
+            stitched.append(message)
+    return stitched
 
 
-def _file_fact_grounding_response(history: list) -> AIMessage:
-    read_paths = successful_read_file_paths(history)
-    if read_paths:
-        return AIMessage(
-            content="Reading the latest file context to ground the requested facts.",
-            tool_calls=[
-                {
-                    "name": "read_file",
-                    "args": {"path": read_paths[-1]},
-                    "id": f"guard-file-fact-{uuid.uuid4().hex}",
-                    "type": "tool_call",
-                }
-            ],
-        )
+def _successful_preferred_tool_fast_path(state: AgentState, latest_user_prompt: str) -> AIMessage | None:
+    """Finalize simple preferred-tool requests without another tool-enabled LLM pass."""
+    if state.get("last_tool_success") is not True:
+        return None
 
-    return AIMessage(
-        content="Listing workspace files first so I can ground the requested facts.",
-        tool_calls=[
-            {
-                "name": "list_files",
-                "args": {"path": "."},
-                "id": f"guard-file-fact-{uuid.uuid4().hex}",
-                "type": "tool_call",
-            }
-        ],
-    )
+    last_tool_output = state.get("last_tool_output", "")
+    if not isinstance(last_tool_output, dict):
+        return None
 
+    preferred_tool_name = preferred_file_tool(latest_user_prompt) or preferred_info_tool(latest_user_prompt)
+    if not preferred_tool_name:
+        return None
 
-def _file_fact_finalize_prompt() -> SystemMessage:
-    return SystemMessage(
-        content=(
-            "File-fact extraction guard: at least one file read/list already succeeded in this turn. "
-            "Do not call list_files or read_file again for this question. "
-            "Return the final concise factual answer now using the latest successful file output."
-        )
-    )
+    signature = parse_tool_signature(str(state.get("last_tool_signature", "") or ""))
+    if not signature:
+        return None
+
+    tool_name, _ = signature
+    if tool_name != preferred_tool_name:
+        return None
+
+    rendered = str(state.get("last_tool_rendered", "") or "").strip()
+    if not rendered:
+        rendered = format_preferred_tool_response(last_tool_output).strip()
+    if not rendered:
+        return None
+
+    return AIMessage(content=rendered)
 
 
 def _required_first_tool_response(required_first_tool: str, latest_user_prompt: str = "") -> AIMessage:
@@ -183,28 +195,6 @@ def _missing_dependency_response(missing_module: str) -> AIMessage:
             f"Please install it using:\n\n"
             f"pip install {missing_module}\n\n"
             f"After installation, you can retry the code execution."
-        )
-    )
-
-
-def _failed_signature_advisory(signature: str) -> SystemMessage:
-    return SystemMessage(
-        content=(
-            "The previous tool call failed. "
-            f"Failed signature: {signature}. "
-            "Do not repeat that same tool call with identical arguments. "
-            "Choose a different corrective next action."
-        )
-    )
-
-
-def _successful_signature_advisory(signature: str) -> SystemMessage:
-    return SystemMessage(
-        content=(
-            "The previous tool call already succeeded. "
-            f"Successful signature: {signature}. "
-            "Do not repeat that same tool call with identical arguments. "
-            "Choose the next distinct step, such as verification, creating required sample input, or giving the final answer if the task is done."
         )
     )
 
@@ -412,78 +402,6 @@ def _unchanged_write_retry_prompt() -> SystemMessage:
     )
 
 
-def _apply_read_only_response_guard(
-    *,
-    llm: ChatOllama,
-    pre_messages: list,
-    recent_history: list,
-    response: AIMessage,
-    read_only_file_request: bool,
-    tool_name_set: set[str],
-) -> AIMessage:
-    if not read_only_file_request or not getattr(response, "tool_calls", None):
-        return response
-
-    disallowed_calls = _disallowed_read_only_tool_calls(response)
-    if disallowed_calls:
-        response = llm.invoke(
-            [
-                *pre_messages,
-                *recent_history,
-                response,
-                _read_only_guard_correction_prompt(),
-            ]
-        )
-
-    if getattr(response, "tool_calls", None):
-        still_disallowed = _disallowed_read_only_tool_calls(response)
-        if still_disallowed and "list_files" in tool_name_set:
-            return _read_only_guard_fallback_response()
-
-    return response
-
-
-def _apply_unchanged_write_guard(
-    *,
-    llm: ChatOllama,
-    pre_messages: list,
-    recent_history: list,
-    response: AIMessage,
-    state: AgentState,
-    file_generation_requested: bool,
-    tool_name_set: set[str],
-) -> tuple[AIMessage, bool]:
-    if not (file_generation_requested and state.get("last_tool_success") is True):
-        return response, False
-
-    read_snapshot = last_read_file_snapshot(state)
-    unchanged_retry_count = 0
-    while response_has_unchanged_write(response, read_snapshot) and unchanged_retry_count < 2:
-        response = llm.invoke(
-            [
-                *pre_messages,
-                *recent_history,
-                response,
-                _unchanged_write_retry_prompt(),
-            ]
-        )
-        response = finalize_action_response(response, tool_name_set)
-        unchanged_retry_count += 1
-
-    if response_has_unchanged_write(response, read_snapshot):
-        return (
-            AIMessage(
-                content=(
-                    "Action-required run stopped because repair attempts kept rewriting identical file content after a failed verification. "
-                    "Please retry so I can apply a different repair strategy."
-                )
-            ),
-            True,
-        )
-
-    return response, False
-
-
 def _apply_failed_rewrite_guard(
     *,
     llm: ChatOllama,
@@ -584,55 +502,6 @@ def _apply_workspace_claim_guard(*, history: list, response: AIMessage, tool_nam
 
     return _workspace_claim_guard_response()
 
-
-def _apply_file_fact_grounding_guard(
-    *,
-    llm: ChatOllama,
-    pre_messages: list,
-    recent_history: list,
-    history: list,
-    response: AIMessage,
-    latest_user_prompt: str,
-    route: str,
-) -> AIMessage:
-    if route == "action:file_generation":
-        return response
-
-    if not is_file_fact_extraction_request(latest_user_prompt):
-        return response
-
-    tool_events = current_turn_tool_events(history)
-    has_file_evidence = _has_successful_file_events(tool_events)
-
-    if has_file_evidence and getattr(response, "tool_calls", None):
-        requested_tools = {str(call.get("name", "")) for call in getattr(response, "tool_calls", None) or []}
-        if requested_tools.intersection({"list_files", "read_file"}):
-            finalized = llm.invoke(
-                [
-                    *pre_messages,
-                    *recent_history,
-                    response,
-                    _file_fact_finalize_prompt(),
-                ]
-            )
-            if getattr(finalized, "tool_calls", None):
-                return AIMessage(
-                    content=(
-                        "I already gathered file evidence for this question and will stop additional file-tool calls. "
-                        "I need to provide the final extracted fact answer from the last successful read."
-                    )
-                )
-            return finalized
-
-    if has_file_evidence:
-        return response
-
-    if getattr(response, "tool_calls", None):
-        return response
-
-    return _file_fact_grounding_response(history)
-
-
 def _apply_repeated_signature_guard(
     *,
     llm: ChatOllama,
@@ -659,23 +528,36 @@ def _apply_repeated_signature_guard(
         ]
     )
 
-    # if state.get("last_tool_success") is True and message_repeats_signature(corrected_response, last_tool_signature):
-    #     final_response = llm.invoke(
-    #         [
-    #             *pre_messages,
-    #             *recent_history,
-    #             corrected_response,
-    #             _repeated_success_final_answer_prompt(last_tool_signature),
-    #         ]
-    #     )
-    #     if getattr(final_response, "tool_calls", None):
-    #         return AIMessage(
-    #             content=(
-    #                 "I already ran this tool call successfully and will not repeat it in this turn. "
-    #                 "Using the existing tool output, I can continue with a direct answer next."
-    #             )
-    #         )
-    #     return final_response
+    _print_raw_llm_request_response(color=ANSI_YELLOW, messages=[*pre_messages, *recent_history, 
+        response,_repeated_signature_correction_prompt(last_tool_signature, repeat_reason)], raw_text=response.content)
+
+
+    if state.get("last_tool_success") is True and message_repeats_signature(corrected_response, last_tool_signature):
+        final_response = llm.invoke(
+            [
+                *pre_messages,
+                *recent_history,
+                corrected_response,
+                _repeated_success_final_answer_prompt(last_tool_signature),
+            ]
+        )
+
+        _print_raw_llm_request_response(color=ANSI_GREEN, messages=[*pre_messages, *recent_history,
+             corrected_response, _repeated_success_final_answer_prompt(last_tool_signature)], 
+                                         raw_text=response.content)
+
+
+        if getattr(final_response, "tool_calls", None):
+            last_tool_output = state.get("last_tool_output", "")
+            if isinstance(last_tool_output, dict):
+                return AIMessage(content=format_preferred_tool_response(last_tool_output))
+            return AIMessage(
+                content=(
+                    "I already ran this tool call successfully and will not repeat it in this turn. "
+                    "Using the existing tool output, I can continue with a direct answer next."
+                )
+            )
+        return final_response
 
     return corrected_response
 
@@ -683,27 +565,16 @@ def _apply_repeated_signature_guard(
 def _apply_response_recovery(
     *,
     response_llm: ChatOllama,
-    planner_llm: ChatOllama,
     pre_messages: list,
     recent_history: list,
     response: AIMessage,
-    allow_tool_recovery: bool,
-    route: str,
+    action_required: bool,
     tool_name_set: set[str],
 ) -> AIMessage:
-    pseudo_retry_count = 0
-    while allow_tool_recovery and is_pseudo_tool_response(response) and pseudo_retry_count < MAX_PSEUDO_RETRIES:
-        response = response_llm.invoke(
-            [
-                *pre_messages,
-                *recent_history,
-                response,
-                _pseudo_tool_retry_prompt(),
-            ]
-        )
-        pseudo_retry_count += 1
-
-    if allow_tool_recovery and is_pseudo_tool_response(response):
+  
+    # Always sanitize pseudo tool text on action-required turns so raw JSON/call text
+    # is never emitted as a final brain answer.
+    if (action_required) and is_pseudo_tool_response(response):
         response = recover_pseudo_tool_response(response, tool_name_set)
         if not getattr(response, "tool_calls", None):
             response = _pseudo_tool_fallback_response()
@@ -711,148 +582,302 @@ def _apply_response_recovery(
     if is_effectively_empty_response(response):
         response = response_llm.invoke(
             [
-                *pre_messages,
-                *recent_history,
-                _empty_response_retry_prompt(),
+                    *pre_messages,
+                    *recent_history,
+                    _empty_response_retry_prompt(),
             ]
         )
+        _print_raw_llm_request_response(color=ANSI_GREEN, messages=[*pre_messages, *recent_history, _empty_response_retry_prompt()], raw_text=response.content)
 
     if is_effectively_empty_response(response):
         response = _empty_response_fallback()
 
-    if route in {"coding_discussion", "conversation"} and getattr(response, "tool_calls", None):
-        response = planner_llm.invoke(
-            [
-                *pre_messages,
-                *recent_history,
-                _discussion_tool_call_correction_prompt(),
-            ]
-        )
-
     return response
 
+
+def _finalize_from_successful_tool_context(
+    *,
+    llm: ChatOllama,
+    pre_messages: list,
+    recent_history: list,
+    state: AgentState,
+    history: list,
+    response: AIMessage,
+    tool_name_set: set[str],
+) -> AIMessage:
+    """Ask the model to decide: final answer now or distinct next tool call.
+
+    This prevents raw tool output from being echoed as the final brain response.
+    """
+    if getattr(response, "tool_calls", None):
+        return response
+
+    completion = format_action_completion_response(history)
+    if completion:
+        return AIMessage(content=completion)
+
+    decision = llm.invoke(
+        [
+            *pre_messages,
+            *recent_history,
+            response,
+            SystemMessage(
+                content=(
+                    "A tool already succeeded in this turn. Decide one of two outcomes only: "
+                    "(1) If the user request is satisfied, provide the final concise answer now. "
+                    "(2) If not satisfied, emit exactly one executable next tool call with distinct arguments. "
+                    "Do not repeat the same successful tool call signature. "
+                    "Do not restate raw tool output verbatim unless it is the final user-facing answer."
+                )
+            ),
+        ]
+    )
+
+    _print_raw_llm_request_response(color=ANSI_RED, messages=[*pre_messages, *recent_history, response, 
+            SystemMessage(
+                content=(
+                    "A tool already succeeded in this turn. Decide one of two outcomes only: "
+                    "(1) If the user request is satisfied, provide the final concise answer now. "
+                    "(2) If not satisfied, emit exactly one executable next tool call with distinct arguments. "
+                    "Do not repeat the same successful tool call signature. "
+                    "Do not restate raw tool output verbatim unless it is the final user-facing answer."
+                ))], raw_text=response.content)
+
+
+    decision = finalize_action_response(decision, tool_name_set)
+    if getattr(decision, "tool_calls", None):
+        return decision
+
+    # Last-resort fallback keeps the flow deterministic when model output is unusable.
+    if "Action-required run stopped" in normalize_message_content(decision):
+        last_tool_output = state.get("last_tool_output", "")
+        if isinstance(last_tool_output, dict):
+            rendered = format_preferred_tool_response(last_tool_output)
+            if rendered.strip():
+                return AIMessage(content=rendered)
+
+    return decision
+
+
+# def _build_pre_messages(
+#     *,
+#     active_system_prompt: str,
+#     retrieval_messages: list[SystemMessage],
+#     rolling_summary: str,
+#     route: str,
+#     preferred_required_tool_name: str | None,
+#     preferred_required_tool_pending: bool,
+#     planner_plan_source: str,
+#     planner_plan: str,
+#     planner_domain: str,
+#     planner_domain_enforced: bool,
+#     planner_confidence: float,
+#     file_generation_requested: bool,
+#     successful_tool_result_in_turn: bool,
+#     current_filegen_issue: str | None,
+#     read_only_file_request: bool,
+#     action_required: bool,
+#     state: AgentState,
+# ) -> tuple[list[SystemMessage], AIMessage | None]:
+#     pre_messages = [
+#         SystemMessage(content=active_system_prompt),
+#         *retrieval_messages,
+#         *rolling_summary_message(rolling_summary),
+#     ]
+
+#     if route.startswith("action"):
+#         planner_brief = planner_execution_brief(route, planner_plan_source, planner_plan)
+#         if planner_brief:
+#             pre_messages.append(SystemMessage(content=planner_brief))
+
+#     if route == "action:sap" or planner_domain == "sap":
+#         sap_enforcement_suffix = (
+#             "This domain is explicitly enforced by the user."
+#             if planner_domain_enforced
+#             else f"Planner confidence for SAP domain: {planner_confidence:.2f}."
+#         )
+#         pre_messages.append(
+#             SystemMessage(
+#                 content=(
+#                     "SAP domain execution rules: Prefer SAP tools first "
+#                     "(`query_abap_table`, `execute_abap_report`, `lookup_material`, `get_report_data`). "
+#                     "Do not use Python file-generation or runtime tools unless the user explicitly requests Python code generation. "
+#                     f"{sap_enforcement_suffix}"
+#                 )
+#             )
+#         )
+#         pre_messages.append(
+#             SystemMessage(
+#                 content=(
+#                     "SAP ABAP correctness checklist before finalizing any code: "
+#                     "(1) Do not use SELECT *. Select only required fields. "
+#                     "(2) For PO vendor filtering, use EKKO-LIFNR via join EKPO<->EKKO on EBELN; do not use EKPO-LIFNR. "
+#                     "(3) Use modern Open SQL host variables with @ for select-options and constants. "
+#                     "(4) Avoid obsolete ABAP patterns such as OCCURS/header lines/implicit work areas. "
+#                     "(5) For open PO logic, enforce MENGE > WEMNG, LOEKZ = space, ELIKZ = space, and compute remaining quantity in SQL when possible. "
+#                     "If any checklist item is not satisfied, correct the solution before responding."
+#                 )
+#             )
+#         )
+
+#     if preferred_required_tool_name and preferred_required_tool_pending:
+#         pre_messages.append(
+#             SystemMessage(
+#                 content=(
+#                     "This request must be answered by calling the "
+#                     f"{preferred_required_tool_name} tool first. "
+#                     "Do not answer from memory. Use the tool and then respond from its output."
+#                 )
+#             )
+#         )
+
+#     if file_generation_requested and not successful_tool_result_in_turn:
+#         pre_messages.append(_file_generation_initial_guidance())
+#     if file_generation_requested and current_filegen_issue:
+#         pre_messages.append(_file_generation_gap_rewrite_guidance(str(current_filegen_issue)))
+
+#     if read_only_file_request:
+#         pre_messages.append(_read_only_analysis_guidance())
+
+#     missing_module = detect_missing_dependency(state.get("last_tool_output", ""))
+#     if missing_module:
+#         return pre_messages, _missing_dependency_response(missing_module)
+
+#     if file_generation_requested and state.get("last_tool_success") is False and last_tool_missing_required_args(state.get("last_tool_output", "")):
+#         pre_messages.append(_missing_required_args_guidance())
+#     if route in {"coding_discussion", "conversation"}:
+#         pre_messages.append(
+#             SystemMessage(
+#                 content=(
+#                     "This turn is a discussion request, not an implementation request. "
+#                     "Answer directly and do not create files, run tools, or execute code unless the user explicitly asks for concrete actions."
+#                 )
+#             )
+#         )
+#     if state.get("last_tool_success") is False and state.get("last_tool_signature"):
+#         signature = state.get("last_tool_signature", "")
+#         pre_messages.append(_failed_signature_advisory(signature))
+#         stderr = last_tool_stderr(state.get("last_tool_output", ""))
+#         if stderr:
+#             pre_messages.append(_stderr_repair_guidance(stderr))
+#         if last_tool_has_args_nameerror(state.get("last_tool_output", "")):
+#             pre_messages.append(_args_scope_repair_guidance())
+#     elif action_required and state.get("last_tool_success") is True and state.get("last_tool_signature"):
+#         signature = state.get("last_tool_signature", "")
+#         pre_messages.append(_successful_signature_advisory(signature))
+#     elif action_required and successful_tool_result_in_turn and not (file_generation_requested and current_filegen_issue):
+#         pre_messages.append(
+#             SystemMessage(
+#                 content=(
+#                     "A tool has already succeeded during this user turn. "
+#                     "If that successful result satisfies the request, provide the final concise answer now "
+#                     "instead of calling more tools. Only call another tool if a specific remaining gap still exists."
+#                 )
+#             )
+#         )
+#     elif file_generation_requested and current_filegen_issue:
+#         pre_messages.append(_file_generation_still_incomplete_guidance(str(current_filegen_issue)))
+
+#     return pre_messages, None
 
 def _build_pre_messages(
     *,
     active_system_prompt: str,
     retrieval_messages: list[SystemMessage],
-    rolling_summary: str,
-    route: str,
-    preferred_required_tool_name: str | None,
-    preferred_required_tool_pending: bool,
-    planner_plan_source: str,
-    planner_plan: str,
-    planner_domain: str,
-    planner_domain_enforced: bool,
-    planner_confidence: float,
-    file_generation_requested: bool,
-    successful_tool_result_in_turn: bool,
-    current_filegen_issue: str | None,
-    read_only_file_request: bool,
-    action_required: bool,
     state: AgentState,
 ) -> tuple[list[SystemMessage], AIMessage | None]:
+
+    route = str(state.get("planner_route", ""))
+
+    last_tool_success = state.get("last_tool_success")
+    last_tool_output = state.get("last_tool_output", "")
+    last_tool_rendered = str(state.get("last_tool_rendered", "") or "")
+    last_tool_signature = str(state.get("last_tool_signature", "") or "")
+
+    # 1. Core system context
     pre_messages = [
         SystemMessage(content=active_system_prompt),
         *retrieval_messages,
-        *rolling_summary_message(rolling_summary),
     ]
 
-    if route.startswith("action"):
-        planner_brief = planner_execution_brief(route, planner_plan_source, planner_plan)
+    # 2. Planner / execution context (optional)
+    if route.startswith("action") and state.get("plan") and state.get("last_tool_success") is None:
+
+        planner_brief = planner_execution_brief(
+            route,
+            state.get("plan", "")
+        )
         if planner_brief:
             pre_messages.append(SystemMessage(content=planner_brief))
 
-    if route == "action:sap" or planner_domain == "sap":
-        sap_enforcement_suffix = (
-            "This domain is explicitly enforced by the user."
-            if planner_domain_enforced
-            else f"Planner confidence for SAP domain: {planner_confidence:.2f}."
-        )
-        pre_messages.append(
-            SystemMessage(
-                content=(
-                    "SAP domain execution rules: Prefer SAP tools first "
-                    "(`query_abap_table`, `execute_abap_report`, `lookup_material`, `get_report_data`). "
-                    "Do not use Python file-generation or runtime tools unless the user explicitly requests Python code generation. "
-                    f"{sap_enforcement_suffix}"
-                )
-            )
-        )
-        pre_messages.append(
-            SystemMessage(
-                content=(
-                    "SAP ABAP correctness checklist before finalizing any code: "
-                    "(1) Do not use SELECT *. Select only required fields. "
-                    "(2) For PO vendor filtering, use EKKO-LIFNR via join EKPO<->EKKO on EBELN; do not use EKPO-LIFNR. "
-                    "(3) Use modern Open SQL host variables with @ for select-options and constants. "
-                    "(4) Avoid obsolete ABAP patterns such as OCCURS/header lines/implicit work areas. "
-                    "(5) For open PO logic, enforce MENGE > WEMNG, LOEKZ = space, ELIKZ = space, and compute remaining quantity in SQL when possible. "
-                    "If any checklist item is not satisfied, correct the solution before responding."
-                )
-            )
-        )
+    # 3. Runtime instruction buffer
+    guidance = []
 
-    if preferred_required_tool_name and preferred_required_tool_pending:
-        pre_messages.append(
-            SystemMessage(
-                content=(
-                    "This request must be answered by calling the "
-                    f"{preferred_required_tool_name} tool first. "
-                    "Do not answer from memory. Use the tool and then respond from its output."
-                )
-            )
-        )
+    # ------------------------------------------------------------
+    # A) TOOL FAILURE HANDLING
+    # ------------------------------------------------------------
+    if last_tool_success is False:
+        guidance.append("The previous tool execution FAILED.")
 
-    if file_generation_requested and not successful_tool_result_in_turn:
-        pre_messages.append(_file_generation_initial_guidance())
-    if file_generation_requested and current_filegen_issue:
-        pre_messages.append(_file_generation_gap_rewrite_guidance(str(current_filegen_issue)))
+        if last_tool_signature:
+            guidance.append(f"Failed tool signature: {last_tool_signature}")
 
-    if read_only_file_request:
-        pre_messages.append(_read_only_analysis_guidance())
-
-    missing_module = detect_missing_dependency(state.get("last_tool_output", ""))
-    if missing_module:
-        return pre_messages, _missing_dependency_response(missing_module)
-
-    if file_generation_requested and state.get("last_tool_success") is False and last_tool_missing_required_args(state.get("last_tool_output", "")):
-        pre_messages.append(_missing_required_args_guidance())
-    if route in {"coding_discussion", "conversation"}:
-        pre_messages.append(
-            SystemMessage(
-                content=(
-                    "This turn is a discussion request, not an implementation request. "
-                    "Answer directly and do not create files, run tools, or execute code unless the user explicitly asks for concrete actions."
-                )
-            )
-        )
-    if state.get("last_tool_success") is False and state.get("last_tool_signature"):
-        signature = state.get("last_tool_signature", "")
-        pre_messages.append(_failed_signature_advisory(signature))
-        stderr = last_tool_stderr(state.get("last_tool_output", ""))
+        stderr = last_tool_stderr(last_tool_output)
         if stderr:
-            pre_messages.append(_stderr_repair_guidance(stderr))
-        if last_tool_has_args_nameerror(state.get("last_tool_output", "")):
-            pre_messages.append(_args_scope_repair_guidance())
-    elif action_required and state.get("last_tool_success") is True and state.get("last_tool_signature"):
-        signature = state.get("last_tool_signature", "")
-        pre_messages.append(_successful_signature_advisory(signature))
-    elif action_required and successful_tool_result_in_turn and not (file_generation_requested and current_filegen_issue):
-        pre_messages.append(
-            SystemMessage(
-                content=(
-                    "A tool has already succeeded during this user turn. "
-                    "If that successful result satisfies the request, provide the final concise answer now "
-                    "instead of calling more tools. Only call another tool if a specific remaining gap still exists."
-                )
-            )
+            guidance.append(f"Runtime error detected:\n{stderr}")
+
+        if last_tool_missing_required_args(last_tool_output):
+            guidance.append("Fix missing required tool arguments based on tool schema.")
+
+        if last_tool_has_args_nameerror(last_tool_output):
+            guidance.append("Fix NameError: ensure all variables/functions are defined or imported.")
+
+    # ------------------------------------------------------------
+    # B) TOOL SUCCESS HANDLING (IMPORTANT PART)
+    # ------------------------------------------------------------
+    if last_tool_success is True and last_tool_rendered.strip():
+
+        # guidance.append("A tool has executed successfully in this turn.")
+
+        # guidance.append("TOOL RESULT (authoritative):")
+        # guidance.append(last_tool_rendered[:2000])
+
+        # if last_tool_signature:
+        #     guidance.append(f"Do not repeat this tool call signature: {last_tool_signature}")
+
+        # guidance.append(
+        #     "Decide based ONLY on the tool result:\n"
+        #     "- If it fully satisfies the user request → respond directly.\n"
+        #     "- If not → call a DIFFERENT tool with new arguments.\n"
+        # )
+      
+        guidance.append(
+            "A tool has already succeeded during this user turn. "
+            "Use the tool output as the authoritative source of truth for the current state of the world. "
+            "If that successful result satisfies the request, provide the final concise answer now instead of calling more tools. "
+            "Only call another tool if a specific remaining gap still exists that can be directly addressed by one more tool call."
         )
-    elif file_generation_requested and current_filegen_issue:
-        pre_messages.append(_file_generation_still_incomplete_guidance(str(current_filegen_issue)))
+        
+    # ------------------------------------------------------------
+    # C) NON-ACTION ROUTES (CONVERSATION SAFETY)
+    # ------------------------------------------------------------
+    if route in {"coding_discussion", "conversation", "casual"}:
+        guidance.append(
+            "This is a pure conversation turn.\n"
+            "Do not use tools unless explicitly requested."
+        )
+
+    # ------------------------------------------------------------
+    # 4. FINAL SYSTEM INSTRUCTION BLOCK (single injection)
+    # ------------------------------------------------------------
+    if guidance:
+        combined = "\n".join([
+            "### RUNTIME INSTRUCTIONS (HIGHEST PRIORITY):",
+            *guidance
+        ])
+        pre_messages.append(SystemMessage(content=combined))
 
     return pre_messages, None
-
 
 def _apply_file_generation_fast_path(
     *,
@@ -892,240 +917,90 @@ def _apply_file_generation_fast_path(
 
     return None
 
-
-def _apply_brain_fast_path(
-    *,
-    planner_llm: ChatOllama,
-    history: list,
-    recent_history: list,
-    route: str,
-    latest_user_prompt: str,
-    active_system_prompt: str,
-    retrieval_messages: list[SystemMessage],
-    rolling_summary: str,
-    preferred_required_tool_name: str | None,
-    tool_name_set: set[str],
-    file_generation_requested: bool,
-    current_filegen_issue: str | None,
-    action_required: bool,
-    action_completion_summary: str,
-    state: AgentState,
-) -> AIMessage | None:
-    if route == "clarify_domain":
-        return AIMessage(
-            content=(
-                "Your request could map to both SAP and Python workflows. "
-                "Please choose one so I can execute correctly: `SAP` or `Python`. "
-                "Tip: you can force routing with `[domain:sap]` or `[domain:python]` in your prompt."
-            )
+def _print_raw_llm_request_response(color, messages: list[BaseMessage], raw_text: str) -> None:
+    text = (raw_text or "").strip()
+    if not text:
+        text = "<empty>"
+    print(f"{color}{ANSI_ITALIC}[raw-llm]{ANSI_RESET}")
+    print(f"{color}{ANSI_ITALIC}Messages:{ANSI_RESET}")
+    for msg in messages:
+        role = (
+            "human"
+            if isinstance(msg, HumanMessage)
+            else "ai"
+            if isinstance(msg, AIMessage)
+            else "system"
+            if isinstance(msg, SystemMessage)
+            else "tool"
+            if isinstance(msg, ToolMessage)
+            else "other"
         )
-
-    if is_read_audit_request(latest_user_prompt):
-        return _read_audit_response(history)
-
-    if (
-        route != "action:file_generation"
-        and is_file_fact_extraction_request(latest_user_prompt)
-        and not _has_successful_file_events(current_turn_tool_events(history))
-    ):
-        return _file_fact_grounding_response(history)
-
-    required_first_tool = preferred_required_tool_name
-    if (
-        required_first_tool
-        and required_first_tool in tool_name_set
-        and not current_turn_has_successful_tool_name(history, required_first_tool)
-    ):
-        return _required_first_tool_response(required_first_tool, latest_user_prompt)
-
-    if route in {"casual", "coding_discussion", "conversation"} and not preferred_required_tool_name:
-        return direct_discussion_response(
-            planner_llm=planner_llm,
-            system_prompt=active_system_prompt,
-            retrieval_messages=retrieval_messages,
-            rolling_summary=rolling_summary,
-            recent_history=recent_history,
-        )
-
-    file_generation_fast_path_response = _apply_file_generation_fast_path(
-        history=history,
-        state=state,
-        route=route,
-        file_generation_requested=file_generation_requested,
-    )
-    if file_generation_fast_path_response is not None:
-        return file_generation_fast_path_response
-
-    if (
-        action_required
-        and action_completion_summary
-        and should_finalize_action_turn(history, route)
-        and not (file_generation_requested and current_filegen_issue)
-    ):
-        return AIMessage(content=action_completion_summary)
-
-    return None
-
-
-def _apply_preferred_tool_fast_path(
-    *,
-    preferred_tool_name: str | None,
-    read_only_file_request: bool,
-    history: list,
-    state: AgentState,
-) -> AIMessage | None:
-    tool_name = ""
-    if preferred_tool_name and current_turn_has_successful_tool_name(history, preferred_tool_name):
-        tool_name = preferred_tool_name
-    elif read_only_file_request:
-        for event in reversed(current_turn_tool_events(history)):
-            name = str(event.get("name", ""))
-            if event.get("success") and name in READ_ONLY_TOOL_NAMES:
-                tool_name = name
-                break
-
-    if not tool_name:
-        return None
-
-    last_tool_result = state.get("last_tool_output", "")
-    formatted_response = format_preferred_tool_response(last_tool_result)
-    return AIMessage(content=formatted_response)
+        print(f"{color}{ANSI_ITALIC}[{role}]{ANSI_RESET}")
+        print(f"{color}{ANSI_ITALIC}{normalize_message_content(msg)}{ANSI_RESET}")
+    print(f"{color}{ANSI_ITALIC}Raw LLM response content:{ANSI_RESET}")
+    print(f"{color}{ANSI_ITALIC}{text}{ANSI_RESET}")
 
 
 def _run_main_execution_branch(
     *,
     llm: ChatOllama,
-    planner_llm: ChatOllama,
     state: AgentState,
     history: list,
     recent_history: list,
-    route: str,
     active_system_prompt: str,
     retrieval_messages: list[SystemMessage],
-    rolling_summary: str,
-    preferred_required_tool_name: str | None,
-    preferred_required_tool_kind: str | None,
-    preferred_required_tool_pending: bool,
-    planner_plan_source: str,
-    planner_plan: str,
-    planner_domain: str,
-    planner_domain_enforced: bool,
-    planner_confidence: float,
-    file_generation_requested: bool,
-    successful_tool_result_in_turn: bool,
-    current_filegen_issue: str | None,
-    read_only_file_request: bool,
     action_required: bool,
     tool_name_set: set[str],
-    latest_user_prompt: str,
 ) -> AIMessage:
-    skip_action_enforcement = False
-    response_llm = planner_llm if route in {"casual", "coding_discussion", "conversation"} else llm
-    allow_tool_recovery = route not in {"casual", "coding_discussion", "conversation"}
+
+    response_llm = llm
+    execution_history = _ensure_tool_message_visible(history, recent_history)
     pre_messages, early_response = _build_pre_messages(
         active_system_prompt=active_system_prompt,
         retrieval_messages=retrieval_messages,
-        rolling_summary=rolling_summary,
-        route=route,
-        preferred_required_tool_name=preferred_required_tool_name,
-        preferred_required_tool_pending=preferred_required_tool_pending,
-        planner_plan_source=planner_plan_source,
-        planner_plan=planner_plan,
-        planner_domain=planner_domain,
-        planner_domain_enforced=planner_domain_enforced,
-        planner_confidence=planner_confidence,
-        file_generation_requested=file_generation_requested,
-        successful_tool_result_in_turn=successful_tool_result_in_turn,
-        current_filegen_issue=current_filegen_issue,
-        read_only_file_request=read_only_file_request,
-        action_required=action_required,
         state=state,
     )
     if early_response is not None:
         return early_response
 
-    response = response_llm.invoke([*pre_messages, *recent_history])
+    response = response_llm.invoke([*pre_messages, *execution_history])
+
+    _print_raw_llm_request_response(color=ANSI_BLUE, messages=[*pre_messages, *execution_history], raw_text=response.content)
 
     response = _apply_response_recovery(
         response_llm=response_llm,
-        planner_llm=planner_llm,
         pre_messages=pre_messages,
-        recent_history=recent_history,
+        recent_history=execution_history,
         response=response,
-        allow_tool_recovery=allow_tool_recovery,
-        route=route,
-        tool_name_set=tool_name_set,
-    )
-
-    response = _apply_read_only_response_guard(
-        llm=llm,
-        pre_messages=pre_messages,
-        recent_history=recent_history,
-        response=response,
-        read_only_file_request=read_only_file_request,
+        action_required=action_required,
         tool_name_set=tool_name_set,
     )
 
     response = _apply_repeated_signature_guard(
         llm=llm,
         pre_messages=pre_messages,
-        recent_history=recent_history,
+        recent_history=execution_history,
         response=response,
         action_required=action_required,
         state=state,
     )
 
-    response, unchanged_write_stopped = _apply_unchanged_write_guard(
-        llm=llm,
-        pre_messages=pre_messages,
-        recent_history=recent_history,
-        response=response,
-        state=state,
-        file_generation_requested=file_generation_requested,
-        tool_name_set=tool_name_set,
-    )
-    skip_action_enforcement = skip_action_enforcement or unchanged_write_stopped
+    if action_required and state.get("last_tool_success") is True and not getattr(response, "tool_calls", None):
+        content = normalize_message_content(response)
+        if content and content.strip():
+            return response
 
-    response = _apply_failed_rewrite_guard(
-        llm=llm,
-        pre_messages=pre_messages,
-        recent_history=recent_history,
-        history=history,
-        response=response,
-        state=state,
-    )
+        response = _finalize_from_successful_tool_context(
+            llm=llm,
+            pre_messages=pre_messages,
+            recent_history=execution_history,
+            state=state,
+            history=history,
+            response=response,
+            tool_name_set=tool_name_set,
+        )
 
-    response = _apply_action_enforcement(
-        llm=llm,
-        pre_messages=pre_messages,
-        recent_history=recent_history,
-        response=response,
-        tool_name_set=tool_name_set,
-        file_generation_requested=file_generation_requested,
-        successful_tool_result_in_turn=successful_tool_result_in_turn,
-        current_filegen_issue=current_filegen_issue,
-        preferred_required_tool_name=preferred_required_tool_name,
-        preferred_required_tool_kind=preferred_required_tool_kind,
-        preferred_required_tool_pending=preferred_required_tool_pending,
-        action_required=action_required,
-        skip_action_enforcement=skip_action_enforcement,
-    )
-
-    response = _apply_file_fact_grounding_guard(
-        llm=llm,
-        pre_messages=pre_messages,
-        recent_history=recent_history,
-        history=history,
-        response=response,
-        latest_user_prompt=latest_user_prompt,
-        route=route,
-    )
-
-    return _apply_workspace_claim_guard(
-        history=history,
-        response=response,
-        tool_name_set=tool_name_set,
-    )
+    return response
 
 
 def create_graph_nodes(
@@ -1142,6 +1017,7 @@ def create_graph_nodes(
         planner_llm=planner_llm,
         rag_service=rag_service,
         rag_top_k=rag_top_k,
+        tool_name_set=tool_name_set,
     )
     capture_tool_output_node = create_capture_tool_output_node()
 
@@ -1149,92 +1025,25 @@ def create_graph_nodes(
         history = state.get("messages", [])
         recent_history = recent_messages(history, RECENT_MESSAGE_WINDOW)
         rolling_summary = state.get("rolling_summary", "")
-        route = str(state.get("planner_route", ""))
-        planner_domain = str(state.get("planner_domain", "general") or "general")
-        planner_confidence = float(state.get("planner_confidence", 0.0) or 0.0)
-        planner_domain_enforced = bool(state.get("planner_domain_enforced", False))
-        planner_plan = str(state.get("plan", "") or "")
-        planner_plan_source = str(state.get("planner_plan_source", "") or "")
         latest_user_prompt = latest_user_message(history)
         action_required = requires_action(latest_user_prompt)
-        preferred_info_tool_name = preferred_info_tool(latest_user_prompt)
-        preferred_file_tool_name = preferred_file_tool(latest_user_prompt)
-        preferred_required_tool_name, preferred_required_tool_kind = _preferred_required_tool(
-            preferred_info_tool_name,
-            preferred_file_tool_name,
-        )
-        preferred_required_tool_pending = bool(
-            preferred_required_tool_name
-            and not current_turn_has_successful_tool_name(history, preferred_required_tool_name)
-        )
-        use_sap_prompt = route == "action:sap" or planner_domain == "sap"
-        active_system_prompt = sap_system_prompt if use_sap_prompt and sap_system_prompt else system_prompt
-        file_generation_requested = route == "action:file_generation" or is_file_generation_request(latest_user_prompt)
-        read_only_file_request = action_required and not file_generation_requested and is_read_only_file_request(latest_user_prompt)
-        successful_tool_result_in_turn = current_turn_has_successful_tool_result(history)
-        current_filegen_issue = (
-            file_generation_quality_issue(history, latest_user_prompt)
-            if file_generation_requested and successful_tool_result_in_turn
-            else None
-        )
-        action_completion_summary = format_action_completion_response(history)
+        
+        active_system_prompt = system_prompt
         retrieval_messages = retrieval_message(rag_service, latest_user_message(history), rag_top_k)
 
-        fast_path_response = _apply_brain_fast_path(
-            planner_llm=planner_llm,
-            history=history,
-            recent_history=recent_history,
-            route=route,
-            latest_user_prompt=latest_user_prompt,
-            active_system_prompt=active_system_prompt,
-            retrieval_messages=retrieval_messages,
-            rolling_summary=rolling_summary,
-            preferred_required_tool_name=preferred_required_tool_name,
-            tool_name_set=tool_name_set,
-            file_generation_requested=file_generation_requested,
-            current_filegen_issue=current_filegen_issue,
-            action_required=action_required,
-            action_completion_summary=action_completion_summary,
-            state=state,
-        )
-        if fast_path_response is not None:
-            return response_with_usage(state, fast_path_response)
-
-        preferred_tool_response = _apply_preferred_tool_fast_path(
-            preferred_tool_name=preferred_required_tool_name,
-            read_only_file_request=read_only_file_request,
-            history=history,
-            state=state,
-        )
-
+        preferred_tool_response = _successful_preferred_tool_fast_path(state, latest_user_prompt)
         if preferred_tool_response is not None:
             response = preferred_tool_response
         else:
             response = _run_main_execution_branch(
                 llm=llm,
-                planner_llm=planner_llm,
                 state=state,
                 history=history,
                 recent_history=recent_history,
-                route=route,
                 active_system_prompt=active_system_prompt,
                 retrieval_messages=retrieval_messages,
-                rolling_summary=rolling_summary,
-                preferred_required_tool_name=preferred_required_tool_name,
-                preferred_required_tool_kind=preferred_required_tool_kind,
-                preferred_required_tool_pending=preferred_required_tool_pending,
-                planner_plan_source=planner_plan_source,
-                planner_plan=planner_plan,
-                planner_domain=planner_domain,
-                planner_domain_enforced=planner_domain_enforced,
-                planner_confidence=planner_confidence,
-                file_generation_requested=file_generation_requested,
-                successful_tool_result_in_turn=successful_tool_result_in_turn,
-                current_filegen_issue=current_filegen_issue,
-                read_only_file_request=read_only_file_request,
                 action_required=action_required,
                 tool_name_set=tool_name_set,
-                latest_user_prompt=latest_user_prompt,
             )
 
         return response_with_usage(state, response)
