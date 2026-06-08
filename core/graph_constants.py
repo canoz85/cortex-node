@@ -90,10 +90,12 @@ CODING_DISCUSSION_QUESTION_PATTERN = re.compile(
     r"^(how|why|what|when|where|can|could|would|should|do)\b|\b(explain|help me|walk me through|show me how)\b",
     re.IGNORECASE,
 )
+
 FILE_GENERATION_PATTERN = re.compile(
-    r"\b(cli|command line|script|tool|file|module|program|utility|app|sensor|json file)\b",
+    r"\b(create|generate|build|write|implement|design)\b.*\b(app|tool|script|cli|program|module|project|service)\b",
     re.IGNORECASE,
 )
+
 SAP_INTENT_PATTERN = re.compile(
     r"\b(sap|abap|material master|material|mm|fi|purchase order|po|vendor|mara|marc|table|query|report|rmmg|mfbf|transaction|tcode)\b",
     re.IGNORECASE,

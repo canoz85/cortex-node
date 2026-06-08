@@ -46,10 +46,7 @@ FILE_MUTATION_INTENT_PATTERN = re.compile(
     r"\b(create|write|edit|update|modify|generate|implement|refactor|delete|remove|rename)\b",
     re.IGNORECASE,
 )
-LIST_WORKSPACE_INTENT_PATTERN = re.compile(
-    r"\b(list|show|display|ls|dir|enumerate)\b.*\b(workspace|files?|folders?|directories?|directory)\b|\b(workspace|files?|folders?|directories?|directory)\b.*\b(list|show|display|ls|dir|enumerate)\b",
-    re.IGNORECASE,
-)
+
 READ_AUDIT_INTENT_PATTERN = re.compile(
     r"\b(which|what|where)\b.*\b(files?|file)\b.*\b(read|reviewed|analy[sz]e(?:d)?)\b|\bdid you read\b",
     re.IGNORECASE,
@@ -57,6 +54,13 @@ READ_AUDIT_INTENT_PATTERN = re.compile(
 FILE_FACT_EXTRACTION_INTENT_PATTERN = re.compile(
     r"\b(what|which|show|tell)\b.*\b(device[_\s-]?id|id|temperature|pressure|value|status|field|json|data|latest)\b"
     r"|\b(device[_\s-]?id|temperature|pressure)\b",
+    re.IGNORECASE,
+)
+
+
+###
+LIST_WORKSPACE_INTENT_PATTERN = re.compile(
+    r"^\s*(list|show|display|ls|dir)\s+(all\s+)?(workspace\s+)?(files|folders|directories)\s*$",
     re.IGNORECASE,
 )
 
@@ -91,21 +95,6 @@ def _domain_decision(user_text: str) -> tuple[str, float, bool, bool, str]:
 
     confidence = min(0.95, 0.55 + python_score * 0.1)
     return "python", confidence, False, False, "python indicators dominate"
-
-
-def requires_action(user_text: str) -> bool:
-    text = (user_text or "").strip()
-    if not text:
-        return False
-    if is_read_audit_request(text):
-        return True
-    if requests_workspace_file_access(text):
-        return True
-    if preferred_file_tool(text):
-        return True
-    if is_file_fact_extraction_request(text):
-        return True
-    return bool(ACTION_INTENT_PATTERN.search(text))
 
 
 def requests_workspace_file_access(user_text: str) -> bool:
@@ -148,30 +137,12 @@ def preferred_file_tool(user_text: str) -> str | None:
     return None
 
 
-def is_read_audit_request(user_text: str) -> bool:
-    text = (user_text or "").strip()
-    if not text:
-        return False
-    return bool(READ_AUDIT_INTENT_PATTERN.search(text))
-
-
-def is_file_fact_extraction_request(user_text: str) -> bool:
-    text = (user_text or "").strip()
-    if not text:
-        return False
-    if is_read_audit_request(text) or requests_workspace_file_access(text):
-        return False
-    if FILE_MUTATION_INTENT_PATTERN.search(text):
-        return False
-    return bool(FILE_FACT_EXTRACTION_INTENT_PATTERN.search(text))
-
-
 def _is_casual_chat(user_text: str) -> bool:
     """Return True for social/identity chat that should skip planning/tool routing."""
     text = (user_text or "").strip()
     if not text:
         return False
-    if preferred_info_tool(text) or requires_action(text):
+    if preferred_info_tool(text):
         return False
     if CODE_DISCUSSION_PATTERN.search(text):
         return False
@@ -185,55 +156,88 @@ def _is_casual_chat(user_text: str) -> bool:
 
 
 def is_file_generation_request(user_text: str) -> bool:
-    text = (user_text or "").strip()
-    if not text or not requires_action(text):
-        return False
+    text = (user_text or "").strip().lower()
     return bool(FILE_GENERATION_PATTERN.search(text))
 
+def workspace_intent(user_text: str) -> str | None:
+    text = (user_text or "").lower()
 
-def planner_route(user_text: str) -> str:
-    return planner_routing_decision(user_text).route
+    intent_scores = {
+        "LIST": 0,
+        "READ": 0,
+        "ANALYZE": 0,
+        "GENERATE": 0,
+    }
 
+    # LIST
+    if any(k in text for k in [
+        "list workspace", "list files", "show workspace", "directory structure", "ls"
+    ]):
+        intent_scores["LIST"] += 3
+
+    # READ
+    if any(k in text for k in [
+        "read workspace", "open file", "show file content", "inspect files", "read files"
+    ]):
+        intent_scores["READ"] += 3
+
+    # ANALYZE
+    if any(k in text for k in [
+        "analyze", "count characters", "summarize", "explain project", "what is inside"
+    ]):
+        intent_scores["ANALYZE"] += 3
+
+    # GENERATE
+    if any(k in text for k in [
+        "generate", "create project", "write script", "build project", "implement"
+    ]):
+        intent_scores["GENERATE"] += 3
+
+    # soft signals (important improvement)
+    if "workspace" in text:
+        intent_scores["LIST"] += 1
+        intent_scores["READ"] += 1
+        intent_scores["ANALYZE"] += 1
+
+    best = max(intent_scores, key=intent_scores.get)
+
+    return best if intent_scores[best] > 0 else None
 
 def planner_routing_decision(user_text: str) -> RoutingDecision:
     text = (user_text or "").strip()
     if not text:
-        return RoutingDecision(
-            route="conversation",
-            domain="general",
-            confidence=0.0,
-            enforced=False,
-            reason="empty input",
-            needs_clarification=False,
-        )
-    if preferred_info_tool(text):
-        return RoutingDecision("info", "general", 1.0, False, "info intent", False)
-    if preferred_file_tool(text):
-        return RoutingDecision("action", "general", 1.0, False, "workspace listing intent", False)
-    if is_read_audit_request(text):
-        return RoutingDecision("action", "general", 1.0, False, "read audit intent", False)
-    if is_file_fact_extraction_request(text):
-        return RoutingDecision("action", "general", 0.9, False, "file fact extraction intent", False)
+        return RoutingDecision("conversation", "general", 0.0, False, "empty input", False)
+
+    # 1. info tools first
+    info_tool = preferred_info_tool(text)
+    if info_tool:
+        return RoutingDecision("info", "general", 1.0, False, info_tool, False)
+
+    # 2. workspace actions (single source of truth)
+    intent = workspace_intent(text)
+    if intent:
+        route_map = {
+            "LIST": "action:list_workspace",
+            "READ": "action:read_workspace",
+            "ANALYZE": "action:analyze_workspace",
+            "GENERATE": "action:generate_workspace",
+        }
+        return RoutingDecision(route_map[intent], "general", 1.0, False, f"{intent} workspace intent", False)
+
+    # 3. casual
     if _is_casual_chat(text):
         return RoutingDecision("casual", "general", 1.0, False, "casual chat", False)
 
+    # 4. domain logic fallback
     domain, confidence, enforced, ambiguous, reason = _domain_decision(text)
 
-    if ambiguous and requires_action(text):
-        return RoutingDecision("clarify_domain", "general", confidence, enforced, reason, True)
+    # if ambiguous and requires_action(text):
+    #     return RoutingDecision("clarify_domain", "general", confidence, enforced, reason, True)
 
-    if domain == "sap" and requires_action(text):
-        return RoutingDecision("action:sap", domain, confidence, enforced, reason, False)
+    # if domain == "sap" and requires_action(text):
+    #     return RoutingDecision("action:sap", domain, confidence, enforced, reason, False)
 
-    if requests_workspace_file_access(text):
-        return RoutingDecision("action", domain, max(confidence, 0.7), enforced, "workspace file access request", False)
+    # if requires_action(text):
+    #     return RoutingDecision("action", domain, max(confidence, 0.65), enforced, reason, False)
 
-    if CODE_DISCUSSION_PATTERN.search(text) and CODING_DISCUSSION_QUESTION_PATTERN.search(text):
-        return RoutingDecision("coding_discussion", domain, max(confidence, 0.7), enforced, reason, False)
-    if is_file_generation_request(text):
-        return RoutingDecision("action:file_generation", domain, max(confidence, 0.75), enforced, reason, False)
-    if requires_action(text):
-        return RoutingDecision("action", domain, max(confidence, 0.65), enforced, reason, False)
-    if CODE_DISCUSSION_PATTERN.search(text):
-        return RoutingDecision("coding_discussion", domain, max(confidence, 0.6), enforced, reason, False)
     return RoutingDecision("conversation", domain, confidence, enforced, reason, False)

@@ -96,6 +96,72 @@ def _handle_non_tool_call_message(
         print(raw_content)
     return False
 
+def _log_tool_calls(
+    *,
+    logger,
+    run_id: str,
+    node_name: str,
+    tool_calls: list,
+) -> None:
+
+    for call in tool_calls:
+        log_event(
+            logger,
+            logging.INFO,
+            "Tool call proposed",
+            event_name="tool_call_proposed",
+            run_id=run_id,
+            node=node_name,
+            tool_name=call.get("name"),
+        )
+
+def _handle_planner_event(
+    *,
+    node_name: str,
+    value: dict,
+    show_raw_llm: bool,
+) -> None:
+
+    if node_name != "planner":
+        return
+
+    plan = value.get("plan")
+    if not plan:
+        return
+
+    route = str(value.get("planner_route") or "")
+
+    header = "[planner]"
+    if route:
+        header = f"[planner:{route}]"
+
+    print(f"\n{ANSI_GREEN}{header}{ANSI_RESET}")
+    print(plan)
+
+    if show_raw_llm:
+        _print_raw_llm_response(str(plan))
+
+def _handle_message_event(
+    *,
+    node_name: str,
+    message,
+    show_raw_llm: bool,
+) -> None:
+
+    print(f"\n[{node_name}]")
+
+    if (
+        show_raw_llm
+        and isinstance(message, AIMessage)
+        and _is_llm_generated_message(message)
+    ):
+        _print_raw_llm_response(
+            _raw_ai_message_payload(message)
+        )
+
+    if getattr(message, "tool_calls", None):
+        print(format_tool_call_preview(message))
+
 
 def run_prompt(
     app,
@@ -143,69 +209,79 @@ def run_prompt(
     tool_call_messages = 0
     tool_result_messages = 0
     tool_call_count = 0
+    
     events = app.stream(initial_state)
+
     for event in events:
         for node_name, value in event.items():
-            if isinstance(value, dict):
-                node_updates += 1
-                latest_step_count = int(value.get("steps", latest_step_count) or 0)
-                if "rolling_summary" in value:
-                    latest_summary = str(value.get("rolling_summary") or "")
 
-                if node_name == "planner" and value.get("plan"):
-                    current_route = str(value.get("planner_route") or "")
-                    header = "[planner]"
-                    if current_route:
-                        header = f"[planner:{current_route}]"
-                    print(f"\n{ANSI_GREEN}{header}{ANSI_RESET}")
-                    print(str(value.get("plan")))
-                    if show_raw_llm:
-                        _print_raw_llm_response(str(value.get("plan")))
+            if not isinstance(value, dict):
+                continue
 
-                log_event(
-                    logger,
-                    logging.INFO,
-                    "Graph node update",
-                    event_name="graph_node_update",
-                    run_id=run_id,
-                    node=node_name,
-                    steps=latest_step_count,
+            node_updates += 1
+
+            latest_step_count = int(
+                value.get("steps", latest_step_count) or 0
+            )
+
+            if "rolling_summary" in value:
+                latest_summary = str(
+                    value.get("rolling_summary") or ""
                 )
 
-            messages = value.get("messages") if isinstance(value, dict) else None
+            _handle_planner_event(
+                node_name=node_name,
+                value=value,
+                show_raw_llm=show_raw_llm,
+            )
+
+            log_event(
+                logger,
+                logging.INFO,
+                "Graph node update",
+                event_name="graph_node_update",
+                run_id=run_id,
+                node=node_name,
+                steps=latest_step_count,
+            )
+
+            messages = value.get("messages")
             if not messages:
                 continue
 
             message = messages[-1]
+
+            _handle_message_event(
+                node_name=node_name,
+                message=message,
+                show_raw_llm=show_raw_llm,
+            )
+
             final_messages.append(message)
-            print(f"\n[{node_name}]")
-            if show_raw_llm and isinstance(message, AIMessage) and _is_llm_generated_message(message):
-                _print_raw_llm_response(_raw_ai_message_payload(message))
+
             if getattr(message, "tool_calls", None):
                 tool_call_messages += 1
-                print(format_tool_call_preview(message))
-                tool_calls = getattr(message, "tool_calls", None) or []
+
+                tool_calls = getattr(message, "tool_calls", [])
                 tool_call_count += len(tool_calls)
-                for call in tool_calls:
-                    log_event(
-                        logger,
-                        logging.INFO,
-                        "Tool call proposed",
-                        event_name="tool_call_proposed",
-                        run_id=run_id,
-                        node=node_name,
-                        tool_name=call.get("name"),
-                    )
+
+                _log_tool_calls(
+                    logger=logger,
+                    run_id=run_id,
+                    node_name=node_name,
+                    tool_calls=tool_calls,
+                )
             else:
                 raw_content = normalize_message_content(message)
-                captured = _handle_non_tool_call_message(
+
+                if _handle_non_tool_call_message(
                     raw_content=raw_content,
                     logger_obj=logger,
                     run_id=run_id,
                     node_name=node_name,
-                )
-                if captured:
+                ):
                     tool_result_messages += 1
+
 
     if latest_step_count >= MAX_REASONING_STEPS:
         print(

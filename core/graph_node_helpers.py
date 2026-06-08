@@ -90,7 +90,7 @@ def detect_missing_dependency(tool_output_raw: str) -> str | None:
     return None
 
 
-def planner_execution_brief(route: str, plan_source: str, plan_text: str) -> str:
+def planner_execution_brief(route: str, plan_text: str) -> str:
     """Return a concise planner brief for the brain LLM on action routes."""
     normalized_plan = str(plan_text or "").strip()
     if not normalized_plan:
@@ -99,11 +99,9 @@ def planner_execution_brief(route: str, plan_source: str, plan_text: str) -> str
     if len(normalized_plan) > 1500:
         normalized_plan = f"{normalized_plan[:1500]}..."
 
-    normalized_source = str(plan_source or "").strip() or "unknown"
     return (
         "Planner execution brief below. Use it as guidance, but produce executable next steps now.\n"
         f"Route: {route}\n"
-        f"Plan source: {normalized_source}\n"
         "Plan:\n"
         f"{normalized_plan}"
     )

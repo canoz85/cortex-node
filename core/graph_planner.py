@@ -54,28 +54,27 @@ def create_planner_node(
         )
 
         latest_user_prompt = latest_user_message(history)
-        routing = planner_routing_decision(latest_user_prompt)
-        route = routing.route
-        preferred_tool = preferred_info_tool(latest_user_prompt)
+        routing_decision = planner_routing_decision(latest_user_prompt)
+        planner_route = routing_decision.route
 
-        if route == "info":
-            plan_text = f"Info query detected: call {preferred_tool} tool and report the result."
-        elif route == "clarify_domain":
+        if planner_route == "info":
+            plan_text = f"Info query detected: call {routing_decision.reason} tool and report the result."
+        elif planner_route == "clarify_domain":
             plan_text = (
                 "Ambiguous domain detected: ask the user to choose SAP or Python before taking actions. "
                 "Do not call tools until clarified."
             )
-        elif route == "casual":
+        elif planner_route == "casual":
             plan_text = (
                 "Casual conversation detected: respond directly without tools. "
                 "Use conversation context for personal facts already shared and keep the reply brief."
             )
-        elif route == "coding_discussion":
+        elif planner_route == "coding_discussion":
             plan_text = (
                 "Coding discussion detected: answer directly unless a targeted tool becomes necessary. "
                 "Use conversation context, retrieved knowledge, and keep the reply concise."
             )
-        elif route == "conversation":
+        elif planner_route == "conversation":
             plan_text = "Conversation detected: respond directly and briefly without tools unless the user asks for concrete action."
         else:
             retrieval_messages = retrieval_message(rag_service, latest_user_prompt, rag_top_k)
@@ -98,14 +97,14 @@ def create_planner_node(
 
         return {
             "plan": plan_text,
-            "planner_route": route,
-            "planner_domain": routing.domain,
-            "planner_confidence": routing.confidence,
-            "planner_domain_enforced": routing.enforced,
+            "planner_route": routing_decision.route,
+            "planner_domain": routing_decision.domain,
+            "planner_confidence": routing_decision.confidence,
+            "planner_domain_enforced": routing_decision.enforced,
             "rolling_summary": updated_summary,
             "steps": 0,
             "last_tool_rendered": "",
-            "last_tool_success": True,
+            "last_tool_success": None,
             "repeat_fail_count": 0,
             "tool_text_retry_used": False,
         }

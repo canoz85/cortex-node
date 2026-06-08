@@ -22,13 +22,8 @@ from core.graph_filegen_policy import (
     should_finalize_action_turn,
 )
 from core.graph_intents import (
-    is_file_generation_request,
-    is_file_fact_extraction_request,
-    is_read_audit_request,
-    is_read_only_file_request,
     preferred_file_tool,
     preferred_info_tool,
-    requires_action,
 )
 from core.graph_messages import is_effectively_empty_response, latest_user_message, normalize_message_content, recent_messages
 from core.graph_node_helpers import (
@@ -949,12 +944,17 @@ def _run_main_execution_branch(
     recent_history: list,
     active_system_prompt: str,
     retrieval_messages: list[SystemMessage],
-    action_required: bool,
     tool_name_set: set[str],
 ) -> AIMessage:
+    
+    action_required = False
+    planner_route = str(state.get("planner_route", ""))
+    if planner_route.startswith("action"):
+        action_required = True
 
     response_llm = llm
     execution_history = _ensure_tool_message_visible(history, recent_history)
+
     pre_messages, early_response = _build_pre_messages(
         active_system_prompt=active_system_prompt,
         retrieval_messages=retrieval_messages,
@@ -1026,8 +1026,7 @@ def create_graph_nodes(
         recent_history = recent_messages(history, RECENT_MESSAGE_WINDOW)
         rolling_summary = state.get("rolling_summary", "")
         latest_user_prompt = latest_user_message(history)
-        action_required = requires_action(latest_user_prompt)
-        
+                
         active_system_prompt = system_prompt
         retrieval_messages = retrieval_message(rag_service, latest_user_message(history), rag_top_k)
 
@@ -1042,7 +1041,6 @@ def create_graph_nodes(
                 recent_history=recent_history,
                 active_system_prompt=active_system_prompt,
                 retrieval_messages=retrieval_messages,
-                action_required=action_required,
                 tool_name_set=tool_name_set,
             )
 

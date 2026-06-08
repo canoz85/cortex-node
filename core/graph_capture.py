@@ -25,7 +25,7 @@ def create_capture_tool_output_node():
                 "last_tool_output": "",
                 "last_tool_rendered": "",
                 "last_tool_signature": "",
-                "last_tool_success": True,
+                "last_tool_success": None,
                 "repeat_fail_count": 0,
             }
 
@@ -43,9 +43,9 @@ def create_capture_tool_output_node():
             current_signature = extract_tool_signature(history[:-1], getattr(last_message, "tool_call_id", None))
 
             previous_signature = state.get("last_tool_signature", "")
-            previous_success = state.get("last_tool_success", True)
+            previous_success = state.get("last_tool_success", None)
             previous_repeat_count = state.get("repeat_fail_count", 0)
-            if not success and current_signature and previous_signature == current_signature and not previous_success:
+            if not success and current_signature and previous_signature == current_signature and previous_success is False:
                 repeat_fail_count = previous_repeat_count + 1
             elif not success and current_signature:
                 repeat_fail_count = 1
@@ -89,7 +89,7 @@ def create_capture_tool_output_node():
             "last_tool_output": state.get("last_tool_output", ""),
             "last_tool_rendered": state.get("last_tool_rendered", ""),
             "last_tool_signature": state.get("last_tool_signature", ""),
-            "last_tool_success": state.get("last_tool_success", True),
+            "last_tool_success": state.get("last_tool_success", None),
             "repeat_fail_count": state.get("repeat_fail_count", 0),
         }
 
