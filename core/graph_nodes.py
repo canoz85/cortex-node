@@ -3,6 +3,7 @@ import uuid
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
 
+from core import state
 from core.graph_capture import create_capture_tool_output_node
 from core.graph_constants import ANSI_BLUE, ANSI_ITALIC, ANSI_RED, ANSI_GREEN, ANSI_YELLOW, ANSI_RESET, MAX_PSEUDO_RETRIES, RECENT_MESSAGE_WINDOW
 from core.graph_context import retrieval_message, rolling_summary_message
@@ -25,7 +26,7 @@ from core.graph_intents import (
     preferred_file_tool,
     preferred_info_tool,
 )
-from core.graph_messages import is_effectively_empty_response, latest_user_message, normalize_message_content, recent_messages
+from core.graph_messages import current_turn_messages, is_effectively_empty_response, latest_human_message, latest_human_message_str, normalize_message_content, recent_messages
 from core.graph_node_helpers import (
     detect_missing_dependency,
     direct_discussion_response,
@@ -501,11 +502,11 @@ def _apply_repeated_signature_guard(
     *,
     llm: ChatOllama,
     pre_messages: list,
-    recent_history: list,
     response: AIMessage,
     action_required: bool,
     state: AgentState,
 ) -> AIMessage:
+    
     last_tool_signature = str(state.get("last_tool_signature", ""))
     if not (action_required and last_tool_signature):
         return response
@@ -517,13 +518,12 @@ def _apply_repeated_signature_guard(
     corrected_response = llm.invoke(
         [
             *pre_messages,
-            *recent_history,
             response,
             _repeated_signature_correction_prompt(last_tool_signature, repeat_reason),
         ]
     )
 
-    _print_raw_llm_request_response(color=ANSI_YELLOW, messages=[*pre_messages, *recent_history, 
+    _print_raw_llm_request_response(color=ANSI_YELLOW, messages=[*pre_messages, 
         response,_repeated_signature_correction_prompt(last_tool_signature, repeat_reason)], raw_text=response.content)
 
 
@@ -531,13 +531,12 @@ def _apply_repeated_signature_guard(
         final_response = llm.invoke(
             [
                 *pre_messages,
-                *recent_history,
                 corrected_response,
                 _repeated_success_final_answer_prompt(last_tool_signature),
             ]
         )
 
-        _print_raw_llm_request_response(color=ANSI_GREEN, messages=[*pre_messages, *recent_history,
+        _print_raw_llm_request_response(color=ANSI_GREEN, messages=[*pre_messages,
              corrected_response, _repeated_success_final_answer_prompt(last_tool_signature)], 
                                          raw_text=response.content)
 
@@ -561,7 +560,6 @@ def _apply_response_recovery(
     *,
     response_llm: ChatOllama,
     pre_messages: list,
-    recent_history: list,
     response: AIMessage,
     action_required: bool,
     tool_name_set: set[str],
@@ -578,11 +576,10 @@ def _apply_response_recovery(
         response = response_llm.invoke(
             [
                     *pre_messages,
-                    *recent_history,
                     _empty_response_retry_prompt(),
             ]
         )
-        _print_raw_llm_request_response(color=ANSI_GREEN, messages=[*pre_messages, *recent_history, _empty_response_retry_prompt()], raw_text=response.content)
+        _print_raw_llm_request_response(color=ANSI_GREEN, messages=[*pre_messages, _empty_response_retry_prompt()], raw_text=response.content)
 
     if is_effectively_empty_response(response):
         response = _empty_response_fallback()
@@ -594,7 +591,6 @@ def _finalize_from_successful_tool_context(
     *,
     llm: ChatOllama,
     pre_messages: list,
-    recent_history: list,
     state: AgentState,
     history: list,
     response: AIMessage,
@@ -614,7 +610,6 @@ def _finalize_from_successful_tool_context(
     decision = llm.invoke(
         [
             *pre_messages,
-            *recent_history,
             response,
             SystemMessage(
                 content=(
@@ -628,7 +623,7 @@ def _finalize_from_successful_tool_context(
         ]
     )
 
-    _print_raw_llm_request_response(color=ANSI_RED, messages=[*pre_messages, *recent_history, response, 
+    _print_raw_llm_request_response(color=ANSI_RED, messages=[*pre_messages, response, 
             SystemMessage(
                 content=(
                     "A tool already succeeded in this turn. Decide one of two outcomes only: "
@@ -789,6 +784,12 @@ def _build_pre_messages(
     last_tool_rendered = str(state.get("last_tool_rendered", "") or "")
     last_tool_signature = str(state.get("last_tool_signature", "") or "")
 
+    history = state.get("messages", [])
+    rolling_summary = state.get("rolling_summary", "")
+    #recent_history = recent_messages(history, RECENT_MESSAGE_WINDOW)
+    #execution_history = _ensure_tool_message_visible(history, recent_history)
+
+
     # 1. Core system context
     pre_messages = [
         SystemMessage(content=active_system_prompt),
@@ -796,14 +797,26 @@ def _build_pre_messages(
     ]
 
     # 2. Planner / execution context (optional)
-    if route.startswith("action") and state.get("plan") and state.get("last_tool_success") is None:
+    #if route.startswith("action") and state.get("plan") and state.get("last_tool_success") is None:
+    if state.get("plan"):
 
-        planner_brief = planner_execution_brief(
-            route,
-            state.get("plan", "")
-        )
-        if planner_brief:
-            pre_messages.append(SystemMessage(content=planner_brief))
+        if route.startswith("action"):
+            planner_brief = planner_execution_brief(
+                route,
+                state.get("plan", "")
+            )
+            if planner_brief:
+                pre_messages.append(SystemMessage(content=planner_brief))
+        
+        state["plan"] = None  # only at END OF TURN
+
+    pre_messages.append(SystemMessage(content=rolling_summary))
+
+    if route.startswith("action"):
+        pre_messages.append(current_turn_messages(history))
+    else:
+        pre_messages.append(latest_human_message(history))
+
 
     # 3. Runtime instruction buffer
     guidance = []
@@ -832,20 +845,6 @@ def _build_pre_messages(
     # ------------------------------------------------------------
     if last_tool_success is True and last_tool_rendered.strip():
 
-        # guidance.append("A tool has executed successfully in this turn.")
-
-        # guidance.append("TOOL RESULT (authoritative):")
-        # guidance.append(last_tool_rendered[:2000])
-
-        # if last_tool_signature:
-        #     guidance.append(f"Do not repeat this tool call signature: {last_tool_signature}")
-
-        # guidance.append(
-        #     "Decide based ONLY on the tool result:\n"
-        #     "- If it fully satisfies the user request → respond directly.\n"
-        #     "- If not → call a DIFFERENT tool with new arguments.\n"
-        # )
-      
         guidance.append(
             "A tool has already succeeded during this user turn. "
             "Use the tool output as the authoritative source of truth for the current state of the world. "
@@ -853,15 +852,6 @@ def _build_pre_messages(
             "Only call another tool if a specific remaining gap still exists that can be directly addressed by one more tool call."
         )
         
-    # ------------------------------------------------------------
-    # C) NON-ACTION ROUTES (CONVERSATION SAFETY)
-    # ------------------------------------------------------------
-    if route in {"coding_discussion", "conversation", "casual"}:
-        guidance.append(
-            "This is a pure conversation turn.\n"
-            "Do not use tools unless explicitly requested."
-        )
-
     # ------------------------------------------------------------
     # 4. FINAL SYSTEM INSTRUCTION BLOCK (single injection)
     # ------------------------------------------------------------
@@ -940,20 +930,13 @@ def _run_main_execution_branch(
     *,
     llm: ChatOllama,
     state: AgentState,
-    history: list,
-    recent_history: list,
     active_system_prompt: str,
     retrieval_messages: list[SystemMessage],
+    action_required: bool,
     tool_name_set: set[str],
 ) -> AIMessage:
     
-    action_required = False
-    planner_route = str(state.get("planner_route", ""))
-    if planner_route.startswith("action"):
-        action_required = True
-
     response_llm = llm
-    execution_history = _ensure_tool_message_visible(history, recent_history)
 
     pre_messages, early_response = _build_pre_messages(
         active_system_prompt=active_system_prompt,
@@ -963,14 +946,13 @@ def _run_main_execution_branch(
     if early_response is not None:
         return early_response
 
-    response = response_llm.invoke([*pre_messages, *execution_history])
+    response = response_llm.invoke([*pre_messages])
 
-    _print_raw_llm_request_response(color=ANSI_BLUE, messages=[*pre_messages, *execution_history], raw_text=response.content)
+    _print_raw_llm_request_response(color=ANSI_BLUE, messages=[*pre_messages], raw_text=response.content)
 
     response = _apply_response_recovery(
         response_llm=response_llm,
         pre_messages=pre_messages,
-        recent_history=execution_history,
         response=response,
         action_required=action_required,
         tool_name_set=tool_name_set,
@@ -979,7 +961,6 @@ def _run_main_execution_branch(
     response = _apply_repeated_signature_guard(
         llm=llm,
         pre_messages=pre_messages,
-        recent_history=execution_history,
         response=response,
         action_required=action_required,
         state=state,
@@ -993,7 +974,6 @@ def _run_main_execution_branch(
         response = _finalize_from_successful_tool_context(
             llm=llm,
             pre_messages=pre_messages,
-            recent_history=execution_history,
             state=state,
             history=history,
             response=response,
@@ -1009,7 +989,8 @@ def create_graph_nodes(
     planner_llm: ChatOllama,
     rag_service: WorkspaceRAG,
     rag_top_k: int,
-    system_prompt: str,
+    agent_system_prompt: str,
+    casual_system_prompt: str,
     sap_system_prompt: str | None,
     tool_name_set: set[str],
 ):
@@ -1023,24 +1004,31 @@ def create_graph_nodes(
 
     def brain_node(state: AgentState):
         history = state.get("messages", [])
-        recent_history = recent_messages(history, RECENT_MESSAGE_WINDOW)
-        rolling_summary = state.get("rolling_summary", "")
-        latest_user_prompt = latest_user_message(history)
-                
-        active_system_prompt = system_prompt
-        retrieval_messages = retrieval_message(rag_service, latest_user_message(history), rag_top_k)
+        latest_user_prompt = latest_human_message_str(history)       
 
         preferred_tool_response = _successful_preferred_tool_fast_path(state, latest_user_prompt)
         if preferred_tool_response is not None:
             response = preferred_tool_response
         else:
+
+            action_required = False
+            retrieval_messages = []
+            system_prompt = casual_system_prompt
+
+            planner_route = str(state.get("planner_route", ""))
+            if planner_route.startswith("action"):
+                action_required = True
+                system_prompt = agent_system_prompt
+                retrieval_messages = retrieval_message(rag_service, latest_user_prompt, rag_top_k)
+            elif planner_route.startswith("info"):
+                action_required = True
+
             response = _run_main_execution_branch(
                 llm=llm,
                 state=state,
-                history=history,
-                recent_history=recent_history,
-                active_system_prompt=active_system_prompt,
+                active_system_prompt=system_prompt,
                 retrieval_messages=retrieval_messages,
+                action_required=action_required,
                 tool_name_set=tool_name_set,
             )
 

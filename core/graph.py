@@ -6,7 +6,7 @@ from langgraph.graph import StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 
-from core.graph_constants import MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE
+from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE
 from core.graph_nodes import create_graph_nodes
 from core.graph_runner import run_prompt
 from core.rag import WorkspaceRAG
@@ -85,13 +85,15 @@ def build_app(
     # Format the available tools into a clean, scannable string block
     tools_list_str = "\n".join([f"- {name}" for name in sorted(tool_name_set) if name])
 
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+    agent_system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         model=model,
         workspace_dir=workspace_root_str,
         knowledge_dir=str(knowledge_root),
         max_steps=MAX_REASONING_STEPS,
         available_tools=tools_list_str,
     )
+
+    casual_system_prompt = CASUAL_SYSTEM_PROMPT_TEMPLATE
 
     llm = chat_model_factory(model, 0).bind_tools(tools)
     planner_llm = chat_model_factory(model, 0)
@@ -101,7 +103,8 @@ def build_app(
         planner_llm=planner_llm,
         rag_service=rag_service,
         rag_top_k=rag_top_k,
-        system_prompt=system_prompt,
+        agent_system_prompt=agent_system_prompt,
+        casual_system_prompt=casual_system_prompt,
         sap_system_prompt=sap_system_prompt,
         tool_name_set=tool_name_set,
     )

@@ -35,6 +35,16 @@ Constraints:
 - Keep responses concise and action-oriented.
 """
 
+CASUAL_SYSTEM_PROMPT_TEMPLATE = """You are CortexNode, a helpful and friendly assistant for software developers in CONVERSATION MODE.
+
+Rules:
+- Do NOT use tools.
+- Do NOT propose actions.
+- Do NOT simulate execution.
+- Do NOT generate plans or steps.
+- Only respond naturally to the user.
+- Use provided history if needed."""
+
 PSEUDO_TOOL_CALL_PATTERN = re.compile(
     r"\b(?:list_files|read_file|write_file|make_directory|run_python|git_status|git_diff|git_log|git_show|agent_info|token_usage|current_time|solve_math|scada_status|rag_search|rag_refresh_index|query_abap_table|execute_abap_report|lookup_material|get_report_data)\s*\(",
     re.IGNORECASE,

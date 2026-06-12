@@ -1,12 +1,20 @@
 from langchain_core.messages import HumanMessage
 
 
-def latest_user_message(history: list) -> str:
-    for message in reversed(history):
-        if isinstance(message, HumanMessage):
-            return str(message.content)
+def latest_human_message_str(history: list) -> str:
+    
+    latest_message = latest_human_message(history)
+    if latest_message is not None:
+        raw_text = str(latest_message.content)
+        return raw_text.strip()
+    
     return ""
 
+def latest_human_message(history: list) -> HumanMessage | None:
+    for message in reversed(history):
+        if isinstance(message, HumanMessage):
+            return message
+    return None
 
 def current_turn_messages(history: list) -> list:
     """Return messages from the latest user turn onward."""

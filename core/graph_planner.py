@@ -4,7 +4,7 @@ from langchain_ollama import ChatOllama
 from core.graph_constants import RECENT_MESSAGE_WINDOW
 from core.graph_context import retrieval_message, rolling_summary_message, update_rolling_summary
 from core.graph_intents import planner_routing_decision, preferred_info_tool
-from core.graph_messages import latest_user_message, recent_messages
+from core.graph_messages import latest_human_message_str, recent_messages
 from core.rag import WorkspaceRAG
 from core.state import AgentState
 
@@ -53,7 +53,7 @@ def create_planner_node(
             recent_history=recent_history,
         )
 
-        latest_user_prompt = latest_user_message(history)
+        latest_user_prompt = latest_human_message_str(history)
         routing_decision = planner_routing_decision(latest_user_prompt)
         planner_route = routing_decision.route
 

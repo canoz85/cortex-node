@@ -251,7 +251,15 @@ class WorkspaceRAG:
         return cached
 
     def format_context(self, query: str, top_k: int | None = None) -> str:
+        MIN_RELEVANCE = 0.50
+
         matches = self.search(query, top_k=top_k)
+        
+        matches = [
+            m for m in matches
+            if m.score >= MIN_RELEVANCE
+        ]
+
         if not matches:
             return ""
 
