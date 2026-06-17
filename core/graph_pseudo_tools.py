@@ -8,6 +8,24 @@ from langchain_core.messages import AIMessage
 from core.graph_constants import PSEUDO_JSON_TOOL_CALL_PATTERN, PSEUDO_TOOL_CALL_PATTERN
 from core.graph_messages import is_effectively_empty_response, normalize_message_content
 
+def is_generic_json_tool_response(message: AIMessage) -> bool:
+
+    if getattr(message, "tool_calls", None):
+        return False
+    
+    content = str(getattr(message, "content", "")).strip()
+    # Strip markdown fences if present
+    if content.startswith("```"):
+        parts = content.split("```")
+        if len(parts) >= 3:
+            content = parts[1].replace("json", "", 1).strip()
+            
+    try:
+        data = json.loads(content)
+        # Does it look like a tool call structure?
+        return isinstance(data, dict) and "name" in data and "arguments" in data
+    except json.JSONDecodeError:
+        return False
 
 def looks_like_pseudo_tool_text(content: str) -> bool:
     text = content or ""

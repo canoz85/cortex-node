@@ -201,23 +201,6 @@ def next_file_generation_repair_call(state: AgentState) -> dict | None:
     }
 
 
-def file_generation_verification_failures(history: list) -> tuple[int, str]:
-    """Return number of failed run_python calls in current turn and the latest stderr."""
-    events = current_turn_tool_events(history)
-    fail_count = 0
-    latest_error = ""
-    for event in events:
-        if str(event.get("name", "")) != "run_python":
-            continue
-        if event.get("success"):
-            continue
-        fail_count += 1
-        result = event.get("result")
-        if result is not None and isinstance(result.data, dict):
-            latest_error = str(result.data.get("stderr", "") or "")
-    return fail_count, latest_error
-
-
 def _apply_args_scope_repair(content: str) -> str:
     """Repair a common args-scope bug where validation lines escape main()."""
     if not content:

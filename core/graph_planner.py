@@ -1,8 +1,8 @@
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 
 from core.graph_constants import RECENT_MESSAGE_WINDOW
-from core.graph_context import retrieval_message, rolling_summary_message, update_rolling_summary
+from core.graph_context import retrieval_message
 from core.graph_intents import planner_routing_decision, preferred_info_tool
 from core.graph_messages import latest_human_message_str, recent_messages
 from core.rag import WorkspaceRAG
@@ -45,13 +45,8 @@ def create_planner_node(
     def planner_node(state: AgentState):
         """First pass: analyze prompt and create a plan WITHOUT taking actions."""
         history = state.get("messages", [])
-        recent_history = recent_messages(history, RECENT_MESSAGE_WINDOW)
-        previous_summary = state.get("rolling_summary", "")
-        updated_summary = update_rolling_summary(
-            planner_llm=planner_llm,
-            existing_summary=previous_summary,
-            recent_history=recent_history,
-        )
+        #recent_history = recent_messages(history, RECENT_MESSAGE_WINDOW)
+        
 
         latest_user_prompt = latest_human_message_str(history)
         routing_decision = planner_routing_decision(latest_user_prompt)
@@ -78,7 +73,6 @@ def create_planner_node(
             plan_text = "Conversation detected: respond directly and briefly without tools unless the user asks for concrete action."
         else:
             retrieval_messages = retrieval_message(rag_service, latest_user_prompt, rag_top_k)
-            summary_message = rolling_summary_message(updated_summary)
 
             # Format the available tools into a clean, scannable string block
             tools_list_str = "\n".join([f"- {name}" for name in sorted(tool_name_set) if name])
@@ -89,10 +83,10 @@ def create_planner_node(
             pre_messages = [
                 SystemMessage(content=runtime_planning_prompt),
                 *retrieval_messages,
-                *summary_message,
+                HumanMessage(content=latest_user_prompt),
             ]
 
-            plan_response = planner_llm.invoke([*pre_messages, *recent_history])
+            plan_response = planner_llm.invoke([*pre_messages])
             plan_text = str(plan_response.content)
 
         return {
@@ -101,7 +95,6 @@ def create_planner_node(
             "planner_domain": routing_decision.domain,
             "planner_confidence": routing_decision.confidence,
             "planner_domain_enforced": routing_decision.enforced,
-            "rolling_summary": updated_summary,
             "steps": 0,
             "last_tool_rendered": "",
             "last_tool_success": None,

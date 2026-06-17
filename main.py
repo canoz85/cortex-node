@@ -11,10 +11,11 @@ from core.graph import build_app, run_prompt
 DEFAULT_SETTINGS = {
     "workspace": "workspace",
     "knowledge_dir": "knowledge",
-    "model": "qwen2.5-coder:14b",
+    "model": "gpt-oss:20b", #"qwen2.5-coder:14b",
+    "model_planner": "gpt-oss:20b",
     "embedding_model": "nomic-embed-text",
     "rag_top_k": 4,
-    "raw_llm": True,
+    "raw_llm": False,
     "show_summary": False,
     "log_level": "INFO",
     "json_logs": False,
@@ -53,6 +54,7 @@ def _build_settings(args: argparse.Namespace) -> dict:
         "workspace": os.getenv("CORTEX_WORKSPACE"),
         "knowledge_dir": os.getenv("CORTEX_KNOWLEDGE_DIR"),
         "model": os.getenv("CORTEX_MODEL"),
+        "model_planner": os.getenv("CORTEX_MODEL_PLANNER"),
         "embedding_model": os.getenv("CORTEX_EMBEDDING_MODEL"),
         "rag_top_k": os.getenv("CORTEX_RAG_TOP_K"),
         "log_level": os.getenv("CORTEX_LOG_LEVEL"),
@@ -74,6 +76,7 @@ def _build_settings(args: argparse.Namespace) -> dict:
         "workspace": args.workspace,
         "knowledge_dir": args.knowledge_dir,
         "model": args.model,
+        "model_planner": args.model_planner,
         "embedding_model": args.embedding_model,
         "rag_top_k": args.rag_top_k,
         "raw_llm": args.raw_llm,
@@ -114,6 +117,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Ollama model name",
     )
+
+    runtime_group.add_argument(
+        "--model-planner",
+        default=None,
+        help="Ollama model name for the planner (can be same as --model)",
+    )
+
     runtime_group.add_argument(
         "--embedding-model",
         default=None,
@@ -190,6 +200,7 @@ def main():
     app = build_app(
         workspace_dir=str(settings["workspace"]),
         model=str(settings["model"]),
+        model_planner=str(settings["model_planner"]),
         knowledge_dir=str(settings["knowledge_dir"]),
         embedding_model=str(settings["embedding_model"]),
         rag_top_k=int(settings["rag_top_k"]),
@@ -197,6 +208,7 @@ def main():
 
     print("--- CortexNode initialized ---")
     print(f"Model: {settings['model']}")
+    print(f"Planner Model: {settings['model_planner']}")
     print(f"Sandbox: {settings['workspace']}")
     print(f"Knowledge: {settings['knowledge_dir']}")
     logger.info(
@@ -204,6 +216,7 @@ def main():
         extra={
             "event_name": "app_initialized",
             "model": settings["model"],
+            "planner_model": settings["model_planner"],
             "workspace": settings["workspace"],
             "knowledge_dir": settings["knowledge_dir"],
             "rag_top_k": settings["rag_top_k"],

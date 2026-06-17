@@ -3,7 +3,7 @@ from typing import Any, Callable
 
 from langchain_ollama import ChatOllama
 from langgraph.graph import StateGraph
-from langgraph.graph.state import CompiledStateGraph
+from langgraph.graph.state import END, CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 
 from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE
@@ -60,7 +60,8 @@ def _load_sap_system_prompt(project_root: Path) -> str | None:
 
 def build_app(
     workspace_dir: str = "workspace",
-    model: str = "qwen2.5-coder:14b",
+    model: str = "gpt-oss:20b", #"qwen2.5-coder:14b",
+    model_planner: str = "gpt-oss:20b",
     knowledge_dir: str = "knowledge",
     embedding_model: str = "nomic-embed-text",
     rag_top_k: int = 4,
@@ -95,11 +96,13 @@ def build_app(
 
     casual_system_prompt = CASUAL_SYSTEM_PROMPT_TEMPLATE
 
-    llm = chat_model_factory(model, 0).bind_tools(tools)
-    planner_llm = chat_model_factory(model, 0)
+    planner_llm = chat_model_factory(model_planner, 0)
+    brain_llm = chat_model_factory(model, 0)
+    tool_brain_llm = chat_model_factory(model, 0).bind_tools(tools)
 
-    planner_node, brain_node, capture_tool_output_node, route_after_brain = graph_nodes_factory(
-        llm=llm,
+    planner_node, brain_node, capture_tool_output_node, route_after_brain, summarize_memory_node = graph_nodes_factory(
+        brain_llm=brain_llm,
+        tool_brain_llm=tool_brain_llm,
         planner_llm=planner_llm,
         rag_service=rag_service,
         rag_top_k=rag_top_k,
@@ -114,11 +117,13 @@ def build_app(
     workflow.add_node("brain", brain_node)
     workflow.add_node("tools", tool_node_factory(tools))
     workflow.add_node("capture_tool_output", capture_tool_output_node)
+    workflow.add_node("summarize_memory", summarize_memory_node)
 
     workflow.set_entry_point("planner")
     workflow.add_edge("planner", "brain")
     workflow.add_conditional_edges("brain", route_after_brain)
     workflow.add_edge("tools", "capture_tool_output")
     workflow.add_edge("capture_tool_output", "brain")
+    workflow.add_edge("summarize_memory", END)
 
     return workflow.compile()

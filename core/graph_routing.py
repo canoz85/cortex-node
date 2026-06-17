@@ -15,4 +15,4 @@ def route_after_brain(state: AgentState):
     last_message = history[-1]
     if getattr(last_message, "tool_calls", None):
         return "tools"
-    return END
+    return "summarize_memory"

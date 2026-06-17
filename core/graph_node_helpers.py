@@ -1,7 +1,7 @@
 from langchain_core.messages import AIMessage, SystemMessage
 from langchain_ollama import ChatOllama
 
-from core.graph_context import rolling_summary_message
+from core.graph_summarize import rolling_summary_message
 from core.graph_filegen_policy import last_tool_stderr
 from core.graph_messages import normalize_message_content
 from core.graph_pseudo_tools import looks_like_pseudo_tool_text

@@ -189,7 +189,7 @@ def workspace_intent(user_text: str) -> str | None:
 
     # GENERATE
     if any(k in text for k in [
-        "generate", "create project", "write script", "build project", "implement"
+        "generate", "create project", "write script", "build project", "implement", "execute code", "run code"
     ]):
         intent_scores["GENERATE"] += 3
 
