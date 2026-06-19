@@ -1,11 +1,10 @@
-
 import json
 import re
 from langchain_core.messages import SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
 from core.state import AgentState
-from core.graph_constants import MAX_SUMMARY_CHARS, RECENT_MESSAGE_WINDOW
-from core.graph_messages import recent_messages
+from core.graph_constants import MAX_SUMMARY_CHARS, MAX_SUMMARY_TURNS, RECENT_MESSAGE_WINDOW
+from core.graph_messages import recent_turn_slice, recent_human_turn_messages
 
 
 def rolling_summary_message(summary: str) -> list[SystemMessage]:
@@ -21,16 +20,15 @@ def rolling_summary_message(summary: str) -> list[SystemMessage]:
         )
     ]
 
-def create_summarize_memory_node(
-    *,
-    summarize_llm: ChatOllama):
 
-    
-    def _clip_summary(text: str, max_chars: int = MAX_SUMMARY_CHARS) -> str:
-        if len(text) <= max_chars:
-            return text
-        return text[:max_chars].rstrip() + "..."
-
+def create_summarize_memory_node(*, summarize_llm: ChatOllama):
+    def _empty_payload() -> dict:
+        return {
+            "schema_version": 2,
+            "facts": [],
+            "open_questions": [],
+            "meta": {"updated_at_turn": 0},
+        }
 
     def _extract_json_object(text: str) -> str | None:
         compact = (text or "").strip()
@@ -38,8 +36,8 @@ def create_summarize_memory_node(
             return None
 
         if compact.startswith("```"):
-            compact = re.sub(r"^```(?:json)?\\s*", "", compact)
-            compact = re.sub(r"\\s*```$", "", compact).strip()
+            compact = re.sub(r"^```(?:json)?\s*", "", compact)
+            compact = re.sub(r"\s*```$", "", compact).strip()
 
         if compact.startswith("{") and compact.endswith("}"):
             return compact
@@ -50,189 +48,264 @@ def create_summarize_memory_node(
             return None
         return compact[first : last + 1]
 
+    def _fact_id(text: str, category: str) -> str:
+        base = f"{category}|{text.strip().lower()}"
+        return str(abs(hash(base)))
 
-    def _normalize_summary_payload(payload: dict | None) -> dict[str, list[str]]:
-        normalized = {"facts": [], "open_questions": []}
+    def _normalize_fact(item: object) -> dict | None:
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                return None
+            category = "profile"
+            return {
+                "id": _fact_id(text, category),
+                "text": text,
+                "category": category,
+                "confidence": 0.7,
+            }
+
+        if not isinstance(item, dict):
+            return None
+
+        text = str(item.get("text", "")).strip()
+        if not text:
+            return None
+
+        category = str(item.get("category", "profile")).strip() or "profile"
+        confidence = item.get("confidence", 0.7)
+        if not isinstance(confidence, (int, float)):
+            confidence = 0.7
+        confidence = max(0.0, min(float(confidence), 1.0))
+
+        fid = str(item.get("id", "")).strip() or _fact_id(text, category)
+        return {
+            "id": fid,
+            "text": text,
+            "category": category,
+            "confidence": confidence,
+        }
+
+    def _normalize_question(item: object) -> dict | None:
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                return None
+            return {"text": text, "status": "open", "priority": "medium"}
+
+        if not isinstance(item, dict):
+            return None
+
+        text = str(item.get("text", "")).strip()
+        if not text:
+            return None
+
+        status = str(item.get("status", "open")).strip() or "open"
+        priority = str(item.get("priority", "medium")).strip() or "medium"
+        return {"text": text, "status": status, "priority": priority}
+
+    def _normalize_summary_payload(payload: dict | None) -> dict:
+        normalized = _empty_payload()
         if not isinstance(payload, dict):
             return normalized
 
-        for key in ("facts", "open_questions"):
-            value = payload.get(key)
-            if not isinstance(value, list):
-                continue
+        version = payload.get("schema_version", 1)
+        if isinstance(version, int):
+            normalized["schema_version"] = max(1, version)
 
-            cleaned: list[str] = []
-            for item in value:
-                if not isinstance(item, str):
+        facts = payload.get("facts", [])
+        if isinstance(facts, list):
+            seen_ids: set[str] = set()
+            for raw in facts:
+                fact = _normalize_fact(raw)
+                if not fact:
                     continue
-                entry = item.strip()
-                if not entry:
+                if fact["id"] in seen_ids:
                     continue
-                if entry not in cleaned:
-                    cleaned.append(entry)
+                seen_ids.add(fact["id"])
+                normalized["facts"].append(fact)
 
-            normalized[key] = cleaned
+        oq = payload.get("open_questions", [])
+        if isinstance(oq, list):
+            seen_q: set[str] = set()
+            for raw in oq:
+                q = _normalize_question(raw)
+                if not q:
+                    continue
+                key = q["text"].lower()
+                if key in seen_q:
+                    continue
+                seen_q.add(key)
+                normalized["open_questions"].append(q)
+
+        meta = payload.get("meta", {})
+        if isinstance(meta, dict):
+            turn = meta.get("updated_at_turn", 0)
+            if isinstance(turn, int) and turn >= 0:
+                normalized["meta"]["updated_at_turn"] = turn
 
         return normalized
 
-
-    def _parse_summary_payload(text: str) -> dict[str, list[str]] | None:
-        json_blob = _extract_json_object(text)
-        if not json_blob:
+    def _parse_summary_payload(text: str) -> dict | None:
+        blob = _extract_json_object(text)
+        if not blob:
             return None
-
         try:
-            parsed = json.loads(json_blob)
+            parsed = json.loads(blob)
         except json.JSONDecodeError:
             return None
-
         return _normalize_summary_payload(parsed)
 
-
-    def _payload_to_summary_text(payload: dict[str, list[str]]) -> str:
+    def _payload_to_text(payload: dict) -> str:
         return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
 
+    def _is_personal_fact(text: str) -> bool:
+        t = text.strip()
+        if not t:
+            return False
+        if "?" in t:
+            return False
+        lower = t.lower()
+        blocked = ("run ", "create ", "delete ", "list ", "what is ", "how to ")
+        if any(lower.startswith(b) for b in blocked):
+            return False
+        return True
 
-    def _recent_user_statements(recent_history: list) -> list[str]:
-        statements: list[str] = []
-        for message in recent_history:
-            message_type = getattr(message, "type", "")
-            if message_type != "human":
+    def _merge(existing: dict, candidate: dict, turn_index: int) -> dict:
+        out = _normalize_summary_payload(existing)
+        inc = _normalize_summary_payload(candidate)
+
+        by_id = {f["id"]: f for f in out["facts"]}
+        for f in inc["facts"]:
+            if not _is_personal_fact(f["text"]):
                 continue
+            if f["id"] in by_id:
+                prev = by_id[f["id"]]
+                prev["confidence"] = max(prev["confidence"], f["confidence"])
+            else:
+                by_id[f["id"]] = f
 
-            content = str(getattr(message, "content", "") or "").strip()
-            if not content:
-                continue
-            if content not in statements:
-                statements.append(content)
-        return statements
+        out["facts"] = list(by_id.values())
 
+        by_text = {q["text"].lower(): q for q in out["open_questions"]}
+        for q in inc["open_questions"]:
+            key = q["text"].lower()
+            by_text[key] = q
+        out["open_questions"] = list(by_text.values())
 
-    def _fallback_summary(existing_summary: str, recent_history: list) -> str:
-        """Return a summary when the LLM fails to produce a valid payload.
+        out["schema_version"] = 2
+        out["meta"]["updated_at_turn"] = max(turn_index, out["meta"].get("updated_at_turn", 0))
+        return out
 
-        The original implementation appended every user statement to the
-        ``facts`` list, which caused non‑fact statements (e.g. greetings or
-        questions) to appear in the summary.  To honour the system prompt
-        that requires *only* permanent personal details, we now ignore
-        recent user statements entirely and simply return the existing
-        summary unchanged.
-        """
-        # Preserve the existing summary if it is already a valid JSON
-        # payload.  If it is empty or malformed, return an empty payload.
-        parsed = _parse_summary_payload(existing_summary)
-        if parsed is None:
-            return _clip_summary(_payload_to_summary_text({"facts": [], "open_questions": []}))
-        return _clip_summary(_payload_to_summary_text(parsed))
-    
+    def _enforce_budget(payload: dict, max_chars: int = MAX_SUMMARY_CHARS) -> str:
+        # Keep JSON valid by pruning objects, never by string clipping.
+        work = _normalize_summary_payload(payload)
+
+        def _emit() -> str:
+            return _payload_to_text(work)
+
+        text = _emit()
+        if len(text) <= max_chars:
+            return text
+
+        # Trim open questions first
+        while work["open_questions"] and len(_emit()) > max_chars:
+            work["open_questions"].pop()
+
+        # Then trim lowest-confidence facts
+        work["facts"].sort(key=lambda x: (x.get("confidence", 0.0), len(x.get("text", ""))))
+        while work["facts"] and len(_emit()) > max_chars:
+            work["facts"].pop(0)
+
+        # Guaranteed valid JSON even if mostly empty.
+        return _emit()
+
     def update_rolling_summary(
         summarize_llm: ChatOllama,
         existing_summary: str,
-        recent_history: list,
+        facts_history: list,
+        questions_history: list,
+        turn_index: int,
     ) -> str:
-        if not recent_history and not existing_summary:
+        if not facts_history and not existing_summary:
             return ""
 
-        recent_history = [m for m in recent_history if not isinstance(m, ToolMessage)]
+        existing_payload = _parse_summary_payload(existing_summary) or _empty_payload()
 
-        # summarization_prompt = (
-        #     "Extract durable memory from conversation messages.\n"
-        #     "Output ONLY a single JSON object with this exact schema:\n"
-        #     "{\"facts\":[\"...\"],\"open_questions\":[\"...\"]}\n"
-        #     "Rules:\n"
-        #     "1) facts MUST be exact user statements copied verbatim from history\n"
-        #     "2) open_questions must be subset of user statements that are unresolved questions\n"
-        #     "3) no paraphrasing, no added commentary, no markdown, no code fences\n"
-        #     "4) if nothing applies, return empty arrays\n"
-        # )
+        def _fmt_messages(msgs: list) -> str:
+            parts = []
+            for m in msgs:
+                role = getattr(m, "type", "unknown")
+                content = str(getattr(m, "content", "") or "").strip()
+                if content:
+                    parts.append(f"[{role}]: {content}")
+            return "\n".join(parts) or "(none)"
 
-        # summarization_prompt = (
-        #     "Extract durable memory from the recent conversation messages.\n"
-        #     "Output ONLY a single JSON object with this exact schema:\n"
-        #     "{\"facts\":[\"...\"],\"open_questions\":[\"...\"]}\n"
-        #     "Rules:\n"
-        #     "1) facts MUST be long-term personal profile details (e.g., name, location, job, core preferences) "
-        #     "copied verbatim as exact user statements from the history.\n"
-        #     "2) Do NOT extract temporary chit-chat, math equations, code logic, or transient inquiries (e.g., '2 + 2', 'hello', 'test').\n"
-        #     "3) open_questions must be a subset of user statements representing unresolved, major personal needs or goals.\n"
-        #     "4) no paraphrasing, no added commentary, no markdown, no code fences.\n"
-        #     "5) If the recent messages contain no new durable profile data or important unresolved questions, "
-        #     "leave the arrays completely empty or preserve the existing summary exactly as it was.\n"
-        # )
-
-        # summarization_prompt = (
-        #     "You are the memory layer of an AI assistant. Analyze the recent conversation turn "
-        #     "to update the long-term profile summary of the user.\n"
-        #     "Output ONLY a single JSON object with this exact schema:\n"
-        #     "{\"facts\":[\"...\"],\"open_questions\":[\"...\"]}\n"
-        #     "Rules:\n"
-        #     "1) facts MUST be new, clear, declarative sentences summarizing permanent personal details "
-        #     "about the user (e.g., 'User name is Can', 'User was born in Mersin').\n"
-        #     "2) CRITICAL: Do NOT extract user questions, math, or terminal commands as facts. "
-        #     "If the user asks a question (like 'what is my brother name') and the AI response does not answer it, "
-        #     "this is NOT a fact. Do not add it to the facts array.\n"
-        #     "3) open_questions should only capture major, unresolved long-term user goals or project needs, "
-        #     "NOT simple trivia questions the user is testing you with.\n"
-        #     "4) No paraphrasing the schema, no added commentary, no markdown, no code fences.\n"
-        #     "5) If the recent turn contains no new profile information, leave the arrays completely empty "
-        #     "or return the existing summary exactly as it was.\n"
-        # )
+        facts_block = _fmt_messages(facts_history)
+        questions_block = _fmt_messages(questions_history)
 
         summarization_prompt = (
-            "CRITICAL: You are an internal background system database layer, NOT a chat assistant. "
-            "Do NOT talk to a user. Do NOT say 'Hello', 'Sure', or 'Feel free to ask'. "
-            "Your output must ONLY be raw JSON text.\n\n"
-            "Analyze the recent conversation turn to update the long-term profile summary of the user.\n"
-            "Output ONLY a single JSON object with this exact schema:\n"
-            "{\"facts\":[\"...\"],\"open_questions\":[\"...\"]}\n"
-            "Rules:\n"
-            "1) facts MUST be new, clear, declarative sentences summarizing permanent personal details "
-            "about the user (e.g., 'User name is Can', 'User was born in Mersin').\n"
-            "2) CRITICAL: Do NOT extract user questions, math, or terminal commands as facts.\n"
-            "3) open_questions should only capture major, unresolved long-term user goals or project needs.\n"
-            "4) Absolutely no paraphrasing the schema, no added commentary, no markdown, no code fences.\n"
-            "5) If the recent turn contains no new profile information, return the 'Existing Summary' exactly as it was.\n"
-            "STOP: Check your output. If it contains conversational language, you have failed the task. Output ONLY JSON."
+            "You are an internal memory updater.\n"
+            "Return ONLY a raw JSON object, no markdown, no commentary.\n"
+            "Schema:\n"
+            "{"
+            "\"schema_version\":2,"
+            "\"facts\":[{\"id\":\"...\",\"text\":\"...\",\"category\":\"profile|preferences|constraints|goals\",\"confidence\":0.0}],"
+            "\"open_questions\":[{\"text\":\"...\",\"status\":\"open|resolved\",\"priority\":\"low|medium|high\"}],"
+            "\"meta\":{\"updated_at_turn\":0}"
+            "}\n\n"
+            "Section rules:\n"
+            "FACT_EVIDENCE contains user messages only.\n"
+            "  - Extract durable personal profile facts (name, location, role, preferences).\n"
+            "  - Do NOT extract questions, commands, tool syntax, or transient tasks as facts.\n"
+            "QUESTION_EVIDENCE contains user + AI messages.\n"
+            "  - New open_questions must come from user messages only.\n"
+            "  - AI replies may change an existing question status to 'resolved' if it was clearly answered.\n"
+            "  - Do NOT create new facts from AI messages.\n"
+            "If no new info found, return Existing Summary unchanged."
         )
 
         summary_messages = [
-            SystemMessage(content=f"{summarization_prompt}\n\n"
-                                f"Existing summary:\n{existing_summary or '(none)'}\n\n"
-                                f"--- START RECENT CONVERSATION TURN TO ANALYZE ---"),
-            *recent_history,
-            SystemMessage(content="--- END RECENT CONVERSATION TURN ---\n"
-                                "Analyze the turn above and output the JSON now:")
+            SystemMessage(
+                content=(
+                    f"{summarization_prompt}\n\n"
+                    f"Existing summary:\n{_payload_to_text(existing_payload)}\n\n"
+                    f"--- FACT_EVIDENCE (user messages only) ---\n"
+                    f"{facts_block}\n\n"
+                    f"--- QUESTION_EVIDENCE (user + AI messages) ---\n"
+                    f"{questions_block}\n\n"
+                    "Output JSON only:"
+                )
+            ),
         ]
 
-        # summary_messages = [
-        #     SystemMessage(content=f"{summarization_prompt}\n\n"
-        #                 f"Existing summary:\n{existing_summary or '(none)'}"),
-        #     *recent_history,
-        # ]
         response = summarize_llm.invoke(summary_messages)
         text = str(getattr(response, "content", "") or "").strip()
+
         if not text:
-            return _fallback_summary(existing_summary or "", recent_history)
+            return _enforce_budget(existing_payload)
 
-        parsed = _parse_summary_payload(text)
-        if parsed is None:
-            return _fallback_summary(existing_summary or "", recent_history)
-        return _clip_summary(_payload_to_summary_text(parsed))
+        candidate = _parse_summary_payload(text)
+        if candidate is None:
+            return _enforce_budget(existing_payload)
 
-    
+        merged = _merge(existing_payload, candidate, turn_index=turn_index)
+        return _enforce_budget(merged)
+
     def summarize_memory_node(state: AgentState):
-        """Summarize the conversation history and update the rolling summary."""
         history = state.get("messages", [])
-        recent_history = recent_messages(history, RECENT_MESSAGE_WINDOW)
+        facts_history = recent_human_turn_messages(history, max_turns=MAX_SUMMARY_TURNS)
+        questions_history = recent_turn_slice(history, max_turns=MAX_SUMMARY_TURNS, include_ai=True)
         previous_summary = state.get("rolling_summary", "")
+        turn_index = sum(1 for m in history if getattr(m, "type", "") == "human")
+
         updated_summary = update_rolling_summary(
             summarize_llm=summarize_llm,
             existing_summary=previous_summary,
-            recent_history=recent_history,
+            facts_history=facts_history,
+            questions_history=questions_history,
+            turn_index=turn_index,
         )
-
-        return {
-            "rolling_summary": updated_summary,
-        }
+        return {"rolling_summary": updated_summary}
 
     return summarize_memory_node

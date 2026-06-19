@@ -1,4 +1,4 @@
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, BaseMessage, ToolMessage, AIMessage
 
 
 def latest_human_message_str(history: list) -> str:
@@ -67,3 +67,51 @@ def is_effectively_empty_response(message: object) -> bool:
     if isinstance(content, list):
         return len(content) == 0
     return not bool(content)
+
+
+def recent_turn_slice(
+    history: list[BaseMessage],
+    *,
+    max_turns: int = 3,
+    include_ai: bool = True,
+) -> list[BaseMessage]:
+    # 1) drop tool chatter
+    filtered = [m for m in history if not isinstance(m, ToolMessage)]
+    if not filtered:
+        return []
+
+    # 2) segment by human boundaries
+    turns: list[list[BaseMessage]] = []
+    current: list[BaseMessage] = []
+
+    for msg in filtered:
+        if isinstance(msg, HumanMessage):
+            if current:
+                turns.append(current)
+            current = [msg]
+            continue
+
+        # only attach non-human messages after a human started the turn
+        if current and (include_ai and isinstance(msg, AIMessage)):
+            current.append(msg)
+
+    if current:
+        turns.append(current)
+
+    if not turns:
+        return []
+
+    # 3) keep last N turns
+    selected_turns = turns[-max_turns:]
+
+    # 4) flatten
+    out: list[BaseMessage] = []
+    for t in selected_turns:
+        out.extend(t)
+    return out
+
+
+def recent_human_turn_messages(history: list[BaseMessage], *, max_turns: int = 3) -> list[BaseMessage]:
+    # fact extraction input: only human text in last N turns
+    sliced = recent_turn_slice(history, max_turns=max_turns, include_ai=False)
+    return [m for m in sliced if isinstance(m, HumanMessage)]
