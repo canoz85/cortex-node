@@ -3,126 +3,22 @@ import uuid
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_ollama import ChatOllama
 
-from core import state
 from core.graph_brain import create_brain_node
 from core.graph_capture import create_capture_tool_output_node
 from core.graph_constants import ANSI_BLUE, ANSI_ITALIC, ANSI_RED, ANSI_GREEN, ANSI_YELLOW, ANSI_RESET, MAX_PSEUDO_RETRIES, RECENT_MESSAGE_WINDOW
 from core.graph_filegen_policy import (
-    file_generation_quality_issue,
     last_failed_verification_rewrite_info,
-    last_read_file_snapshot,
-    last_tool_has_args_nameerror,
-    last_tool_missing_required_args,
-    last_tool_stderr,
     message_repeats_write_content,
-    next_args_scope_autofix_call,
-    next_file_generation_repair_call,
-    next_file_generation_verification_call,
-    response_has_unchanged_write,
-    should_finalize_action_turn,
 )
-from core.graph_intents import (
-    preferred_file_tool,
-    preferred_info_tool,
-)
-from core.graph_messages import current_turn_messages, is_effectively_empty_response, latest_human_message, latest_human_message_str, normalize_message_content, recent_messages
-from core.graph_node_helpers import (
-    detect_missing_dependency,
-    direct_discussion_response,
-    planner_execution_brief,
-    response_with_usage,
-)
+
+from core.graph_messages import normalize_message_content
 from core.graph_planner import create_planner_node
 from core.graph_summarize import create_summarize_memory_node, rolling_summary_message
 from core.graph_pseudo_tools import finalize_action_response, is_pseudo_tool_response, looks_like_pseudo_tool_text, recover_pseudo_tool_response
-from core.graph_response_formatters import format_action_completion_response, format_preferred_tool_response
 from core.graph_routing import route_after_brain
-from core.graph_tool_events import (
-    current_turn_tool_events,
-    message_repeats_signature,
-)
+
 from core.rag import WorkspaceRAG
 from core.state import AgentState
-
-
-READ_ONLY_TOOL_NAMES = {"list_files", "read_file", "read_knowledge_file", "rag_search", "rag_refresh_index"}
-
-
-def _latest_tool_context(history: list[BaseMessage]) -> list[BaseMessage]:
-    """Return latest AI tool-call + ToolMessage pair for grounding when needed."""
-    if not history:
-        return []
-
-    for index in range(len(history) - 1, -1, -1):
-        message = history[index]
-        if not isinstance(message, ToolMessage):
-            continue
-
-        context: list[BaseMessage] = []
-        tool_call_id = getattr(message, "tool_call_id", None)
-        if tool_call_id:
-            for prior in range(index - 1, -1, -1):
-                candidate = history[prior]
-                if not isinstance(candidate, AIMessage):
-                    continue
-                tool_calls = getattr(candidate, "tool_calls", None) or []
-                if any(call.get("id") == tool_call_id for call in tool_calls):
-                    context.append(candidate)
-                    break
-        context.append(message)
-        return context
-    return []
-
-
-def _ensure_tool_message_visible(history: list[BaseMessage], recent_history: list[BaseMessage]) -> list[BaseMessage]:
-    """Ensure brain prompt always carries latest tool result context."""
-    if any(isinstance(message, ToolMessage) for message in recent_history):
-        return recent_history
-
-    stitched = list(recent_history)
-    for message in _latest_tool_context(history):
-        if message not in stitched:
-            stitched.append(message)
-    return stitched
-
-
-
-def _required_first_tool_response(required_first_tool: str, latest_user_prompt: str = "") -> AIMessage:
-    if required_first_tool == "list_files":
-        tool_args = {"path": "."}
-    elif required_first_tool == "solve_math":
-        tool_args = {"question": latest_user_prompt}
-    else:
-        tool_args = {}
-    return AIMessage(
-        content=f"Calling {required_first_tool} to answer your request.",
-        tool_calls=[
-            {
-                "name": required_first_tool,
-                "args": tool_args,
-                "id": f"guard-required-tool-{uuid.uuid4().hex}",
-                "type": "tool_call",
-            }
-        ],
-    )
-
-
-def _disallowed_read_only_tool_calls(response: AIMessage) -> list[dict]:
-    return [call for call in getattr(response, "tool_calls", None) or [] if call.get("name") not in READ_ONLY_TOOL_NAMES]
-
-
-def _read_only_guard_fallback_response() -> AIMessage:
-    return AIMessage(
-        content="Read-only request guard forced a safe file listing before further analysis.",
-        tool_calls=[
-            {
-                "name": "list_files",
-                "args": {"path": "."},
-                "id": f"guard-readonly-{uuid.uuid4().hex}",
-                "type": "tool_call",
-            }
-        ],
-    )
 
 
 def _makes_workspace_analysis_claim(response: AIMessage) -> bool:
@@ -133,35 +29,6 @@ def _makes_workspace_analysis_claim(response: AIMessage) -> bool:
         or "analysed" in response_text
         or "read all" in response_text
         or "files in the workspace" in response_text
-    )
-
-
-def _has_successful_file_events(tool_events: list[dict]) -> bool:
-    return any(event.get("success") and event.get("name") in {"list_files", "read_file"} for event in tool_events)
-
-
-def _workspace_claim_guard_response() -> AIMessage:
-    return AIMessage(
-        content="Listing workspace files first to avoid fabricated file-analysis claims.",
-        tool_calls=[
-            {
-                "name": "list_files",
-                "args": {"path": "."},
-                "id": f"guard-{uuid.uuid4().hex}",
-                "type": "tool_call",
-            }
-        ],
-    )
-
-
-def _missing_dependency_response(missing_module: str) -> AIMessage:
-    return AIMessage(
-        content=(
-            f"The code failed with a missing dependency: '{missing_module}'. "
-            f"Please install it using:\n\n"
-            f"pip install {missing_module}\n\n"
-            f"After installation, you can retry the code execution."
-        )
     )
 
 
@@ -245,10 +112,6 @@ def _pseudo_tool_retry_prompt() -> SystemMessage:
     )
 
 
-
-
-
-
 def _discussion_tool_call_correction_prompt() -> SystemMessage:
     return SystemMessage(
         content=(
@@ -256,7 +119,6 @@ def _discussion_tool_call_correction_prompt() -> SystemMessage:
             "Do not call tools. Provide a concise direct answer only."
         )
     )
-
 
 def _read_only_analysis_guidance() -> SystemMessage:
     return SystemMessage(
@@ -268,7 +130,6 @@ def _read_only_analysis_guidance() -> SystemMessage:
         )
     )
 
-
 def _missing_required_args_guidance() -> SystemMessage:
     return SystemMessage(
         content=(
@@ -278,7 +139,6 @@ def _missing_required_args_guidance() -> SystemMessage:
         )
     )
 
-
 def _stderr_repair_guidance(stderr: str) -> SystemMessage:
     return SystemMessage(
         content=(
@@ -286,7 +146,6 @@ def _stderr_repair_guidance(stderr: str) -> SystemMessage:
             f"{stderr[:1200]}"
         )
     )
-
 
 def _args_scope_repair_guidance() -> SystemMessage:
     return SystemMessage(
@@ -298,7 +157,6 @@ def _args_scope_repair_guidance() -> SystemMessage:
         )
     )
 
-
 def _read_only_guard_correction_prompt() -> SystemMessage:
     return SystemMessage(
         content=(
@@ -307,7 +165,6 @@ def _read_only_guard_correction_prompt() -> SystemMessage:
             "Use list_files/read_file only, or provide the final analysis answer now if sufficient context is already available."
         )
     )
-
 
 def _unchanged_write_retry_prompt() -> SystemMessage:
     return SystemMessage(
@@ -318,7 +175,6 @@ def _unchanged_write_retry_prompt() -> SystemMessage:
             "Do not emit an unchanged write_file call."
         )
     )
-
 
 def _apply_failed_rewrite_guard(
     *,
@@ -402,27 +258,6 @@ def _apply_action_enforcement(
         ]
     )
     return finalize_action_response(response, tool_name_set)
-
-
-def _apply_workspace_claim_guard(*, history: list, response: AIMessage, tool_name_set: set[str]) -> AIMessage:
-    if getattr(response, "tool_calls", None):
-        return response
-
-    if not _makes_workspace_analysis_claim(response):
-        return response
-
-    tool_events = current_turn_tool_events(history)
-    if _has_successful_file_events(tool_events):
-        return response
-
-    if "list_files" not in tool_name_set:
-        return response
-
-    return _workspace_claim_guard_response()
-
-
-
-
 
 
 # def _build_pre_messages(
@@ -560,6 +395,7 @@ def create_graph_nodes(
 ):
     planner_node = create_planner_node(
         planner_llm=planner_llm,
+        router_llm=planner_llm,
         rag_service=rag_service,
         rag_top_k=rag_top_k,
         tool_name_set=tool_name_set,

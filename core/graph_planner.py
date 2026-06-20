@@ -38,6 +38,7 @@ Format as a numbered list:
 def create_planner_node(
     *,
     planner_llm: ChatOllama,
+    router_llm: ChatOllama | None = None,
     rag_service: WorkspaceRAG,
     rag_top_k: int,
     tool_name_set: set[str],
@@ -49,7 +50,7 @@ def create_planner_node(
         
 
         latest_user_prompt = latest_human_message_str(history)
-        routing_decision = planner_routing_decision(latest_user_prompt)
+        routing_decision = planner_routing_decision(latest_user_prompt, router_llm=router_llm, tool_name_set=tool_name_set)
         planner_route = routing_decision.route
 
         if planner_route == "info":
@@ -95,6 +96,8 @@ def create_planner_node(
             "planner_domain": routing_decision.domain,
             "planner_confidence": routing_decision.confidence,
             "planner_domain_enforced": routing_decision.enforced,
+            "planner_route_source": routing_decision.source,
+            "planner_needs_clarification": routing_decision.needs_clarification,
             "steps": 0,
             "last_tool_rendered": "",
             "last_tool_success": None,

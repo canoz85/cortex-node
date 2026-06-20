@@ -1,17 +1,28 @@
+import json
 import re
 from dataclasses import dataclass
 
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_ollama import ChatOllama
+
 from core.graph_constants import (
-    ACTION_INTENT_PATTERN,
     AGENT_INFO_INTENT_PATTERN,
     CASUAL_CHAT_PATTERN,
     CODE_DISCUSSION_PATTERN,
-    CODING_DISCUSSION_QUESTION_PATTERN,
     CURRENT_TIME_INTENT_PATTERN,
-    FILE_GENERATION_PATTERN,
     MATH_INTENT_PATTERN,
     TOKEN_USAGE_INTENT_PATTERN,
 )
+
+ROUTER_PROMPT = """
+    You are a strict router.
+    Return ONLY valid JSON with keys:
+    route, domain, confidence, enforced, reason, needs_clarification.
+    Allowed routes: info, action, action:list_workspace, action:read_workspace, action:analyze_workspace, action:generate_workspace, casual, coding_discussion, conversation, clarify_domain.
+    Allowed domains: general, python, sap.
+    Confidence must be 0.0..1.0.
+    If uncertain, choose conversation with low confidence.
+"""
 
 
 @dataclass(frozen=True)
@@ -22,6 +33,31 @@ class RoutingDecision:
     enforced: bool
     reason: str
     needs_clarification: bool
+    source: str = "hard_rule"
+    
+ALLOWED_ROUTES = {
+    "info",
+    "action",
+    "action:list_workspace",
+    "action:read_workspace",
+    "action:analyze_workspace",
+    "action:generate_workspace",
+    "casual",
+    "coding_discussion",
+    "conversation",
+    "clarify_domain",
+}
+
+SAFE_NON_MUTATING_ROUTES = {
+    "info",
+    "casual",
+    "coding_discussion",
+    "conversation",
+    "clarify_domain",
+    "action:list_workspace",
+    "action:read_workspace",
+    "action:analyze_workspace",
+}
 
 
 EXPLICIT_SAP_PATTERN = re.compile(r"\[(?:domain\s*:\s*)?sap\]|\bdomain\s*:\s*sap\b", re.IGNORECASE)
@@ -34,31 +70,7 @@ STRONG_PYTHON_PATTERN = re.compile(
     r"\b(python|py|pandas|numpy|pip|venv|pytest|fastapi|flask|django|script|module|package|traceback|import|def|class|json|csv|parse|parsing)\b",
     re.IGNORECASE,
 )
-FILE_PATH_HINT_PATTERN = re.compile(
-    r"(?:^|[\s'\"`(\[])(?:[\w.-]+[\\/])*[\w.-]+\.[a-z0-9]{1,8}(?:$|[\s'\"`)\]])",
-    re.IGNORECASE,
-)
-FILE_READ_INTENT_PATTERN = re.compile(
-    r"\b(read|open|show|inspect|review|check|analy[sz]e|debug|fix|explain)\b",
-    re.IGNORECASE,
-)
-FILE_MUTATION_INTENT_PATTERN = re.compile(
-    r"\b(create|write|edit|update|modify|generate|implement|refactor|delete|remove|rename)\b",
-    re.IGNORECASE,
-)
 
-READ_AUDIT_INTENT_PATTERN = re.compile(
-    r"\b(which|what|where)\b.*\b(files?|file)\b.*\b(read|reviewed|analy[sz]e(?:d)?)\b|\bdid you read\b",
-    re.IGNORECASE,
-)
-FILE_FACT_EXTRACTION_INTENT_PATTERN = re.compile(
-    r"\b(what|which|show|tell)\b.*\b(device[_\s-]?id|id|temperature|pressure|value|status|field|json|data|latest)\b"
-    r"|\b(device[_\s-]?id|temperature|pressure)\b",
-    re.IGNORECASE,
-)
-
-
-###
 LIST_WORKSPACE_INTENT_PATTERN = re.compile(
     r"^\s*(list|show|display|ls|dir)\s+(all\s+)?(workspace\s+)?(files|folders|directories)\s*$",
     re.IGNORECASE,
@@ -95,23 +107,6 @@ def _domain_decision(user_text: str) -> tuple[str, float, bool, bool, str]:
 
     confidence = min(0.95, 0.55 + python_score * 0.1)
     return "python", confidence, False, False, "python indicators dominate"
-
-
-def requests_workspace_file_access(user_text: str) -> bool:
-    text = (user_text or "").strip()
-    if not text:
-        return False
-    if not FILE_PATH_HINT_PATTERN.search(text):
-        return False
-    return bool(FILE_READ_INTENT_PATTERN.search(text))
-
-
-def is_read_only_file_request(user_text: str) -> bool:
-    text = (user_text or "").strip()
-    if not requests_workspace_file_access(text):
-        return False
-    return not bool(FILE_MUTATION_INTENT_PATTERN.search(text))
-
 
 def preferred_info_tool(user_text: str) -> str | None:
     text = (user_text or "").strip()
@@ -154,12 +149,7 @@ def _is_casual_chat(user_text: str) -> bool:
         return True
     return False
 
-
-def is_file_generation_request(user_text: str) -> bool:
-    text = (user_text or "").strip().lower()
-    return bool(FILE_GENERATION_PATTERN.search(text))
-
-def workspace_intent(user_text: str) -> str | None:
+def _workspace_intent(user_text: str) -> str | None:
     text = (user_text or "").lower()
 
     intent_scores = {
@@ -203,41 +193,156 @@ def workspace_intent(user_text: str) -> str | None:
 
     return best if intent_scores[best] > 0 else None
 
-def planner_routing_decision(user_text: str) -> RoutingDecision:
+def _llm_route_decision(   
+    user_text: str,
+    llm,
+    tool_name_set: set[str],
+) -> RoutingDecision | None:
+
+    try:
+        resp = llm.invoke(
+            [
+                SystemMessage(content=ROUTER_PROMPT),
+                HumanMessage(content=user_text),
+            ]
+        )
+
+        raw = str(getattr(resp, "content", "") or "").strip()
+        payload = json.loads(raw)
+
+        route = str(payload.get("route", "")).strip()
+        domain = str(payload.get("domain", "general")).strip().lower()
+        confidence = float(payload.get("confidence", 0.0))
+        enforced = bool(payload.get("enforced", False))
+        reason = str(payload.get("reason", "llm_router")).strip()
+        needs_clarification = bool(payload.get("needs_clarification", False))
+
+        if route not in ALLOWED_ROUTES:
+            return None
+        if domain not in {"general", "python", "sap"}:
+            return None
+        if confidence < 0.0 or confidence > 1.0:
+            return None
+
+        return RoutingDecision(
+            route=route,
+            domain=domain,
+            confidence=confidence,
+            enforced=enforced,
+            reason=reason or "llm_router",
+            needs_clarification=needs_clarification,
+            source="llm_router",
+        )
+    except Exception:
+        return None
+    
+def _arbiter_route(
+    user_text: str,
+    hard_decision: RoutingDecision | None,
+    llm_decision: RoutingDecision | None,
+) -> RoutingDecision:
+        
+    if hard_decision is not None:
+        return hard_decision
+
+    if llm_decision is not None:
+        route = llm_decision.route
+        conf = llm_decision.confidence
+
+        # Strong confidence for potentially mutating/action routes
+        if route.startswith("action") and route not in SAFE_NON_MUTATING_ROUTES:
+            if conf >= 0.80:
+                return llm_decision
+        else:
+            # Lower threshold for non-mutating routes
+            if conf >= 0.65:
+                return llm_decision
+
+    # Safe fallback
+    return RoutingDecision(
+        route="conversation",
+        domain="general",
+        confidence=0.35,
+        enforced=False,
+        reason="arbiter fallback",
+        needs_clarification=False,
+        source="fallback",
+    )
+
+def planner_routing_decision(
+    user_text: str,
+    router_llm: ChatOllama | None = None,
+    tool_name_set: set[str] | None = None,
+) -> RoutingDecision:
+
     text = (user_text or "").strip()
     if not text:
-        return RoutingDecision("conversation", "general", 0.0, False, "empty input", False)
+        return RoutingDecision(
+            route="conversation",
+            domain="general",
+            confidence=0.0,
+            enforced=False,
+            reason="empty input",
+            needs_clarification=False,
+            source="fallback",
+        )
 
-    # 1. info tools first
+    hard_decision: RoutingDecision | None = None
+
     info_tool = preferred_info_tool(text)
     if info_tool:
-        return RoutingDecision("info", "general", 1.0, False, info_tool, False)
+        hard_decision = RoutingDecision(
+            route="info",
+            domain="general",
+            confidence=1.0,
+            enforced=False,
+            reason=info_tool,
+            needs_clarification=False,
+            source="hard_rule",
+        )
 
-    # 2. workspace actions (single source of truth)
-    intent = workspace_intent(text)
-    if intent:
-        route_map = {
-            "LIST": "action:list_workspace",
-            "READ": "action:read_workspace",
-            "ANALYZE": "action:analyze_workspace",
-            "GENERATE": "action:generate_workspace",
-        }
-        return RoutingDecision(route_map[intent], "general", 1.0, False, f"{intent} workspace intent", False)
+    if hard_decision is None:
+        # Optional: explicit domain override hard rule
+        # Reuse your existing _domain_decision behavior if needed.
+        intent = _workspace_intent(text)
+        if intent:
+            route_map = {
+                "LIST": "action:list_workspace",
+                "READ": "action:read_workspace",
+                "ANALYZE": "action:analyze_workspace",
+                "GENERATE": "action:generate_workspace",
+            }
+            hard_decision = RoutingDecision(
+                route=route_map[intent],
+                domain="general",
+                confidence=1.0,
+                enforced=False,
+                reason=f"{intent} workspace intent",
+                needs_clarification=False,
+                source="hard_rule",
+            )
 
-    # 3. casual
-    if _is_casual_chat(text):
-        return RoutingDecision("casual", "general", 1.0, False, "casual chat", False)
+    if hard_decision is None and _is_casual_chat(text):
+        hard_decision = RoutingDecision(
+            route="casual",
+            domain="general",
+            confidence=1.0,
+            enforced=False,
+            reason="casual chat",
+            needs_clarification=False,
+            source="hard_rule",
+        )
 
-    # 4. domain logic fallback
-    domain, confidence, enforced, ambiguous, reason = _domain_decision(text)
+    llm_decision = None
+    if hard_decision is None and router_llm is not None:
+        llm_decision = _llm_route_decision(
+            user_text=text,
+            llm=router_llm,
+            tool_name_set=tool_name_set or set(),
+        )
 
-    # if ambiguous and requires_action(text):
-    #     return RoutingDecision("clarify_domain", "general", confidence, enforced, reason, True)
-
-    # if domain == "sap" and requires_action(text):
-    #     return RoutingDecision("action:sap", domain, confidence, enforced, reason, False)
-
-    # if requires_action(text):
-    #     return RoutingDecision("action", domain, max(confidence, 0.65), enforced, reason, False)
-
-    return RoutingDecision("conversation", domain, confidence, enforced, reason, False)
+    return _arbiter_route(
+        user_text=text,
+        hard_decision=hard_decision,
+        llm_decision=llm_decision,
+    )
