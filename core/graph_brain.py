@@ -8,7 +8,7 @@ from core.graph_constants import ANSI_BLUE, ANSI_GREEN, ANSI_ITALIC, ANSI_RED, A
 from core.graph_context import retrieval_message
 from core.graph_filegen_policy import last_tool_has_args_nameerror, last_tool_missing_required_args, last_tool_stderr
 from core.graph_intents import preferred_file_tool, preferred_info_tool
-from core.graph_messages import current_turn_messages, is_effectively_empty_response, latest_human_message, latest_human_message_str, normalize_message_content, recent_messages
+from core.graph_messages import current_turn_messages, is_effectively_empty_response, latest_human_message, latest_human_message_str, normalize_message_content
 
 from core.graph_node_helpers import (
     planner_execution_brief,
@@ -16,7 +16,6 @@ from core.graph_node_helpers import (
 )
 
 from core.graph_response_formatters import format_action_completion_response, format_preferred_tool_response
-from core.graph_summarize import rolling_summary_message
 from core.graph_summarize import rolling_summary_message
 from core.graph_tool_events import (
     message_repeats_signature,
@@ -49,6 +48,15 @@ def _print_raw_llm_request_response(color, messages: list[BaseMessage], raw_text
     print(f"{color}{ANSI_ITALIC}Raw LLM response content:{ANSI_RESET}")
     print(f"{color}{ANSI_ITALIC}{text}{ANSI_RESET}")
 
+def _invoke_with_trace(
+    *,
+    llm: ChatOllama,
+    messages: list[BaseMessage],
+    color: str,
+) -> AIMessage:
+    response = llm.invoke(messages)
+    _print_raw_llm_request_response(color=color, messages=messages, raw_text=response.content)
+    return response
 
 def create_brain_node(
     *,
@@ -120,7 +128,7 @@ def create_brain_node(
     def _apply_response_recovery(
         *,
         response_llm: ChatOllama,
-        pre_messages: list,
+        pre_messages: list[BaseMessage],
         response: AIMessage,
         action_required: bool,
         state: AgentState,
@@ -145,13 +153,11 @@ def create_brain_node(
 
  
         if is_effectively_empty_response(response):
-            response = response_llm.invoke(
-                [
-                        *pre_messages,
-                        _empty_response_retry_prompt(),
-                ]
+            response = _invoke_with_trace(
+                llm=response_llm,
+                messages=[*pre_messages, _empty_response_retry_prompt()],
+                color=ANSI_GREEN,
             )
-            _print_raw_llm_request_response(color=ANSI_GREEN, messages=[*pre_messages, _empty_response_retry_prompt()], raw_text=response.content)
 
         if is_effectively_empty_response(response):
             response = _empty_response_fallback()
@@ -179,11 +185,10 @@ def create_brain_node(
             )
         )
 
-
     def _apply_repeated_signature_guard(
         *,
         llm: ChatOllama,
-        pre_messages: list,
+        pre_messages: list[BaseMessage],
         response: AIMessage,
         action_required: bool,
         state: AgentState,
@@ -197,31 +202,19 @@ def create_brain_node(
             return response
 
         repeat_reason = "already succeeded" if state.get("last_tool_success") is True else "already failed"
-        corrected_response = llm.invoke(
-            [
-                *pre_messages,
-                response,
-                _repeated_signature_correction_prompt(last_tool_signature, repeat_reason),
-            ]
+        corrected_response = _invoke_with_trace(
+            llm=llm,
+            messages=[*pre_messages, response, _repeated_signature_correction_prompt(last_tool_signature, repeat_reason)],
+            color=ANSI_YELLOW,
         )
 
-        _print_raw_llm_request_response(color=ANSI_YELLOW, messages=[*pre_messages, 
-            response,_repeated_signature_correction_prompt(last_tool_signature, repeat_reason)], raw_text=response.content)
-
-
         if state.get("last_tool_success") is True and message_repeats_signature(corrected_response, last_tool_signature):
-            final_response = llm.invoke(
-                [
-                    *pre_messages,
-                    corrected_response,
-                    _repeated_success_final_answer_prompt(last_tool_signature),
-                ]
+            
+            final_response = _invoke_with_trace(
+                llm=llm,
+                messages=[*pre_messages, corrected_response, _repeated_success_final_answer_prompt(last_tool_signature)],
+                color=ANSI_GREEN,
             )
-
-            _print_raw_llm_request_response(color=ANSI_GREEN, messages=[*pre_messages,
-                corrected_response, _repeated_success_final_answer_prompt(last_tool_signature)], 
-                                            raw_text=response.content)
-
 
             if getattr(final_response, "tool_calls", None):
                 last_tool_output = state.get("last_tool_output", "")
@@ -240,7 +233,7 @@ def create_brain_node(
     def _finalize_from_successful_tool_context(
         *,
         llm: ChatOllama,
-        pre_messages: list,
+        pre_messages: list[BaseMessage],
         state: AgentState,
         response: AIMessage,
         tool_name_set: set[str],
@@ -257,33 +250,20 @@ def create_brain_node(
         completion = format_action_completion_response(history)
         if completion:
             return AIMessage(content=completion)
-
-        decision = llm.invoke(
-            [
-                *pre_messages,
-                response,
-                SystemMessage(
-                    content=(
-                        "A tool already succeeded in this turn. Decide one of two outcomes only: "
-                        "(1) If the user request is satisfied, provide the final concise answer now. "
-                        "(2) If not satisfied, emit exactly one executable next tool call with distinct arguments. "
-                        "Do not repeat the same successful tool call signature. "
-                        "Do not restate raw tool output verbatim unless it is the final user-facing answer."
-                    )
-                ),
-            ]
+        
+        decision = _invoke_with_trace(
+            llm=llm,
+            messages=[*pre_messages, response, SystemMessage(
+                content=(
+                    "Decide one of two outcomes only: "
+                    "(1) If the user request is satisfied, provide the final concise answer now. "
+                    "(2) If not satisfied, emit exactly one executable next tool call with distinct arguments. "
+                    "Do not repeat the same successful tool call signature. "
+                    "Do not restate raw tool output verbatim unless it is the final user-facing answer."
+                )
+            )],
+            color=ANSI_RED,
         )
-
-        _print_raw_llm_request_response(color=ANSI_RED, messages=[*pre_messages, response, 
-                SystemMessage(
-                    content=(
-                        "A tool already succeeded in this turn. Decide one of two outcomes only: "
-                        "(1) If the user request is satisfied, provide the final concise answer now. "
-                        "(2) If not satisfied, emit exactly one executable next tool call with distinct arguments. "
-                        "Do not repeat the same successful tool call signature. "
-                        "Do not restate raw tool output verbatim unless it is the final user-facing answer."
-                    ))], raw_text=response.content)
-
 
         decision = finalize_action_response(decision, tool_name_set)
         if getattr(decision, "tool_calls", None):
@@ -299,93 +279,128 @@ def create_brain_node(
 
         return decision
 
+    def _is_action_route(route: str) -> bool:
+        return route.startswith("action")
+    
+    def _is_info_route(route: str) -> bool:
+        return route.startswith("info")
+    
+    def _build_context_messages(
+        *,
+        active_system_prompt: str,
+        retrieval_messages: list[SystemMessage],
+        route: str,
+        history: list,
+        plan_text: str,
+        rolling_summary: str,
+    ) -> list[BaseMessage]:
+    
+        context_messages: list[BaseMessage] = [
+            SystemMessage(content=active_system_prompt),
+            *retrieval_messages,
+            *rolling_summary_message(rolling_summary),
+        ]
+
+        if plan_text and _is_action_route(route):
+            planner_brief = planner_execution_brief(route, plan_text)
+            if planner_brief:
+                context_messages.append(SystemMessage(content=planner_brief))
+
+        if _is_action_route(route):
+            context_messages.extend(current_turn_messages(history))
+        else:
+            latest = latest_human_message(history)
+            if latest is not None:
+                context_messages.append(latest)
+
+        return context_messages
+
+    def _build_runtime_guidance_messages(
+        *,
+        last_tool_success: object,
+        last_tool_output: object,
+        last_tool_rendered: str,
+        last_tool_signature: str,
+    ) -> list[SystemMessage]:
+        guidance: list[str] = []
+
+        if last_tool_success is False:
+            guidance.append("The previous tool execution FAILED.")
+
+        if last_tool_signature:
+            guidance.append(f"Failed tool signature: {last_tool_signature}")
+
+        stderr = last_tool_stderr(last_tool_output)
+        if stderr:
+            guidance.append(f"Runtime error detected:\n{stderr}")
+
+        if last_tool_missing_required_args(last_tool_output):
+            guidance.append("Fix missing required tool arguments based on tool schema.")
+
+        if last_tool_has_args_nameerror(last_tool_output):
+            guidance.append("Fix NameError: ensure all variables/functions are defined or imported.")
+
+        has_usable_success_output = bool(last_tool_rendered.strip()) or isinstance(last_tool_output, dict)
+        if last_tool_success is True and has_usable_success_output:
+            guidance.append(
+            "A tool has already succeeded during this user turn. "
+            "Use the tool output as the authoritative source of truth for the current state of the world. "
+            "If that successful result satisfies the request, provide the final concise answer now instead of calling more tools. "
+            "Only call another tool if a specific remaining gap still exists that can be directly addressed by one more tool call."
+            )
+
+        if not guidance:
+            return []
+
+        combined = "\n".join([
+            "### RUNTIME INSTRUCTIONS (HIGHEST PRIORITY):",
+            *guidance,
+        ])
+        return [SystemMessage(content=combined)]
+    
     def _build_pre_messages(
         *,
         active_system_prompt: str,
         retrieval_messages: list[SystemMessage],
         state: AgentState,
-    ) -> tuple[list[SystemMessage], AIMessage | None]:
-
+    ) -> list[BaseMessage]:
+        
         route = str(state.get("planner_route", ""))
+        history = state.get("messages", [])
+        plan_text = str(state.get("plan", "") or "")
+        rolling_summary = state.get("rolling_summary", "")
 
         last_tool_success = state.get("last_tool_success")
         last_tool_output = state.get("last_tool_output", "")
         last_tool_rendered = str(state.get("last_tool_rendered", "") or "")
         last_tool_signature = str(state.get("last_tool_signature", "") or "")
 
-        history = state.get("messages", [])
-        rolling_summary = state.get("rolling_summary", "")
+        # Route guard:
+        # action routes are execution-first, info* routes are tool-oriented but not full action context,
+        # everything else falls back to direct latest-user context.
+        if not (_is_action_route(route) or _is_info_route(route) or route in {"", "casual", "conversation", "coding_discussion", "clarify_domain"}):
+        # Unknown planner routes are treated as non-action fallback for safety.
+            pass
 
-        # 1. Core system context
-        pre_messages = [
-            SystemMessage(content=active_system_prompt),
-            *retrieval_messages,
-            *rolling_summary_message(rolling_summary),
-        ]
+        pre_messages = _build_context_messages(
+            active_system_prompt=active_system_prompt,
+            retrieval_messages=retrieval_messages,
+            route=route,
+            history=history,
+            plan_text=plan_text,
+            rolling_summary=rolling_summary,
+        )
 
-        # 2. Planner / execution context (optional)
-        #if route.startswith("action") and state.get("plan") and state.get("last_tool_success") is None:
-        if state.get("plan"):
-
-            if route.startswith("action"):
-                planner_brief = planner_execution_brief(
-                    route,
-                    state.get("plan", "")
-                )
-                if planner_brief:
-                    pre_messages.append(SystemMessage(content=planner_brief))
-            
-        if route.startswith("action"):
-            pre_messages.extend(current_turn_messages(history))
-        else:
-            pre_messages.append(latest_human_message(history))
-
-
-        # 3. Runtime instruction buffer
-        guidance = []
-
-        # ------------------------------------------------------------
-        # A) TOOL FAILURE HANDLING
-        # ------------------------------------------------------------
-        if last_tool_success is False:
-            guidance.append("The previous tool execution FAILED.")
-
-            if last_tool_signature:
-                guidance.append(f"Failed tool signature: {last_tool_signature}")
-
-            stderr = last_tool_stderr(last_tool_output)
-            if stderr:
-                guidance.append(f"Runtime error detected:\n{stderr}")
-
-            if last_tool_missing_required_args(last_tool_output):
-                guidance.append("Fix missing required tool arguments based on tool schema.")
-
-            if last_tool_has_args_nameerror(last_tool_output):
-                guidance.append("Fix NameError: ensure all variables/functions are defined or imported.")
-
-        # ------------------------------------------------------------
-        # B) TOOL SUCCESS HANDLING (IMPORTANT PART)
-        # ------------------------------------------------------------
-        if last_tool_success is True and last_tool_rendered.strip():
-
-            guidance.append(
-                "A tool has already succeeded during this user turn. "
-                "Use the tool output as the authoritative source of truth for the current state of the world. "
-                "If that successful result satisfies the request, provide the final concise answer now instead of calling more tools. "
-                "Only call another tool if a specific remaining gap still exists that can be directly addressed by one more tool call."
+        pre_messages.extend(
+            _build_runtime_guidance_messages(
+            last_tool_success=last_tool_success,
+            last_tool_output=last_tool_output,
+            last_tool_rendered=last_tool_rendered,
+            last_tool_signature=last_tool_signature,
             )
-            
-        # ------------------------------------------------------------
-        # 4. FINAL SYSTEM INSTRUCTION BLOCK (single injection)
-        # ------------------------------------------------------------
-        if guidance:
-            combined = "\n".join([
-                "### RUNTIME INSTRUCTIONS (HIGHEST PRIORITY):",
-                *guidance
-            ])
-            pre_messages.append(SystemMessage(content=combined))
+        )
 
-        return pre_messages, None
+        return pre_messages
     
     def _run_main_execution_branch(
         *,
@@ -397,22 +412,20 @@ def create_brain_node(
         tool_name_set: set[str],
     ) -> AIMessage:
         
-        response_llm = llm
-
-        pre_messages, early_response = _build_pre_messages(
+        pre_messages = _build_pre_messages(
             active_system_prompt=active_system_prompt,
             retrieval_messages=retrieval_messages,
             state=state,
         )
-        if early_response is not None:
-            return early_response
-
-        response = response_llm.invoke([*pre_messages])
-
-        _print_raw_llm_request_response(color=ANSI_BLUE, messages=[*pre_messages], raw_text=response.content)
+        
+        response = _invoke_with_trace(
+            llm=llm,
+            messages=[*pre_messages],
+            color=ANSI_BLUE,
+        )
 
         response = _apply_response_recovery(
-            response_llm=response_llm,
+            response_llm=llm,
             pre_messages=pre_messages,
             response=response,
             action_required=action_required,
@@ -421,7 +434,7 @@ def create_brain_node(
         )
 
         response = _apply_repeated_signature_guard(
-            llm=response_llm,
+            llm=llm,
             pre_messages=pre_messages,
             response=response,
             action_required=action_required,
@@ -429,7 +442,6 @@ def create_brain_node(
         )
 
         return response
-
 
     def brain_node(state: AgentState):
         history = state.get("messages", [])
@@ -440,19 +452,13 @@ def create_brain_node(
             response = preferred_tool_response
         else:
 
-            action_required = False
-            retrieval_messages = []
-            llm = brain_llm
-            system_prompt = casual_system_prompt
-
             planner_route = str(state.get("planner_route", ""))
-            if planner_route.startswith("action"):
-                action_required = True
-                llm = tool_brain_llm
-                system_prompt = agent_system_prompt
-                retrieval_messages = retrieval_message(rag_service, latest_user_prompt, rag_top_k)
-            elif planner_route.startswith("info"):
-                action_required = True
+            action_required = planner_route.startswith("action") or planner_route.startswith("info")
+            llm = tool_brain_llm if planner_route.startswith("action") else brain_llm
+            system_prompt = agent_system_prompt if planner_route.startswith("action") else casual_system_prompt
+            retrieval_messages = (retrieval_message(rag_service, latest_user_prompt, rag_top_k) 
+                                  if planner_route.startswith("action")
+                                  else [])
 
             response = _run_main_execution_branch(
                 llm=llm,
