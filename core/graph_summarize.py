@@ -14,7 +14,7 @@ def rolling_summary_message(summary: str) -> list[SystemMessage]:
     return [
         SystemMessage(
             content=(
-                "Rolling summary from earlier turns (context hints, verify file facts with tools):\n"
+                "Rolling summary from earlier turns (profile facts can be used directly; file/system facts should be verified with tools):\n"
                 f"{compact}"
             )
         )
@@ -250,7 +250,7 @@ def create_summarize_memory_node(*, summarize_llm: ChatOllama):
             "Schema:\n"
             "{"
             "\"schema_version\":2,"
-            "\"facts\":[{\"id\":\"...\",\"text\":\"...\",\"category\":\"profile|preferences|constraints|goals\",\"confidence\":0.0}],"
+            "\"facts\":[{\"id\":\"...\",\"text\":\"...\",\"category\":\"profile|preferences|constraints|goals\",\"confidence\":0.7}],"
             "\"open_questions\":[{\"text\":\"...\",\"status\":\"open|resolved\",\"priority\":\"low|medium|high\"}],"
             "\"meta\":{\"updated_at_turn\":0}"
             "}\n\n"
@@ -262,6 +262,12 @@ def create_summarize_memory_node(*, summarize_llm: ChatOllama):
             "  - New open_questions must come from user messages only.\n"
             "  - AI replies may change an existing question status to 'resolved' if it was clearly answered.\n"
             "  - Do NOT create new facts from AI messages.\n"
+            "Confidence policy for facts:\n"
+            " - Use 0.85-1.0 for explicit user self-claims (for example: my name is X, call me X).\n"
+            " - Use 0.60-0.84 for strong inferred personal facts.\n"
+            " - Use 0.30-0.59 only for weak hints.\n"
+            " - Do not emit confidence below 0.30 for personal profile facts.\n"
+            " - For duplicate facts, keep the highest confidence.\n"
             "If no new info found, return Existing Summary unchanged."
         )
 

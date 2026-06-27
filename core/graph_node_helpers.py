@@ -21,57 +21,6 @@ def response_with_usage(state: dict, response: AIMessage) -> dict:
         "tool_text_retry_used": False,
     }
 
-
-def direct_discussion_response(
-    planner_llm: ChatOllama,
-    system_prompt: str,
-    retrieval_messages: list[SystemMessage],
-    rolling_summary: str,
-    recent_history: list,
-) -> AIMessage:
-    def _finalize_llm_text(source: AIMessage, content: str) -> AIMessage:
-        metadata = getattr(source, "response_metadata", None)
-        if isinstance(metadata, dict) and metadata:
-            return AIMessage(content=content, response_metadata=metadata)
-        return AIMessage(content=content)
-
-    messages = [
-        SystemMessage(content=system_prompt),
-        *retrieval_messages,
-        *rolling_summary_message(rolling_summary),
-        *recent_history,
-        SystemMessage(
-            content=(
-                "This turn is discussion-only. Answer directly in concise prose. "
-                "Do not call tools, do not propose tool syntax, and do not create or modify files."
-            )
-        ),
-    ]
-    response = planner_llm.invoke(messages)
-    content = normalize_message_content(response).strip()
-    if getattr(response, "tool_calls", None) or looks_like_pseudo_tool_text(content) or not content:
-        fallback = planner_llm.invoke(
-            [
-                *messages,
-                SystemMessage(
-                    content=(
-                        "Your previous reply was not a direct discussion answer. "
-                        "Reply with plain prose only, no code blocks and no tool-like syntax."
-                    )
-                ),
-            ]
-        )
-        fallback_content = normalize_message_content(fallback).strip()
-        if fallback_content and not looks_like_pseudo_tool_text(fallback_content):
-            return _finalize_llm_text(fallback, fallback_content)
-        return AIMessage(
-            content=(
-                "Describe the error message, the JSON input, and the code path that fails, and I will help isolate the parsing bug directly."
-            )
-        )
-    return _finalize_llm_text(response, content)
-
-
 def detect_missing_dependency(tool_output_raw: str) -> str | None:
     """Extract package name from ModuleNotFoundError or ImportError in stderr. Returns package name or None."""
     if not tool_output_raw:

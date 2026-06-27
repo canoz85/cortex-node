@@ -1,8 +1,18 @@
+from urllib import response
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
-
-from core.graph_pseudo_tools import finalize_action_response, is_generic_json_tool_response, is_pseudo_tool_response, recover_pseudo_tool_response
 from langchain_ollama import ChatOllama
+
+from langchain_core.messages import (
+    AIMessage, BaseMessage, 
+    HumanMessage, SystemMessage, ToolMessage
+)
+
+from core.graph_pseudo_tools import (
+    finalize_action_response,
+    is_generic_json_tool_response,
+    is_pseudo_tool_response,
+    recover_action_response,
+)
 
 from core.graph_constants import ANSI_BLUE, ANSI_GREEN, ANSI_ITALIC, ANSI_RED, ANSI_RESET, ANSI_YELLOW
 from core.graph_context import retrieval_message
@@ -107,7 +117,6 @@ def create_brain_node(
             )
         )
 
-
     def _empty_response_fallback() -> AIMessage:
         return AIMessage(
             content=(
@@ -124,10 +133,9 @@ def create_brain_node(
             )
         )
 
-
     def _apply_response_recovery(
         *,
-        response_llm: ChatOllama,
+        llm: ChatOllama,
         pre_messages: list[BaseMessage],
         response: AIMessage,
         action_required: bool,
@@ -137,24 +145,26 @@ def create_brain_node(
     
         # Always sanitize pseudo tool text on action-required turns so raw JSON/call text
         # is never emitted as a final brain answer.
-        if (action_required) and is_pseudo_tool_response(response):
-            response = recover_pseudo_tool_response(response, tool_name_set)
-            if not getattr(response, "tool_calls", None):
+        if action_required:
+            merged_recovered = recover_action_response(response, tool_name_set)
+            if merged_recovered is not None:
+                response = merged_recovered
+            elif is_pseudo_tool_response(response):
                 response = _pseudo_tool_fallback_response()
 
-        if (action_required) and is_generic_json_tool_response(response):
+        if action_required and is_generic_json_tool_response(response):
             response = _finalize_from_successful_tool_context(
-                llm=response_llm,
+                llm=llm,
                 pre_messages=pre_messages,
                 state=state,
                 response=response,
                 tool_name_set=tool_name_set,
-         )
+            )
 
  
         if is_effectively_empty_response(response):
             response = _invoke_with_trace(
-                llm=response_llm,
+                llm=llm,
                 messages=[*pre_messages, _empty_response_retry_prompt()],
                 color=ANSI_GREEN,
             )
@@ -306,7 +316,7 @@ def create_brain_node(
             if planner_brief:
                 context_messages.append(SystemMessage(content=planner_brief))
 
-        if _is_action_route(route):
+        if _is_action_route(route) or _is_info_route(route):
             context_messages.extend(current_turn_messages(history))
         else:
             latest = latest_human_message(history)
@@ -327,18 +337,18 @@ def create_brain_node(
         if last_tool_success is False:
             guidance.append("The previous tool execution FAILED.")
 
-        if last_tool_signature:
-            guidance.append(f"Failed tool signature: {last_tool_signature}")
+            if last_tool_signature:
+                guidance.append(f"Failed tool signature: {last_tool_signature}")
 
-        stderr = last_tool_stderr(last_tool_output)
-        if stderr:
-            guidance.append(f"Runtime error detected:\n{stderr}")
+            stderr = last_tool_stderr(last_tool_output)
+            if stderr:
+                guidance.append(f"Runtime error detected:\n{stderr}")
 
-        if last_tool_missing_required_args(last_tool_output):
-            guidance.append("Fix missing required tool arguments based on tool schema.")
+            if last_tool_missing_required_args(last_tool_output):
+                guidance.append("Fix missing required tool arguments based on tool schema.")
 
-        if last_tool_has_args_nameerror(last_tool_output):
-            guidance.append("Fix NameError: ensure all variables/functions are defined or imported.")
+            if last_tool_has_args_nameerror(last_tool_output):
+                guidance.append("Fix NameError: ensure all variables/functions are defined or imported.")
 
         has_usable_success_output = bool(last_tool_rendered.strip()) or isinstance(last_tool_output, dict)
         if last_tool_success is True and has_usable_success_output:
@@ -402,7 +412,33 @@ def create_brain_node(
 
         return pre_messages
     
-    def _run_main_execution_branch(
+    def _finalize_brain_response(
+        *,
+        llm: ChatOllama,
+        pre_messages: list[BaseMessage],
+        response: AIMessage,
+        action_required: bool,
+        state: AgentState,
+        tool_name_set: set[str],
+    ) -> AIMessage:
+        response = _apply_response_recovery(
+            llm=llm,
+            pre_messages=pre_messages,
+            response=response,
+            action_required=action_required,
+            state=state,
+            tool_name_set=tool_name_set,
+        )
+        response = _apply_repeated_signature_guard(
+            llm=llm,
+            pre_messages=pre_messages,
+            response=response,
+            action_required=action_required,
+            state=state,
+        )
+        return response
+    
+    def _resolve_brain_response(
         *,
         llm: ChatOllama,
         state: AgentState,
@@ -424,43 +460,63 @@ def create_brain_node(
             color=ANSI_BLUE,
         )
 
-        response = _apply_response_recovery(
-            response_llm=llm,
-            pre_messages=pre_messages,
-            response=response,
-            action_required=action_required,
-            tool_name_set=tool_name_set,
-            state=state,
-        )
-
-        response = _apply_repeated_signature_guard(
+        response = _finalize_brain_response(
             llm=llm,
             pre_messages=pre_messages,
             response=response,
             action_required=action_required,
             state=state,
+            tool_name_set=tool_name_set,
         )
 
         return response
+    
+    def _build_brain_execution_context(
+        *, 
+        state, 
+        latest_user_prompt, 
+        rag_service,
+        rag_top_k,
+        brain_llm, 
+        tool_brain_llm, 
+        agent_system_prompt,
+        casual_system_prompt
+    ):
+        planner_route = str(state.get("planner_route", ""))
+        action_required = planner_route.startswith("action") or planner_route.startswith("info")
+        llm = tool_brain_llm if action_required else brain_llm
+        system_prompt = agent_system_prompt if action_required else casual_system_prompt
+        retrieval_messages = (
+            retrieval_message(rag_service, latest_user_prompt, rag_top_k)
+            if planner_route.startswith("action")
+            else []
+        )
+        return llm, system_prompt, retrieval_messages, action_required
+
 
     def brain_node(state: AgentState):
         history = state.get("messages", [])
         latest_user_prompt = latest_human_message_str(history)       
 
-        preferred_tool_response = _successful_preferred_tool_fast_path(state, latest_user_prompt)
-        if preferred_tool_response is not None:
-            response = preferred_tool_response
+        # preferred_tool_response = _successful_preferred_tool_fast_path(state, latest_user_prompt)
+        # if preferred_tool_response is not None:
+        #     response = preferred_tool_response
+        if False: 
+            pass # TODO: re-enable preferred-tool fast path once we have a better way to handle repeated signatures
         else:
 
-            planner_route = str(state.get("planner_route", ""))
-            action_required = planner_route.startswith("action") or planner_route.startswith("info")
-            llm = tool_brain_llm if planner_route.startswith("action") else brain_llm
-            system_prompt = agent_system_prompt if planner_route.startswith("action") else casual_system_prompt
-            retrieval_messages = (retrieval_message(rag_service, latest_user_prompt, rag_top_k) 
-                                  if planner_route.startswith("action")
-                                  else [])
+            llm, system_prompt, retrieval_messages, action_required = _build_brain_execution_context(
+                state=state,
+                latest_user_prompt=latest_user_prompt,
+                rag_service=rag_service,
+                rag_top_k=rag_top_k,
+                brain_llm=brain_llm,
+                tool_brain_llm=tool_brain_llm,
+                agent_system_prompt=agent_system_prompt,
+                casual_system_prompt=casual_system_prompt
+            )
 
-            response = _run_main_execution_branch(
+            response = _resolve_brain_response(
                 llm=llm,
                 state=state,
                 active_system_prompt=system_prompt,

@@ -9,34 +9,37 @@ from core.graph_constants import PSEUDO_JSON_TOOL_CALL_PATTERN, PSEUDO_TOOL_CALL
 from core.graph_messages import is_effectively_empty_response, normalize_message_content
 
 def is_generic_json_tool_response(message: AIMessage) -> bool:
-
     if getattr(message, "tool_calls", None):
         return False
-    
-    content = str(getattr(message, "content", "")).strip()
-    # Strip markdown fences if present
-    if content.startswith("```"):
-        parts = content.split("```")
-        if len(parts) >= 3:
-            content = parts[1].replace("json", "", 1).strip()
-            
-    try:
-        data = json.loads(content)
-        # Does it look like a tool call structure?
-        return isinstance(data, dict) and "name" in data and "arguments" in data
-    except json.JSONDecodeError:
+
+    content = normalize_message_content(message).strip()
+    if not content:
         return False
+
+    # Check leading fenced block first; fallback to whole content.
+    envelope_text, _ = _extract_leading_fenced_json_and_trailing(content)
+    candidate = envelope_text if envelope_text else content
+
+    # If content is mixed (json + prose), isolate first balanced object.
+    balanced = _extract_balanced_object(candidate)
+    if balanced:
+        candidate = balanced.strip()
+
+    # Shape check only: this is a routing guard, not strict validation.
+    lowered = candidate.lower()
+    has_name = '"name"' in lowered
+    has_args = ('"arguments"' in lowered) or ('"args"' in lowered)
+    return has_name and has_args
 
 def looks_like_pseudo_tool_text(content: str) -> bool:
     text = content or ""
     return bool(PSEUDO_TOOL_CALL_PATTERN.search(text) or PSEUDO_JSON_TOOL_CALL_PATTERN.search(text))
 
-
 def is_pseudo_tool_response(message: AIMessage) -> bool:
     if getattr(message, "tool_calls", None):
         return False
+    
     return looks_like_pseudo_tool_text(str(getattr(message, "content", "")))
-
 
 def _escape_newlines_inside_strings(text: str) -> str:
     """Escape literal newlines occurring inside quoted string values."""
@@ -80,7 +83,6 @@ def _escape_newlines_inside_strings(text: str) -> str:
         result.append(char)
 
     return "".join(result)
-
 
 def _extract_balanced_object(text: str, start_index: int = 0) -> str | None:
     if not text:
@@ -127,7 +129,6 @@ def _extract_balanced_object(text: str, start_index: int = 0) -> str | None:
 
     return None
 
-
 def _as_recovered_tool_call(parsed: object, allowed_tool_names: set[str]) -> dict | None:
     candidate = parsed
     if isinstance(parsed, dict) and isinstance(parsed.get("tool_calls"), list):
@@ -166,13 +167,11 @@ def _as_recovered_tool_call(parsed: object, allowed_tool_names: set[str]) -> dic
         "type": "tool_call",
     }
 
-
 def _extract_json_field_slice(text: str, field_name: str) -> str | None:
     field_match = re.search(rf'["\']{re.escape(field_name)}["\']\s*:\s*', text, flags=re.IGNORECASE)
     if not field_match:
         return None
     return text[field_match.end() :]
-
 
 def _scan_relaxed_quoted_value(text: str, quote_char: str) -> tuple[str, int]:
     result: list[str] = []
@@ -199,7 +198,6 @@ def _scan_relaxed_quoted_value(text: str, quote_char: str) -> tuple[str, int]:
     # No reliable closing quote found; salvage the rest as a partial value.
     return "".join(result), len(text)
 
-
 def _extract_relaxed_string_field(text: str, field_name: str) -> str | None:
     tail = _extract_json_field_slice(text, field_name)
     if tail is None:
@@ -219,7 +217,6 @@ def _extract_relaxed_string_field(text: str, field_name: str) -> str | None:
             .replace("\\'", "'")
         )
 
-
 def _extract_relaxed_bool_field(text: str, field_name: str) -> bool | None:
     tail = _extract_json_field_slice(text, field_name)
     if tail is None:
@@ -230,7 +227,6 @@ def _extract_relaxed_bool_field(text: str, field_name: str) -> bool | None:
     if lowered.startswith("false"):
         return False
     return None
-
 
 def _extract_relaxed_json_tool_call(content: str, allowed_tool_names: set[str]) -> dict | None:
     if not content:
@@ -274,7 +270,6 @@ def _extract_relaxed_json_tool_call(content: str, allowed_tool_names: set[str]) 
         "id": f"pseudo-{uuid4()}",
         "type": "tool_call",
     }
-
 
 def _extract_json_pseudo_tool_call(content: str, allowed_tool_names: set[str]) -> dict | None:
     """Best-effort parse for pseudo tool text shaped like JSON."""
@@ -321,7 +316,6 @@ def _extract_json_pseudo_tool_call(content: str, allowed_tool_names: set[str]) -
 
     return None
 
-
 def _extract_function_pseudo_tool_call(content: str, allowed_tool_names: set[str]) -> dict | None:
     """Best-effort parse for pseudo tool text shaped like a Python function call."""
     if not content:
@@ -366,7 +360,6 @@ def _extract_function_pseudo_tool_call(content: str, allowed_tool_names: set[str
         "type": "tool_call",
     }
 
-
 def recover_pseudo_tool_response(message: AIMessage, allowed_tool_names: set[str]) -> AIMessage:
     content = normalize_message_content(message)
     recovered_tool_call = _extract_json_pseudo_tool_call(content, allowed_tool_names)
@@ -375,7 +368,6 @@ def recover_pseudo_tool_response(message: AIMessage, allowed_tool_names: set[str
     if recovered_tool_call is not None:
         return AIMessage(content="", tool_calls=[recovered_tool_call])
     return message
-
 
 def finalize_action_response(response: AIMessage, allowed_tool_names: set[str]) -> AIMessage:
     if getattr(response, "tool_calls", None):
@@ -407,3 +399,90 @@ def finalize_action_response(response: AIMessage, allowed_tool_names: set[str]) 
             "Action-required run stopped because the model returned plain text instead of an executable tool call."
         )
     )
+
+
+# ****************************
+
+def _normalize_existing_tool_calls(message: AIMessage, allowed_tool_names: set[str]) -> AIMessage | None:
+    tool_calls = getattr(message, "tool_calls", None) or []
+    if not tool_calls:
+        return None
+
+    normalized: list[dict] = []
+    for raw in tool_calls:
+        if not isinstance(raw, dict):
+            continue
+        name = raw.get("name")
+        if not isinstance(name, str) or name not in allowed_tool_names:
+            continue
+        args = raw.get("args", {})
+        if not isinstance(args, dict):
+            continue
+        normalized.append(
+            {
+                "name": name,
+                "args": args,
+                "id": str(raw.get("id") or f"pseudo-{uuid4()}"),
+                "type": "tool_call",
+            }
+        )
+
+    if not normalized:
+        return None
+    return AIMessage(content="", tool_calls=normalized)
+
+def _extract_leading_fenced_json_and_trailing(content: str) -> tuple[str | None, str]:
+    if not content:
+        return (None, "")
+
+    # Correct triple-backtick fence.
+    match = re.match(
+        r'^\s*```(?:json|JSON)?\s*\n?(.*?)\s*```\s*(.*)$',
+        content,
+        flags=re.DOTALL,
+    )
+    if not match:
+        return (None, "")
+    return (match.group(1).strip(), (match.group(2) or "").strip())
+
+
+def _extract_trailing_content_when_invalid_tool_envelope(
+    content: str,
+    allowed_tool_names: set[str],
+) -> str:
+    envelope_text, trailing = _extract_leading_fenced_json_and_trailing(content)
+    if not envelope_text or not trailing.strip():
+        return ""
+
+    # Reuse existing recovery: if it is a valid recoverable tool call, do not treat as invalid.
+    recovered = _extract_json_pseudo_tool_call(envelope_text, allowed_tool_names)
+    if recovered is not None:
+        return ""
+
+    # Heuristic: envelope-ish but unrecoverable -> salvage trailing prose.
+    # This catches {"name": null, "arguments": null} and similar.
+    lower_env = envelope_text.lower()
+    has_tool_shape = ('"name"' in lower_env) and (('"arguments"' in lower_env) or ('"args"' in lower_env))
+    if has_tool_shape:
+        return trailing.strip()
+
+    return ""
+
+def recover_action_response(
+    message: AIMessage,
+    allowed_tool_names: set[str],
+) -> AIMessage | None:
+    direct = _normalize_existing_tool_calls(message, allowed_tool_names)
+    if direct is not None:
+        return direct
+
+    recovered = recover_pseudo_tool_response(message, allowed_tool_names)
+    if getattr(recovered, "tool_calls", None):
+        return recovered
+
+    content = normalize_message_content(message)
+    trailing = _extract_trailing_content_when_invalid_tool_envelope(content, allowed_tool_names)
+    if trailing:
+        return AIMessage(content=trailing)
+
+    return None
