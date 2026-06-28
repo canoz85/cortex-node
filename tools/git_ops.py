@@ -3,6 +3,7 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
+from core.error_codes import GIT_COMMAND_FAILED, GIT_NOT_INSTALLED, GIT_RUNTIME_ERROR, GIT_TIMEOUT
 from core.models import ToolResult
 from tools.sandbox_paths import resolve_workspace
 
@@ -28,19 +29,33 @@ def _run_git(workspace_root: Path, args: list[str], timeout_seconds: int = 20) -
                 "stderr": stderr,
                 "args": args,
             },
+            error_code=(None if result.returncode == 0 else GIT_COMMAND_FAILED),
+            error_details=(
+                None
+                if result.returncode == 0
+                else {"args": args, "exit_code": result.returncode}
+            ),
         ).to_tool_output()
     except FileNotFoundError:
         return ToolResult(
             success=False,
             message="Error: git is not installed or not available in PATH",
+            error_code=GIT_NOT_INSTALLED,
         ).to_tool_output()
     except subprocess.TimeoutExpired:
         return ToolResult(
             success=False,
             message=f"Error: git command timed out after {timeout_seconds} seconds",
+            error_code=GIT_TIMEOUT,
+            error_details={"args": args, "timeout_seconds": timeout_seconds},
         ).to_tool_output()
     except Exception as exc:
-        return ToolResult(success=False, message=f"Error running git command: {exc}").to_tool_output()
+        return ToolResult(
+            success=False,
+            message=f"Error running git command: {exc}",
+            error_code=GIT_RUNTIME_ERROR,
+            error_details={"args": args, "exception_type": type(exc).__name__},
+        ).to_tool_output()
 
 
 def get_git_tools(workspace_dir: str):

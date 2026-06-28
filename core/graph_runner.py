@@ -1,12 +1,13 @@
 import json
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from core.error_codes import TOOL_UNSTRUCTURED_RESULT
 from core.graph_constants import ANSI_BLUE, ANSI_GREEN, ANSI_ITALIC, ANSI_RED, ANSI_RESET, MAX_REASONING_STEPS
 from core.graph_messages import normalize_message_content
 from core.graph_response_formatters import format_tool_call_preview
@@ -45,6 +46,7 @@ class RunMetrics:
     terminal_node: str = ""
     terminal_message_kind: str = "none"
     planner_route: str = ""
+    error_counts: dict[str, int] = field(default_factory=dict)
 
 
 def _print_raw_llm_response(raw_text: str) -> None:
@@ -301,6 +303,44 @@ def _derive_stop_reason(*, metrics: RunMetrics, last_text: str) -> tuple[str, bo
     return "completed", False, False
 
 
+def _extract_error_code(*, parsed: ToolResult | None, unwrapped: Any) -> str | None:
+    if parsed is not None and isinstance(parsed.error_code, str) and parsed.error_code.strip():
+        return parsed.error_code.strip()
+
+    if isinstance(unwrapped, dict):
+        maybe_error = unwrapped.get("error_code")
+        if isinstance(maybe_error, str) and maybe_error.strip():
+            return maybe_error.strip()
+
+        if unwrapped.get("success") is False:
+            return TOOL_UNSTRUCTURED_RESULT
+
+    return None
+
+def _collect_tool_result_event(
+    *,
+    raw_content: str,
+    metrics: RunMetrics,
+) -> tuple[bool, str | None, str]:
+    parsed = parse_tool_result(raw_content)
+    unwrapped = unwrap_tool_output(raw_content)
+
+    success = (
+        parsed.success
+        if parsed is not None
+        else bool(isinstance(unwrapped, dict) and unwrapped.get("success") is True)
+    )
+    error_code = _extract_error_code(parsed=parsed, unwrapped=unwrapped)
+    if error_code:
+        metrics.error_counts[error_code] = metrics.error_counts.get(error_code, 0) + 1
+
+    message_text = (
+        parsed.message
+        if parsed is not None
+        else str(unwrapped.get("message", "")) if isinstance(unwrapped, dict) else ""
+    )
+    return success, error_code, message_text
+
 def run_prompt(
     app,
     prompt: str,
@@ -378,17 +418,9 @@ def run_prompt(
 
                     if frame.message_kind == "tool_result":
                         # Optional per-tool-result event if you want to preserve this signal.
-                        parsed = parse_tool_result(frame.message_text)
-                        unwrapped = unwrap_tool_output(frame.message_text)
-                        success = (
-                            parsed.success
-                            if parsed is not None
-                            else bool(isinstance(unwrapped, dict) and unwrapped.get("success") is True)
-                        )
-                        message_text = (
-                            parsed.message
-                            if parsed is not None
-                            else str(unwrapped.get("message", "")) if isinstance(unwrapped, dict) else ""
+                        success, error_code, message_text = _collect_tool_result_event(
+                            raw_content=frame.message_text,
+                            metrics=metrics,
                         )
                         log_event(
                             logger,
@@ -398,6 +430,7 @@ def run_prompt(
                             run_id=run_id,
                             node=frame.node,
                             success=success,
+                            error_code=error_code,
                             tool_message=message_text,
                         )
 
@@ -437,6 +470,7 @@ def run_prompt(
         terminal_node=metrics.terminal_node,
         terminal_message_kind=metrics.terminal_message_kind,
         planner_route=metrics.planner_route or None,
+        error_counts=metrics.error_counts or None,
     )
 
     return final_messages, metrics.latest_summary

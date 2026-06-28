@@ -2,6 +2,16 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
+from core.error_codes import (
+    FILE_ALREADY_EXISTS,
+    FILE_FILE_NOT_FOUND,
+    FILE_KNOWLEDGE_PATH_OUTSIDE_ROOT,
+    FILE_LIST_FAILED,
+    FILE_MAKE_DIR_FAILED,
+    FILE_PATH_NOT_FOUND,
+    FILE_READ_FAILED,
+    FILE_WRITE_FAILED,
+)
 from core.models import (
     ListFilesRequest,
     ListFilesResult,
@@ -30,6 +40,8 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
                     success=False,
                     message=f"Error: path does not exist: {request.path}",
                     path=request.path,
+                    error_code=FILE_PATH_NOT_FOUND,
+                    error_details={"path": request.path},
                 )
                 return result.to_tool_output()
 
@@ -66,6 +78,11 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
                 success=False,
                 message=f"Error listing files: {exc}",
                 path=safe_path,
+                error_code=FILE_LIST_FAILED,
+                error_details={
+                    "path": safe_path,
+                    "exception_type": type(exc).__name__,
+                },
             )
             return result.to_tool_output()
 
@@ -80,6 +97,8 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
                     success=False,
                     message=f"Error: file does not exist: {request.path}",
                     path=request.path,
+                    error_code=FILE_FILE_NOT_FOUND,
+                    error_details={"path": request.path},
                 )
                 return result.to_tool_output()
 
@@ -97,6 +116,11 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
                 success=False,
                 message=f"Error reading file: {exc}",
                 path=safe_path,
+                error_code=FILE_READ_FAILED,
+                error_details={
+                    "path": safe_path,
+                    "exception_type": type(exc).__name__,
+                },
             )
             return result.to_tool_output()
 
@@ -112,6 +136,8 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
                     success=False,
                     message=f"Error: file already exists: {request.path}",
                     path=request.path,
+                    error_code=FILE_ALREADY_EXISTS,
+                    error_details={"path": request.path},
                 )
                 return result.to_tool_output()
 
@@ -129,6 +155,11 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
                 success=False,
                 message=f"Error writing file: {exc}",
                 path=safe_path,
+                error_code=FILE_WRITE_FAILED,
+                error_details={
+                    "path": safe_path,
+                    "exception_type": type(exc).__name__,
+                },
             )
             return result.to_tool_output()
 
@@ -151,6 +182,11 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
                 success=False,
                 message=f"Error creating directory: {exc}",
                 path=safe_path,
+                error_code=FILE_MAKE_DIR_FAILED,
+                error_details={
+                    "path": safe_path,
+                    "exception_type": type(exc).__name__,
+                },
             )
             return result.to_tool_output()
 
@@ -170,6 +206,8 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
                         success=False,
                         message=f"Error: path '{request.path}' is outside the knowledge folder",
                         path=request.path,
+                        error_code=FILE_KNOWLEDGE_PATH_OUTSIDE_ROOT,
+                        error_details={"path": request.path},
                     )
                     return result.to_tool_output()
                 if not candidate.exists() or not candidate.is_file():
@@ -177,6 +215,8 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
                         success=False,
                         message=f"Error: file does not exist: {request.path}",
                         path=request.path,
+                        error_code=FILE_FILE_NOT_FOUND,
+                        error_details={"path": request.path},
                     )
                     return result.to_tool_output()
                 content = candidate.read_text(encoding="utf-8")
@@ -193,6 +233,11 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
                     success=False,
                     message=f"Error reading knowledge file: {exc}",
                     path=safe_path,
+                    error_code=FILE_READ_FAILED,
+                    error_details={
+                        "path": safe_path,
+                        "exception_type": type(exc).__name__,
+                    },
                 )
                 return result.to_tool_output()
 

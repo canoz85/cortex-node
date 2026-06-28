@@ -26,6 +26,13 @@ from core.graph_node_helpers import (
 )
 
 from core.graph_response_formatters import format_action_completion_response, format_preferred_tool_response
+from core.graph_state_machine import (
+    decide_action_recovery,
+    decide_brain_execution,
+    decide_repeated_signature,
+    should_fallback_after_empty_response,
+    should_retry_after_empty_response,
+)
 from core.graph_summarize import rolling_summary_message
 from core.graph_tool_events import (
     message_repeats_signature,
@@ -133,7 +140,7 @@ def create_brain_node(
             )
         )
 
-    def _apply_response_recovery(
+    def _recover_response_for_action_flow(
         *,
         llm: ChatOllama,
         pre_messages: list[BaseMessage],
@@ -145,14 +152,20 @@ def create_brain_node(
     
         # Always sanitize pseudo tool text on action-required turns so raw JSON/call text
         # is never emitted as a final brain answer.
-        if action_required:
-            merged_recovered = recover_action_response(response, tool_name_set)
-            if merged_recovered is not None:
-                response = merged_recovered
-            elif is_pseudo_tool_response(response):
-                response = _pseudo_tool_fallback_response()
+        recovered_action_response = recover_action_response(response, tool_name_set) if action_required else None
+        action_recovery_decision = decide_action_recovery(
+            action_required=action_required,
+            recovered_action_response_exists=(recovered_action_response is not None),
+            pseudo_tool_response_detected=is_pseudo_tool_response(response),
+            generic_json_tool_response_detected=is_generic_json_tool_response(response),
+        )
 
-        if action_required and is_generic_json_tool_response(response):
+        if action_recovery_decision.use_recovered_action_response and recovered_action_response is not None:
+            response = recovered_action_response
+        elif action_recovery_decision.use_pseudo_fallback:
+            response = _pseudo_tool_fallback_response()
+
+        if action_recovery_decision.finalize_generic_json:
             response = _finalize_from_successful_tool_context(
                 llm=llm,
                 pre_messages=pre_messages,
@@ -162,14 +175,14 @@ def create_brain_node(
             )
 
  
-        if is_effectively_empty_response(response):
+        if should_retry_after_empty_response(is_effectively_empty_response(response)):
             response = _invoke_with_trace(
                 llm=llm,
                 messages=[*pre_messages, _empty_response_retry_prompt()],
                 color=ANSI_GREEN,
             )
 
-        if is_effectively_empty_response(response):
+        if should_fallback_after_empty_response(is_effectively_empty_response(response)):
             response = _empty_response_fallback()
 
         return response
@@ -195,7 +208,7 @@ def create_brain_node(
             )
         )
 
-    def _apply_repeated_signature_guard(
+    def _enforce_repeated_signature_policy(
         *,
         llm: ChatOllama,
         pre_messages: list[BaseMessage],
@@ -205,20 +218,38 @@ def create_brain_node(
     ) -> AIMessage:
         
         last_tool_signature = str(state.get("last_tool_signature", ""))
-        if not (action_required and last_tool_signature):
+        has_last_signature = bool(last_tool_signature)
+        initial_repeats_signature = (
+            message_repeats_signature(response, last_tool_signature)
+            if has_last_signature
+            else False
+        )
+        repeated_signature_guard_decision = decide_repeated_signature(
+            action_required=action_required,
+            has_last_tool_signature=has_last_signature,
+            response_repeats_signature=initial_repeats_signature,
+            last_tool_success=(state.get("last_tool_success") is True),
+            corrected_repeats_signature=False,
+        )
+        if not repeated_signature_guard_decision.apply_guard:
             return response
 
-        if not message_repeats_signature(response, last_tool_signature):
-            return response
-
-        repeat_reason = "already succeeded" if state.get("last_tool_success") is True else "already failed"
         corrected_response = _invoke_with_trace(
             llm=llm,
-            messages=[*pre_messages, response, _repeated_signature_correction_prompt(last_tool_signature, repeat_reason)],
+            messages=[*pre_messages, response, _repeated_signature_correction_prompt(last_tool_signature, repeated_signature_guard_decision.repeat_reason)],
             color=ANSI_YELLOW,
         )
 
-        if state.get("last_tool_success") is True and message_repeats_signature(corrected_response, last_tool_signature):
+        corrected_repeats_signature = message_repeats_signature(corrected_response, last_tool_signature)
+        repeated_signature_followup_decision = decide_repeated_signature(
+            action_required=action_required,
+            has_last_tool_signature=has_last_signature,
+            response_repeats_signature=initial_repeats_signature,
+            last_tool_success=(state.get("last_tool_success") is True),
+            corrected_repeats_signature=corrected_repeats_signature,
+        )
+
+        if repeated_signature_followup_decision.request_final_answer:
             
             final_response = _invoke_with_trace(
                 llm=llm,
@@ -421,7 +452,7 @@ def create_brain_node(
         state: AgentState,
         tool_name_set: set[str],
     ) -> AIMessage:
-        response = _apply_response_recovery(
+        response = _recover_response_for_action_flow(
             llm=llm,
             pre_messages=pre_messages,
             response=response,
@@ -429,7 +460,7 @@ def create_brain_node(
             state=state,
             tool_name_set=tool_name_set,
         )
-        response = _apply_repeated_signature_guard(
+        response = _enforce_repeated_signature_policy(
             llm=llm,
             pre_messages=pre_messages,
             response=response,
@@ -471,7 +502,7 @@ def create_brain_node(
 
         return response
     
-    def _build_brain_execution_context(
+    def _resolve_execution_context_from_route(
         *, 
         state, 
         latest_user_prompt, 
@@ -483,12 +514,13 @@ def create_brain_node(
         casual_system_prompt
     ):
         planner_route = str(state.get("planner_route", ""))
-        action_required = planner_route.startswith("action") or planner_route.startswith("info")
+        route_execution_policy = decide_brain_execution(planner_route)
+        action_required = route_execution_policy.action_required
         llm = tool_brain_llm if action_required else brain_llm
         system_prompt = agent_system_prompt if action_required else casual_system_prompt
         retrieval_messages = (
             retrieval_message(rag_service, latest_user_prompt, rag_top_k)
-            if planner_route.startswith("action")
+            if route_execution_policy.include_retrieval
             else []
         )
         return llm, system_prompt, retrieval_messages, action_required
@@ -498,32 +530,25 @@ def create_brain_node(
         history = state.get("messages", [])
         latest_user_prompt = latest_human_message_str(history)       
 
-        # preferred_tool_response = _successful_preferred_tool_fast_path(state, latest_user_prompt)
-        # if preferred_tool_response is not None:
-        #     response = preferred_tool_response
-        if False: 
-            pass # TODO: re-enable preferred-tool fast path once we have a better way to handle repeated signatures
-        else:
+        llm, system_prompt, retrieval_messages, action_required = _resolve_execution_context_from_route(
+            state=state,
+            latest_user_prompt=latest_user_prompt,
+            rag_service=rag_service,
+            rag_top_k=rag_top_k,
+            brain_llm=brain_llm,
+            tool_brain_llm=tool_brain_llm,
+            agent_system_prompt=agent_system_prompt,
+            casual_system_prompt=casual_system_prompt
+        )
 
-            llm, system_prompt, retrieval_messages, action_required = _build_brain_execution_context(
-                state=state,
-                latest_user_prompt=latest_user_prompt,
-                rag_service=rag_service,
-                rag_top_k=rag_top_k,
-                brain_llm=brain_llm,
-                tool_brain_llm=tool_brain_llm,
-                agent_system_prompt=agent_system_prompt,
-                casual_system_prompt=casual_system_prompt
-            )
-
-            response = _resolve_brain_response(
-                llm=llm,
-                state=state,
-                active_system_prompt=system_prompt,
-                retrieval_messages=retrieval_messages,
-                action_required=action_required,
-                tool_name_set=tool_name_set,
-            )
+        response = _resolve_brain_response(
+            llm=llm,
+            state=state,
+            active_system_prompt=system_prompt,
+            retrieval_messages=retrieval_messages,
+            action_required=action_required,
+            tool_name_set=tool_name_set,
+        )
 
         return response_with_usage(state, response)
 

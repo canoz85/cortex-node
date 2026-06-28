@@ -12,6 +12,8 @@ class ToolSerializableModel(BaseModel):
     """Base model for tool payloads that need summary + JSON output."""
 
     display: str | None = None
+    error_code: str | None = None
+    error_details: dict[str, Any] | None = None
 
     @staticmethod
     def _default_display_from_payload(payload: dict[str, Any], summary: str) -> str:
@@ -172,12 +174,17 @@ class ToolResult(ToolSerializableModel):
     def to_pretty_text(self) -> str:
         """Human-readable rendering for console output."""
         lines = [f"Success: {self.success}", f"Message: {self.message}"]
+        if self.error_code:
+            lines.append(f"Error code: {self.error_code}")
         if self.data is not None:
             if isinstance(self.data, str):
                 lines.append(f"Data: {self.data}")
             else:
                 lines.append("Data:")
                 lines.append(json.dumps(self.data, indent=2, ensure_ascii=True))
+        if self.error_details is not None:
+            lines.append("Error details:")
+            lines.append(json.dumps(self.error_details, indent=2, ensure_ascii=True))
         return "\n".join(lines)
 
 

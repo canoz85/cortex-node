@@ -5,6 +5,7 @@ import re
 
 from langchain_core.tools import tool
 
+from core.error_codes import INFO_MATH_UNSOLVABLE, INFO_TIME_FORMAT_ERROR, INFO_TOKEN_USAGE_UNAVAILABLE
 from core.graph_constants import MAX_REASONING_STEPS
 from core.models import ToolResult
 
@@ -252,6 +253,7 @@ def get_info_tools(model: str, workspace_dir: str):
             return ToolResult(
                 success=False,
                 message="No token usage recorded yet.",
+                error_code=INFO_TOKEN_USAGE_UNAVAILABLE,
             ).to_tool_output()
         return ToolResult(
             success=True,
@@ -278,6 +280,11 @@ def get_info_tools(model: str, workspace_dir: str):
             return ToolResult(
                 success=False,
                 message=f"Error formatting current time: {exc}",
+                error_code=INFO_TIME_FORMAT_ERROR,
+                error_details={
+                    "format": format,
+                    "exception_type": type(exc).__name__,
+                },
             ).to_tool_output()
 
     @tool
@@ -289,6 +296,8 @@ def get_info_tools(model: str, workspace_dir: str):
             message=message,
             data=data,
             display=message,
+            error_code=(None if success else INFO_MATH_UNSOLVABLE),
+            error_details=(None if success else {"question": question}),
         ).to_tool_output()
 
     return [agent_info, token_usage, current_time, solve_math]

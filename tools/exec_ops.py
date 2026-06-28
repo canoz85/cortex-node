@@ -4,6 +4,7 @@ import sys
 
 from langchain_core.tools import tool
 
+from core.error_codes import EXEC_EXIT_NONZERO, EXEC_RUNTIME_ERROR, EXEC_SCRIPT_NOT_FOUND, EXEC_TIMEOUT
 from core.models import ToolResult
 from tools.sandbox_paths import resolve_safe_path, resolve_workspace
 
@@ -33,6 +34,8 @@ def get_exec_tools(workspace_dir: str):
                 return ToolResult(
                     success=False,
                     message=f"Error: Python file does not exist: {path}",
+                    error_code=EXEC_SCRIPT_NOT_FOUND,
+                    error_details={"path": path},
                 ).to_tool_output()
 
             arg_list: list[str] = []
@@ -67,13 +70,36 @@ def get_exec_tools(workspace_dir: str):
                     "stdout": stdout,
                     "stderr": stderr,
                 },
+                error_code=(None if result.returncode == 0 else EXEC_EXIT_NONZERO),
+                error_details=(
+                    None
+                    if result.returncode == 0
+                    else {
+                        "path": path,
+                        "exit_code": result.returncode,
+                        "args": arg_list,
+                    }
+                ),
             ).to_tool_output()
         except subprocess.TimeoutExpired:
             return ToolResult(
                 success=False,
                 message=f"Error: execution timed out after {timeout_seconds} seconds",
+                error_code=EXEC_TIMEOUT,
+                error_details={
+                    "path": path,
+                    "timeout_seconds": timeout_seconds,
+                },
             ).to_tool_output()
         except Exception as exc:
-            return ToolResult(success=False, message=f"Error running Python: {exc}").to_tool_output()
+            return ToolResult(
+                success=False,
+                message=f"Error running Python: {exc}",
+                error_code=EXEC_RUNTIME_ERROR,
+                error_details={
+                    "path": path,
+                    "exception_type": type(exc).__name__,
+                },
+            ).to_tool_output()
 
     return [run_python]
