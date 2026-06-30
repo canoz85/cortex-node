@@ -1,0 +1,15 @@
+# Workspace Files Overview
+
+- cortexnode_logo.svg (image)
+- create_logo.py (python script)
+- create_structure_cli.py (python script)
+- create_svg_logo.py (python script)
+- file_ops.py (python module)
+- find_max_chars.py (python script)
+- generate_project_structure.py (python script)
+- personal.md (markdown)
+- project_template.txt (text)
+- README.md (markdown)
+- temp_length_calc.py (python script)
+- test_image_check.py (python script)
+- web_search_tool.py (python module)

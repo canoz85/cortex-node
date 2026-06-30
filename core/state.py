@@ -24,4 +24,5 @@ class AgentState(TypedDict, total=False):
     planner_confidence: float
     planner_domain_enforced: bool
     rolling_summary: str
+    retrieval_messages: list[BaseMessage]
     run_id: str

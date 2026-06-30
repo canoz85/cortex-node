@@ -160,8 +160,6 @@ def create_graph_nodes(
     brain_node = create_brain_node(
         brain_llm=brain_llm,
         tool_brain_llm=tool_brain_llm,
-        rag_service=rag_service,
-        rag_top_k=rag_top_k,
         agent_system_prompt=agent_system_prompt,
         casual_system_prompt=casual_system_prompt,
         tool_name_set=tool_name_set,

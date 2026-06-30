@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from langgraph.graph import END
 
 from core.graph_constants import MAX_REASONING_STEPS
+from core.graph_node_helpers import planner_execution_brief
 from core.state import AgentState
 
 
@@ -17,7 +18,7 @@ class BrainExecutionDecision:
     action_required: bool
     include_retrieval: bool
     reason: str
-
+    planner_brief: str = ""  # Added default value for planner_brief
 
 @dataclass(frozen=True)
 class ActionRecoveryDecision:
@@ -50,14 +51,15 @@ def decide_after_brain(state: AgentState) -> TransitionDecision:
     return TransitionDecision(next_node="summarize_memory", reason="finalize_turn")
 
 
-def decide_brain_execution(route: str) -> BrainExecutionDecision:
-    if route.startswith("action"):
+def decide_brain_execution(planner_route: str, plan_text: str) -> BrainExecutionDecision:
+    if planner_route.startswith("action"):
         return BrainExecutionDecision(
             action_required=True,
             include_retrieval=True,
             reason="action_route",
+            planner_brief=planner_execution_brief(planner_route, plan_text),
         )
-    if route.startswith("info"):
+    if planner_route.startswith("info"):
         return BrainExecutionDecision(
             action_required=True,
             include_retrieval=False,

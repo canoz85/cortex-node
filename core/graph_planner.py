@@ -46,9 +46,8 @@ def create_planner_node(
     def planner_node(state: AgentState):
         """First pass: analyze prompt and create a plan WITHOUT taking actions."""
         history = state.get("messages", [])
-        #recent_history = recent_messages(history, RECENT_MESSAGE_WINDOW)
         
-
+        retrieval_messages = []
         latest_user_prompt = latest_human_message_str(history)
         routing_decision = planner_routing_decision(latest_user_prompt, router_llm=router_llm, tool_name_set=tool_name_set)
         planner_route = routing_decision.route
@@ -92,6 +91,7 @@ def create_planner_node(
 
         return {
             "plan": plan_text,
+            "retrieval_messages": retrieval_messages,
             "planner_route": routing_decision.route,
             "planner_domain": routing_decision.domain,
             "planner_confidence": routing_decision.confidence,

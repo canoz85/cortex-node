@@ -79,40 +79,11 @@ def create_brain_node(
     *,
     brain_llm: ChatOllama,
     tool_brain_llm: ChatOllama,
-    rag_service: WorkspaceRAG,
-    rag_top_k: int,
     agent_system_prompt: str,
     casual_system_prompt: str,
     tool_name_set: set[str],
 ):
-    def _successful_preferred_tool_fast_path(state: AgentState, latest_user_prompt: str) -> AIMessage | None:
-        """Finalize simple preferred-tool requests without another tool-enabled LLM pass."""
-        if state.get("last_tool_success") is not True:
-            return None
 
-        last_tool_output = state.get("last_tool_output", "")
-        if not isinstance(last_tool_output, dict):
-            return None
-
-        preferred_tool_name = preferred_file_tool(latest_user_prompt) or preferred_info_tool(latest_user_prompt)
-        if not preferred_tool_name:
-            return None
-
-        signature = parse_tool_signature(str(state.get("last_tool_signature", "") or ""))
-        if not signature:
-            return None
-
-        tool_name, _ = signature
-        if tool_name != preferred_tool_name:
-            return None
-
-        rendered = str(state.get("last_tool_rendered", "") or "").strip()
-        if not rendered:
-            rendered = format_preferred_tool_response(last_tool_output).strip()
-        if not rendered:
-            return None
-
-        return AIMessage(content=rendered)
     
     def _empty_response_retry_prompt() -> SystemMessage:
         return SystemMessage(
@@ -319,21 +290,15 @@ def create_brain_node(
                     return AIMessage(content=rendered)
 
         return decision
-
-    def _is_action_route(route: str) -> bool:
-        return route.startswith("action")
-    
-    def _is_info_route(route: str) -> bool:
-        return route.startswith("info")
     
     def _build_context_messages(
         *,
         active_system_prompt: str,
         retrieval_messages: list[SystemMessage],
-        route: str,
         history: list,
-        plan_text: str,
+        planner_brief: str,
         rolling_summary: str,
+        action_required: bool,
     ) -> list[BaseMessage]:
     
         context_messages: list[BaseMessage] = [
@@ -342,12 +307,10 @@ def create_brain_node(
             *rolling_summary_message(rolling_summary),
         ]
 
-        if plan_text and _is_action_route(route):
-            planner_brief = planner_execution_brief(route, plan_text)
+        if action_required:
             if planner_brief:
                 context_messages.append(SystemMessage(content=planner_brief))
 
-        if _is_action_route(route) or _is_info_route(route):
             context_messages.extend(current_turn_messages(history))
         else:
             latest = latest_human_message(history)
@@ -355,6 +318,7 @@ def create_brain_node(
                 context_messages.append(latest)
 
         return context_messages
+    
 
     def _build_runtime_guidance_messages(
         *,
@@ -402,13 +366,14 @@ def create_brain_node(
     def _build_pre_messages(
         *,
         active_system_prompt: str,
-        retrieval_messages: list[SystemMessage],
         state: AgentState,
+        action_required: bool,
+        planner_brief: str,
+
     ) -> list[BaseMessage]:
         
-        route = str(state.get("planner_route", ""))
         history = state.get("messages", [])
-        plan_text = str(state.get("plan", "") or "")
+        retrieval_messages = state.get("retrieval_messages", [])
         rolling_summary = state.get("rolling_summary", "")
 
         last_tool_success = state.get("last_tool_success")
@@ -416,20 +381,16 @@ def create_brain_node(
         last_tool_rendered = str(state.get("last_tool_rendered", "") or "")
         last_tool_signature = str(state.get("last_tool_signature", "") or "")
 
-        # Route guard:
-        # action routes are execution-first, info* routes are tool-oriented but not full action context,
-        # everything else falls back to direct latest-user context.
-        if not (_is_action_route(route) or _is_info_route(route) or route in {"", "casual", "conversation", "coding_discussion", "clarify_domain"}):
-        # Unknown planner routes are treated as non-action fallback for safety.
-            pass
+        # Route guard: think to add something
+
 
         pre_messages = _build_context_messages(
             active_system_prompt=active_system_prompt,
             retrieval_messages=retrieval_messages,
-            route=route,
             history=history,
-            plan_text=plan_text,
+            planner_brief=planner_brief,
             rolling_summary=rolling_summary,
+            action_required=action_required,
         )
 
         pre_messages.extend(
@@ -471,18 +432,19 @@ def create_brain_node(
     
     def _resolve_brain_response(
         *,
-        llm: ChatOllama,
         state: AgentState,
-        active_system_prompt: str,
-        retrieval_messages: list[SystemMessage],
-        action_required: bool,
         tool_name_set: set[str],
+        llm: ChatOllama,
+        active_system_prompt: str,
+        action_required: bool,
+        planner_brief: str,
     ) -> AIMessage:
         
         pre_messages = _build_pre_messages(
             active_system_prompt=active_system_prompt,
-            retrieval_messages=retrieval_messages,
             state=state,
+            action_required=action_required,
+            planner_brief=planner_brief,
         )
         
         response = _invoke_with_trace(
@@ -505,36 +467,30 @@ def create_brain_node(
     def _resolve_execution_context_from_route(
         *, 
         state, 
-        latest_user_prompt, 
-        rag_service,
-        rag_top_k,
         brain_llm, 
         tool_brain_llm, 
         agent_system_prompt,
         casual_system_prompt
     ):
         planner_route = str(state.get("planner_route", ""))
-        route_execution_policy = decide_brain_execution(planner_route)
+        plan_text = str(state.get("plan", "") or "")
+
+        route_execution_policy = decide_brain_execution(planner_route, plan_text)
+
         action_required = route_execution_policy.action_required
         llm = tool_brain_llm if action_required else brain_llm
         system_prompt = agent_system_prompt if action_required else casual_system_prompt
-        retrieval_messages = (
-            retrieval_message(rag_service, latest_user_prompt, rag_top_k)
-            if route_execution_policy.include_retrieval
-            else []
-        )
-        return llm, system_prompt, retrieval_messages, action_required
+   
+        planner_brief = route_execution_policy.planner_brief
+
+
+        return llm, system_prompt, action_required, planner_brief
 
 
     def brain_node(state: AgentState):
-        history = state.get("messages", [])
-        latest_user_prompt = latest_human_message_str(history)       
 
-        llm, system_prompt, retrieval_messages, action_required = _resolve_execution_context_from_route(
+        llm, system_prompt, action_required, planner_brief = _resolve_execution_context_from_route(
             state=state,
-            latest_user_prompt=latest_user_prompt,
-            rag_service=rag_service,
-            rag_top_k=rag_top_k,
             brain_llm=brain_llm,
             tool_brain_llm=tool_brain_llm,
             agent_system_prompt=agent_system_prompt,
@@ -542,12 +498,12 @@ def create_brain_node(
         )
 
         response = _resolve_brain_response(
-            llm=llm,
             state=state,
-            active_system_prompt=system_prompt,
-            retrieval_messages=retrieval_messages,
-            action_required=action_required,
             tool_name_set=tool_name_set,
+            llm=llm,
+            active_system_prompt=system_prompt,
+            action_required=action_required,
+            planner_brief=planner_brief
         )
 
         return response_with_usage(state, response)

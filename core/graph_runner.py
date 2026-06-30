@@ -369,6 +369,7 @@ def run_prompt(
         "plan": "",
         "planner_route": "",
         "rolling_summary": rolling_summary,
+        "retrieval_messages": [],
         "last_tool_output": "",
         "last_tool_rendered": "",
         "last_tool_signature": "",
