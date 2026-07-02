@@ -2,6 +2,9 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sys
+
+from langchain_core.messages import messages_from_dict, messages_to_dict
 
 from core.logging_utils import configure_logging, get_logger
 
@@ -16,9 +19,10 @@ DEFAULT_SETTINGS = {
     "embedding_model": "nomic-embed-text",
     "rag_top_k": 4,
     "raw_llm": False,
-    "show_summary": True,
+    "show_summary": False,
     "log_level": "INFO",
     "json_logs": False,
+    "session_file": ".cortex_session.json"
 }
 
 
@@ -188,8 +192,57 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Emit plain text logs.",
     )
+
+    output_group.add_argument(
+        "--no-resume",
+        dest="no_resume",
+        action="store_true",
+        help="Disable resuming from the session file.",
+    )
+
+
     return parser.parse_args()
 
+
+def load_session(session_path: str) -> tuple[str, list]:
+    """Loads rolling_summary and message history from the session file."""
+    session_path = Path(session_path)
+    if session_path.exists():
+        try:
+            with open(session_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                rolling_summary = data.get("rolling_summary", "")
+
+                # Convert JSON dicts back into HumanMessage/AIMessage objects
+                serialized_history = data.get("history", [])
+                history = messages_from_dict(serialized_history)
+
+                print(f"[Info] Resumed previous session from {session_path}")
+                return rolling_summary, history
+        except Exception as e:
+            print(f"[Warning] Failed to load session file: {e}", file=sys.stderr)
+    return "", []
+
+def save_session(session_path: str, rolling_summary: str, history: list):
+    """Saves rolling_summary and message history to the session file."""
+    # Ensure workspace directory exists before saving
+    #os.makedirs(workspace_dir, exist_ok=True)
+    session_path = Path(session_path)
+    
+    try:
+
+        # Convert HumanMessage/AIMessage objects into serializable JSON dicts
+        serialized_history = messages_to_dict(history)
+
+        session_data = {
+            "rolling_summary": rolling_summary,
+            "history": serialized_history,
+        }
+        with open(session_path, "w", encoding="utf-8") as f:
+            json.dump(session_data, f, indent=4, ensure_ascii=False)
+        print(f"\n[Info] Session state saved to {session_path}")
+    except Exception as e:
+        print(f"\n[Warning] Failed to save session state: {e}", file=sys.stderr)
 
 def main():
     args = parse_args()
@@ -204,6 +257,7 @@ def main():
         knowledge_dir=str(settings["knowledge_dir"]),
         embedding_model=str(settings["embedding_model"]),
         rag_top_k=int(settings["rag_top_k"]),
+        show_raw_llm=bool(settings["raw_llm"]),
     )
 
     print("--- CortexNode initialized ---")
@@ -219,37 +273,48 @@ def main():
             "planner_model": settings["model_planner"],
             "workspace": settings["workspace"],
             "knowledge_dir": settings["knowledge_dir"],
+            "session_file": settings["session_file"],
             "rag_top_k": settings["rag_top_k"],
         },
     )
 
-    if args.prompt:
-        run_prompt(
-            app,
-            args.prompt,
-            show_raw_llm=bool(settings["raw_llm"]),
-            show_summary=bool(settings["show_summary"]),
-        )
-        return
-
-    print("Interactive mode: type 'exit' to quit.")
     history = []
     rolling_summary = ""
-    while True:
-        user_prompt = input("\nYou> ").strip()
-        if user_prompt.lower() in {"exit", "quit"}:
-            print("Stopping CortexNode.")
-            break
-        if not user_prompt:
-            continue
-        history, rolling_summary = run_prompt(
-            app,
-            user_prompt,
-            history=history,
-            rolling_summary=rolling_summary,
-            show_raw_llm=bool(settings["raw_llm"]),
-            show_summary=bool(settings["show_summary"]),
-        )
+
+    if not args.no_resume:
+        rolling_summary, history = load_session(settings["session_file"])
+
+    try:
+
+        if args.prompt:
+            run_prompt(
+                app,
+                args.prompt,
+                show_summary=bool(settings["show_summary"]),
+            )
+            return
+
+        print("Interactive mode: type 'exit' to quit.")
+        while True:
+            try:
+                user_prompt = input("\nYou> ").strip()
+                if user_prompt.lower() in {"exit", "quit"}:
+                    print("Stopping CortexNode.")
+                    break
+                if not user_prompt:
+                    continue
+                history, rolling_summary = run_prompt(
+                    app,
+                    user_prompt,
+                    history=history,
+                    rolling_summary=rolling_summary,
+                    show_summary=bool(settings["show_summary"]),
+                )
+            except KeyboardInterrupt:
+                print("\nStopping CortexNode.")
+                break
+    finally:
+        save_session(settings["session_file"], rolling_summary, history)
 
 
 if __name__ == "__main__":

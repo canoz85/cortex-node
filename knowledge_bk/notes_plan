@@ -1,0 +1,442 @@
+Plan: Cortex-Node Stronger Capability
+TL;DR: Five parallel capability tracks — context/memory foundation first, then new tools, better multi-step reasoning, real SCADA integration, and an HTTP API server. All local Ollama.
+
+Phase A — Context & Memory Foundation
+(Do first — other phases benefit from this)
+
+Expand rolling summary budget — raise MAX_SUMMARY_CHARS from 1800 → 4000 and MAX_SUMMARY_TURNS 3 → 6 in graph_summarize.py; existing budget-enforcement logic already handles larger sizes correctly
+Cross-session persistence — in main.py, save {rolling_summary, history} to workspace/.cortex_session.json on exit (try/finally); reload on startup if file exists; add --no-resume flag to skip
+Workspace code in RAG — extend rag.py to optionally index workspace/*.py files alongside knowledge; configurable via --index-workspace flag or config key
+Phase B — New Tools (parallel, no phase dependency)
+Web search — create tools/web_ops.py with search_web(query, max_results=5) using DuckDuckGo Lite HTML scraping (no API key); register in tools/__init__.py; wire into graph_nodes.py tool list; add web_search intent pattern to graph_intents.py
+Package install — add install_package(package_name) to exec_ops.py; runs pip install into .venv; add EXEC_PACKAGE_INSTALL_FAILED to error_codes.py
+Vision/image — create tools/vision_ops.py with describe_image(path) calling Ollama multimodal API (llava model); graceful fallback message if model unavailable
+Phase C — Better Reasoning (depends on Phase A state model)
+Sub-task step tracking in state — add subtask_steps: list[dict] and current_step_index: int to state.py; planner emits a structured JSON plan {"steps": [{"id": 1, "action": "...", "tool": "...", "depends_on": []}]}
+Step-aware brain execution — graph_brain.py injects "current step N of M" context into pre-messages; graph_state_machine.py advances current_step_index after each successful tool call and checks completion before routing
+Phase D — SCADA Integration (independent)
+MQTT — create tools/scada_mqtt.py with connect_mqtt(broker, port), subscribe_topic(topic), publish_message(topic, payload) using paho-mqtt
+OPC-UA — create tools/scada_opcua.py with read_opc_node(endpoint, node_id) using python-opcua
+Wire into scada_ops.py — update scada_ops.py to dispatch to real implementations; add SCADA_* error codes; add deps to requirements.txt
+Phase E — API Server Mode (independent)
+Create api_server.py at project root — FastAPI app with:
+POST /chat → {prompt, session_id?, history?} → {response, session_id, summary}
+GET /stream/{session_id} → SSE stream wrapping the existing app.stream() in graph_runner.py
+GET /health → model status + uptime
+In-memory session state dict keyed by session_id
+Add fastapi, uvicorn, sse-starlette to requirements.txt
+Relevant files
+
+graph_summarize.py — Phase A.1
+main.py — Phase A.2
+rag.py — Phase A.3
+tools/web_ops.py (new) — Phase B.4
+exec_ops.py — Phase B.5
+tools/vision_ops.py (new) — Phase B.6
+state.py — Phase C.7
+graph_planner.py, graph_brain.py, graph_state_machine.py — Phase C.8
+tools/scada_mqtt.py, tools/scada_opcua.py (new) — Phase D.9–10
+scada_ops.py, error_codes.py — Phase D.11
+api_server.py (new) — Phase E.12
+requirements.txt — Phase D+E deps
+Verification
+
+Phase A.2: Run agent, exit, check workspace/.cortex_session.json exists; restart and verify summary loaded
+Phase B.4: Prompt "search for python asyncio tutorial" → confirm DuckDuckGo results returned without API key
+Phase B.5: Prompt "install requests" → check .venv/Scripts/pip show requests
+Phase B.6: Prompt "describe the image at workspace/logo.png" → confirm llava response or graceful error
+Phase C: Prompt multi-step task (e.g., "create a Flask app, install flask, run it") → verify step index advances in logs
+Phase D: MQTT smoke test against a local broker (mosquitto); OPC-UA test against UA-Expert demo server
+Phase E: curl POST /chat + curl GET /stream/session-id confirm responses; GET /health returns 200
+Decisions / Exclusions
+
+Cloud APIs excluded per constraint — web search uses DuckDuckGo Lite scraping, no key required
+Test updates excluded per user instruction
+LangGraph's built-in checkpointing is not used — simple JSON session file is lighter and matches existing architecture
+SAP tool migration to ToolResult envelope deferred (separate track from repo memory)
+Further Considerations
+
+SCADA connection config — MQTT broker/OPC-UA endpoint need to be configurable (via --scada-config path.json or config.json stanza). Should they also be runtime-settable via a tool (configure_scada(broker, port)) or config-file only?
+Phase ordering — Phases B, D, E are fully independent and can be handed off in parallel. Phase C is the riskiest (state changes touch the core loop) — do you want C after A is confirmed working, or all at once?
+
+
+import json
+import re
+from langchain_core.messages import SystemMessage, ToolMessage
+from langchain_ollama import ChatOllama
+from core.state import AgentState
+from core.graph_constants import MAX_SUMMARY_CHARS, MAX_SUMMARY_TURNS, RECENT_MESSAGE_WINDOW
+from core.graph_messages import recent_turn_slice, recent_human_turn_messages
+
+
+def rolling_summary_message(summary: str) -> list[SystemMessage]:
+    """Inject rolling summary into context with engineering-aware guidance."""
+    compact = (summary or "").strip()
+    if not compact:
+        return []
+    return [
+        SystemMessage(
+            content=(
+                "Rolling summary from earlier turns (workspace/decision facts confirmed by tool calls are reliable; error facts may be stale):\n"
+                f"{compact}"
+            )
+        )
+    ]
+
+
+def create_summarize_memory_node(*, summarize_llm: ChatOllama):
+    """Create summarize_memory_node for engineering agent with v3 schema."""
+
+    def _empty_payload() -> dict:
+        """Schema v3: facts with categories, pending_steps, turn tracking."""
+        return {
+            "schema_version": 3,
+            "facts": [],
+            "pending_steps": [],
+            "meta": {"updated_at_turn": 0},
+        }
+
+    def _extract_json_object(text: str) -> str | None:
+        """Extract JSON object from LLM response, handling markdown code blocks."""
+        compact = (text or "").strip()
+        if not compact:
+            return None
+        if compact.startswith("```"):
+            compact = re.sub(r"^```(?:json)?\s*", "", compact)
+            compact = re.sub(r"\s*```$", "", compact).strip()
+        if compact.startswith("{") and compact.endswith("}"):
+            return compact
+        first = compact.find("{")
+        last = compact.rfind("}")
+        if first == -1 or last == -1 or last <= first:
+            return None
+        return compact[first : last + 1]
+
+    def _fact_id(text: str, category: str) -> str:
+        """Generate stable fact ID from category and text."""
+        base = f"{category}|{text.strip().lower()}"
+        return str(abs(hash(base)))
+
+    def _normalize_fact(item: object) -> dict | None:
+        """Normalize fact object: string or dict -> fact dict with v3 fields."""
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                return None
+            category = "task"
+            return {
+                "id": _fact_id(text, category),
+                "text": text,
+                "category": category,
+                "confidence": 0.7,
+                "turn": 0,
+            }
+
+        if not isinstance(item, dict):
+            return None
+
+        text = str(item.get("text", "")).strip()
+        if not text:
+            return None
+
+        category = str(item.get("category", "task")).strip() or "task"
+        valid_categories = {"task", "workspace", "decision", "error", "environment", "preference"}
+        if category not in valid_categories:
+            category = "task"
+
+        confidence = item.get("confidence", 0.7)
+        if not isinstance(confidence, (int, float)):
+            confidence = 0.7
+        confidence = max(0.0, min(float(confidence), 1.0))
+
+        turn = item.get("turn", 0)
+        if not isinstance(turn, int) or turn < 0:
+            turn = 0
+
+        fid = str(item.get("id", "")).strip() or _fact_id(text, category)
+        return {
+            "id": fid,
+            "text": text,
+            "category": category,
+            "confidence": confidence,
+            "turn": turn,
+        }
+
+    def _normalize_step(item: object) -> dict | None:
+        """Normalize pending step: string or dict -> step dict."""
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                return None
+            return {"text": text, "status": "open", "priority": "medium"}
+
+        if not isinstance(item, dict):
+            return None
+
+        text = str(item.get("text", "")).strip()
+        if not text:
+            return None
+
+        status = str(item.get("status", "open")).strip() or "open"
+        if status not in {"open", "done", "blocked"}:
+            status = "open"
+        priority = str(item.get("priority", "medium")).strip() or "medium"
+        if priority not in {"low", "medium", "high"}:
+            priority = "medium"
+        return {"text": text, "status": status, "priority": priority}
+
+    def _normalize_summary_payload(payload: dict | None) -> dict:
+        """Normalize full summary payload to v3 schema."""
+        normalized = _empty_payload()
+        if not isinstance(payload, dict):
+            return normalized
+
+        version = payload.get("schema_version", 1)
+        if isinstance(version, int):
+            normalized["schema_version"] = 3
+
+        facts = payload.get("facts", [])
+        if isinstance(facts, list):
+            seen_ids: set[str] = set()
+            for raw in facts:
+                fact = _normalize_fact(raw)
+                if not fact:
+                    continue
+                if fact["id"] in seen_ids:
+                    continue
+                seen_ids.add(fact["id"])
+                normalized["facts"].append(fact)
+
+        ps = payload.get("pending_steps", [])
+        if isinstance(ps, list):
+            seen_steps: set[str] = set()
+            for raw in ps:
+                step = _normalize_step(raw)
+                if not step:
+                    continue
+                key = step["text"].lower()
+                if key in seen_steps:
+                    continue
+                seen_steps.add(key)
+                normalized["pending_steps"].append(step)
+
+        meta = payload.get("meta", {})
+        if isinstance(meta, dict):
+            turn = meta.get("updated_at_turn", 0)
+            if isinstance(turn, int) and turn >= 0:
+                normalized["meta"]["updated_at_turn"] = turn
+
+        return normalized
+
+    def _parse_summary_payload(text: str) -> dict | None:
+        """Parse JSON string to summary payload dict."""
+        blob = _extract_json_object(text)
+        if not blob:
+            return None
+        try:
+            parsed = json.loads(blob)
+        except json.JSONDecodeError:
+            return None
+        return _normalize_summary_payload(parsed)
+
+    def _payload_to_text(payload: dict) -> str:
+        """Serialize payload dict to JSON string."""
+        return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+    def _is_engineering_fact(text: str) -> bool:
+        """Accept engineering facts: workspace, decisions, errors, environment. Reject meta-queries."""
+        t = text.strip()
+        if not t:
+            return False
+        lower = t.lower()
+        meta_blocked = ("what is ", "how to ", "why ", "explain ")
+        if any(lower.startswith(b) for b in meta_blocked):
+            return False
+        return True
+
+    def _merge(existing: dict, candidate: dict, turn_index: int) -> dict:
+        """Merge candidate summary into existing, updating turn and confidence."""
+        out = _normalize_summary_payload(existing)
+        inc = _normalize_summary_payload(candidate)
+
+        by_id = {f["id"]: f for f in out["facts"]}
+        for f in inc["facts"]:
+            if not _is_engineering_fact(f["text"]):
+                continue
+            if f["id"] in by_id:
+                prev = by_id[f["id"]]
+                prev["confidence"] = max(prev["confidence"], f["confidence"])
+                prev["turn"] = max(prev.get("turn", 0), f.get("turn", 0))
+            else:
+                by_id[f["id"]] = f
+
+        out["facts"] = list(by_id.values())
+
+        by_text = {s["text"].lower(): s for s in out["pending_steps"]}
+        for s in inc["pending_steps"]:
+            key = s["text"].lower()
+            by_text[key] = s
+        out["pending_steps"] = list(by_text.values())
+
+        out["schema_version"] = 3
+        out["meta"]["updated_at_turn"] = max(turn_index, out["meta"].get("updated_at_turn", 0))
+        return out
+
+    def _enforce_budget(payload: dict, max_chars: int = MAX_SUMMARY_CHARS) -> str:
+        """Evict facts in priority order: errors → pending_steps → workspace → task → other (protect decision/preference)."""
+        work = _normalize_summary_payload(payload)
+
+        def _emit() -> str:
+            return _payload_to_text(work)
+
+        text = _emit()
+        if len(text) <= max_chars:
+            return text
+
+        # 1. Remove error facts (first to evict, typically stale)
+        work["facts"] = [f for f in work["facts"] if f.get("category") != "error"]
+        if len(_emit()) <= max_chars:
+            return _emit()
+
+        # 2. Remove done pending_steps
+        work["pending_steps"] = [s for s in work["pending_steps"] if s.get("status") != "done"]
+        if len(_emit()) <= max_chars:
+            return _emit()
+
+        # 3. Remove all remaining pending_steps
+        work["pending_steps"] = []
+        if len(_emit()) <= max_chars:
+            return _emit()
+
+        # 4. Trim workspace facts (lowest confidence first)
+        ws_facts = [f for f in work["facts"] if f.get("category") == "workspace"]
+        ws_facts.sort(key=lambda f: (f.get("confidence", 0.0), len(f.get("text", ""))))
+        work["facts"] = [f for f in work["facts"] if f.get("category") != "workspace"]
+        while ws_facts and len(_emit()) > max_chars:
+            ws_facts.pop(0)
+        work["facts"] = work["facts"] + ws_facts
+        if len(_emit()) <= max_chars:
+            return _emit()
+
+        # 5. Trim task facts (lowest confidence first)
+        task_facts = [f for f in work["facts"] if f.get("category") == "task"]
+        task_facts.sort(key=lambda f: (f.get("confidence", 0.0), len(f.get("text", ""))))
+        work["facts"] = [f for f in work["facts"] if f.get("category") != "task"]
+        while task_facts and len(_emit()) > max_chars:
+            task_facts.pop(0)
+        work["facts"] = work["facts"] + task_facts
+        if len(_emit()) <= max_chars:
+            return _emit()
+
+        # 6. Trim environment/other facts (keep decision/preference last)
+        other_facts = [f for f in work["facts"] if f.get("category") not in {"decision", "preference"}]
+        other_facts.sort(key=lambda f: (f.get("confidence", 0.0), len(f.get("text", ""))))
+        work["facts"] = [f for f in work["facts"] if f.get("category") in {"decision", "preference"}]
+        while other_facts and len(_emit()) > max_chars:
+            other_facts.pop(0)
+        work["facts"] = work["facts"] + other_facts
+
+        return _emit()
+
+    def update_rolling_summary(
+        summarize_llm: ChatOllama,
+        existing_summary: str,
+        facts_history: list,
+        tool_history: list,
+        turn_index: int,
+    ) -> str:
+        """Extract and merge engineering facts from user messages and tool results."""
+        if not facts_history and not tool_history and not existing_summary:
+            return ""
+
+        existing_payload = _parse_summary_payload(existing_summary) or _empty_payload()
+
+        def _fmt_messages(msgs: list) -> str:
+            parts = []
+            for m in msgs:
+                role = getattr(m, "type", "unknown")
+                content = str(getattr(m, "content", "") or "").strip()
+                if content:
+                    parts.append(f"[{role}]: {content}")
+            return "\n".join(parts) or "(none)"
+
+        facts_block = _fmt_messages(facts_history)
+        tool_block = _fmt_messages(tool_history)
+
+        summarization_prompt = (
+            "You are an engineering memory updater for a software agent.\n"
+            "Return ONLY a raw JSON object, no markdown, no commentary.\n"
+            "Schema:\n"
+            "{"
+            "\"schema_version\":3,"
+            "\"facts\":[{\"id\":\"...\",\"text\":\"...\",\"category\":\"task|workspace|decision|error|environment|preference\",\"confidence\":0.8,\"turn\":5}],"
+            "\"pending_steps\":[{\"text\":\"...\",\"status\":\"open|done|blocked\",\"priority\":\"low|medium|high\"}],"
+            "\"meta\":{\"updated_at_turn\":0}"
+            "}\n\n"
+            "Category guidelines:\n"
+            " - task: Current goal or what user is building (e.g. 'build a Flask REST API').\n"
+            " - workspace: Confirmed file writes, directory structure (e.g. 'wrote workspace/app.py, 250 lines').\n"
+            " - decision: Tech choices or approach (e.g. 'uses argparse for CLI' or 'chose pytest over unittest').\n"
+            " - error: Failures or bugs (confidence 0.3-0.6, decays over time).\n"
+            " - environment: Installed packages, Python version, tools available.\n"
+            " - preference: User coding style or tool preferences.\n\n"
+            "Extraction rules:\n"
+            "FACT_EVIDENCE (user messages): Extract tasks from stated goals.\n"
+            "TOOL_EVIDENCE (tool results): Extract workspace/error/environment facts from tool outcomes.\n"
+            " - Tool success => workspace/environment facts (confidence 0.9+, recent turn).\n"
+            " - Tool failure => error facts (confidence 0.4-0.6).\n"
+            "PENDING_STEPS (from both): Extract from user's expressed multi-step requests.\n"
+            " - Mark step 'done' if a tool call completed that step.\n"
+            "Confidence policy:\n"
+            " - 0.85-1.0: Explicit user statement or confirmed tool success.\n"
+            " - 0.60-0.84: Strong inferred workspace/decision fact.\n"
+            " - 0.30-0.59: Weak/error facts only (will evict first if over budget).\n"
+            "If no new info found, return Existing Summary unchanged."
+        )
+
+        summary_messages = [
+            SystemMessage(
+                content=(
+                    f"{summarization_prompt}\n\n"
+                    f"Existing summary:\n{_payload_to_text(existing_payload)}\n\n"
+                    f"--- FACT_EVIDENCE (user messages only) ---\n"
+                    f"{facts_block}\n\n"
+                    f"--- TOOL_EVIDENCE (tool results) ---\n"
+                    f"{tool_block}\n\n"
+                    "Output JSON only:"
+                )
+            ),
+        ]
+
+        response = summarize_llm.invoke(summary_messages)
+        text = str(getattr(response, "content", "") or "").strip()
+
+        if not text:
+            return _enforce_budget(existing_payload)
+
+        candidate = _parse_summary_payload(text)
+        if candidate is None:
+            return _enforce_budget(existing_payload)
+
+        merged = _merge(existing_payload, candidate, turn_index=turn_index)
+        return _enforce_budget(merged)
+
+    def summarize_memory_node(state: AgentState):
+        """Extract facts from user messages and tool results, update rolling summary."""
+        history = state.get("messages", [])
+        facts_history = recent_human_turn_messages(history, max_turns=MAX_SUMMARY_TURNS)
+        tool_history = [m for m in recent_turn_slice(history, max_turns=MAX_SUMMARY_TURNS, include_ai=False)
+                        if isinstance(m, ToolMessage)]
+        previous_summary = state.get("rolling_summary", "")
+        turn_index = sum(1 for m in history if getattr(m, "type", "") == "human")
+
+        updated_summary = update_rolling_summary(
+            summarize_llm=summarize_llm,
+            existing_summary=previous_summary,
+            facts_history=facts_history,
+            tool_history=tool_history,
+            turn_index=turn_index,
+        )
+        return {"rolling_summary": updated_summary}
+
+    return summarize_memory_node

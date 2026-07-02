@@ -15,17 +15,12 @@ from core.graph_pseudo_tools import (
 )
 
 from core.graph_constants import ANSI_BLUE, ANSI_GREEN, ANSI_ITALIC, ANSI_RED, ANSI_RESET, ANSI_YELLOW
-from core.graph_context import retrieval_message
 from core.graph_filegen_policy import last_tool_has_args_nameerror, last_tool_missing_required_args, last_tool_stderr
-from core.graph_intents import preferred_file_tool, preferred_info_tool
-from core.graph_messages import current_turn_messages, is_effectively_empty_response, latest_human_message, latest_human_message_str, normalize_message_content
+from core.graph_messages import current_turn_messages, is_effectively_empty_response, latest_human_message, normalize_message_content
 
-from core.graph_node_helpers import (
-    planner_execution_brief,
-    response_with_usage,
-)
+from core.graph_node_helpers import response_with_usage
 
-from core.graph_response_formatters import format_action_completion_response, format_preferred_tool_response
+from core.graph_response_formatters import format_action_completion_response, format_tool_result_response
 from core.graph_state_machine import (
     decide_action_recovery,
     decide_brain_execution,
@@ -34,12 +29,8 @@ from core.graph_state_machine import (
     should_retry_after_empty_response,
 )
 from core.graph_summarize import rolling_summary_message
-from core.graph_tool_events import (
-    message_repeats_signature,
-    parse_tool_signature,
-)
+from core.graph_tool_events import message_repeats_signature
 
-from core.rag import WorkspaceRAG
 from core.state import AgentState
 
 def _print_raw_llm_request_response(color, messages: list[BaseMessage], raw_text: str) -> None:
@@ -69,10 +60,12 @@ def _invoke_with_trace(
     *,
     llm: ChatOllama,
     messages: list[BaseMessage],
+    show_raw_llm: bool = False,
     color: str,
 ) -> AIMessage:
     response = llm.invoke(messages)
-    _print_raw_llm_request_response(color=color, messages=messages, raw_text=response.content)
+    if show_raw_llm:
+        _print_raw_llm_request_response(color=color, messages=messages, raw_text=response.content)
     return response
 
 def create_brain_node(
@@ -82,6 +75,7 @@ def create_brain_node(
     agent_system_prompt: str,
     casual_system_prompt: str,
     tool_name_set: set[str],
+    show_raw_llm: bool,
 ):
 
     
@@ -150,6 +144,7 @@ def create_brain_node(
             response = _invoke_with_trace(
                 llm=llm,
                 messages=[*pre_messages, _empty_response_retry_prompt()],
+                show_raw_llm=show_raw_llm,
                 color=ANSI_GREEN,
             )
 
@@ -208,6 +203,7 @@ def create_brain_node(
         corrected_response = _invoke_with_trace(
             llm=llm,
             messages=[*pre_messages, response, _repeated_signature_correction_prompt(last_tool_signature, repeated_signature_guard_decision.repeat_reason)],
+            show_raw_llm=show_raw_llm,
             color=ANSI_YELLOW,
         )
 
@@ -225,13 +221,14 @@ def create_brain_node(
             final_response = _invoke_with_trace(
                 llm=llm,
                 messages=[*pre_messages, corrected_response, _repeated_success_final_answer_prompt(last_tool_signature)],
+                show_raw_llm=show_raw_llm,
                 color=ANSI_GREEN,
             )
 
             if getattr(final_response, "tool_calls", None):
                 last_tool_output = state.get("last_tool_output", "")
                 if isinstance(last_tool_output, dict):
-                    return AIMessage(content=format_preferred_tool_response(last_tool_output))
+                    return AIMessage(content=format_tool_result_response(last_tool_output))
                 return AIMessage(
                     content=(
                         "I already ran this tool call successfully and will not repeat it in this turn. "
@@ -274,6 +271,7 @@ def create_brain_node(
                     "Do not restate raw tool output verbatim unless it is the final user-facing answer."
                 )
             )],
+            show_raw_llm=show_raw_llm,
             color=ANSI_RED,
         )
 
@@ -319,7 +317,6 @@ def create_brain_node(
 
         return context_messages
     
-
     def _build_runtime_guidance_messages(
         *,
         last_tool_success: object,
@@ -450,6 +447,7 @@ def create_brain_node(
         response = _invoke_with_trace(
             llm=llm,
             messages=[*pre_messages],
+            show_raw_llm=show_raw_llm,
             color=ANSI_BLUE,
         )
 

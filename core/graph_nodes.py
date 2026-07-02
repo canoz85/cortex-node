@@ -145,6 +145,7 @@ def create_graph_nodes(
     casual_system_prompt: str,
     sap_system_prompt: str | None,
     tool_name_set: set[str],
+    show_raw_llm: bool,
 ):
     planner_node = create_planner_node(
         planner_llm=planner_llm,
@@ -163,6 +164,7 @@ def create_graph_nodes(
         agent_system_prompt=agent_system_prompt,
         casual_system_prompt=casual_system_prompt,
         tool_name_set=tool_name_set,
+        show_raw_llm=show_raw_llm,
     )
 
     return planner_node, brain_node, capture_tool_output_node, route_after_brain, summarize_memory_node

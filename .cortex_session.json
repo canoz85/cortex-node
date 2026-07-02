@@ -1,0 +1,134 @@
+{
+    "rolling_summary": "{\"schema_version\":2,\"facts\":[{\"id\":\"user_name\",\"text\":\"my name is can\",\"category\":\"profile\",\"confidence\":0.9},{\"id\":\"birthplace\",\"text\":\"i was born at Mersin\",\"category\":\"profile\",\"confidence\":0.9}],\"open_questions\":[{\"text\":\"what is my name\",\"status\":\"resolved\",\"priority\":\"medium\"}],\"meta\":{\"updated_at_turn\":3}}",
+    "history": [
+        {
+            "type": "human",
+            "data": {
+                "content": "my name is can",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "human",
+                "name": null,
+                "id": "fdfa4612-896b-47c1-a3d9-f5401505e112"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "Nice to meet you, Can! I'm CortexNode. How can I help you with your projects or coding questions today?",
+                "additional_kwargs": {},
+                "response_metadata": {
+                    "model": "gemma4:12b",
+                    "created_at": "2026-06-30T20:25:14.5911354Z",
+                    "done": true,
+                    "done_reason": "stop",
+                    "total_duration": 6578237600,
+                    "load_duration": 4651189900,
+                    "prompt_eval_count": 59,
+                    "prompt_eval_duration": 107205000,
+                    "eval_count": 101,
+                    "eval_duration": 1809708000,
+                    "logprobs": null,
+                    "model_name": "gemma4:12b",
+                    "model_provider": "ollama"
+                },
+                "type": "ai",
+                "name": null,
+                "id": "lc_run--019f1a34-fcaa-7550-9579-0d46537cc744-0",
+                "tool_calls": [],
+                "invalid_tool_calls": [],
+                "usage_metadata": {
+                    "input_tokens": 59,
+                    "output_tokens": 101,
+                    "total_tokens": 160
+                }
+            }
+        },
+        {
+            "type": "human",
+            "data": {
+                "content": "what is my name",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "human",
+                "name": null,
+                "id": "1eb91590-a59f-41a3-b199-a3e88867a6ef"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "Your name is Can! How can I help you today?",
+                "additional_kwargs": {},
+                "response_metadata": {
+                    "model": "gemma4:12b",
+                    "created_at": "2026-06-30T20:25:52.2383081Z",
+                    "done": true,
+                    "done_reason": "stop",
+                    "total_duration": 6935075400,
+                    "load_duration": 5040154000,
+                    "prompt_eval_count": 136,
+                    "prompt_eval_duration": 128585000,
+                    "eval_count": 99,
+                    "eval_duration": 1752227000,
+                    "logprobs": null,
+                    "model_name": "gemma4:12b",
+                    "model_provider": "ollama"
+                },
+                "type": "ai",
+                "name": null,
+                "id": "lc_run--019f1a35-8e55-7803-91d2-86dd9495545e-0",
+                "tool_calls": [],
+                "invalid_tool_calls": [],
+                "usage_metadata": {
+                    "input_tokens": 136,
+                    "output_tokens": 99,
+                    "total_tokens": 235
+                }
+            }
+        },
+        {
+            "type": "human",
+            "data": {
+                "content": "i was born at Mersin",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "human",
+                "name": null,
+                "id": "cbdbcdbe-9c5f-4639-80a1-09206fbf4e98"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "That's interesting! Mersin is a beautiful coastal city in Turkey. Do you still live in that area, or have you moved elsewhere?",
+                "additional_kwargs": {},
+                "response_metadata": {
+                    "model": "gemma4:12b",
+                    "created_at": "2026-06-30T20:26:19.0596826Z",
+                    "done": true,
+                    "done_reason": "stop",
+                    "total_duration": 5749660300,
+                    "load_duration": 1186926800,
+                    "prompt_eval_count": 153,
+                    "prompt_eval_duration": 118846000,
+                    "eval_count": 255,
+                    "eval_duration": 4318753000,
+                    "logprobs": null,
+                    "model_name": "gemma4:12b",
+                    "model_provider": "ollama"
+                },
+                "type": "ai",
+                "name": null,
+                "id": "lc_run--019f1a35-fbbb-73a2-b705-3292b6a20de0-0",
+                "tool_calls": [],
+                "invalid_tool_calls": [],
+                "usage_metadata": {
+                    "input_tokens": 153,
+                    "output_tokens": 255,
+                    "total_tokens": 408
+                }
+            }
+        }
+    ]
+}

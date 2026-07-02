@@ -90,12 +90,6 @@ def format_tool_result_response(tool_result: dict) -> str:
     message = str(tool_result.get("message", "") or "")
     return message or "Tool completed successfully."
 
-
-def format_preferred_tool_response(tool_result: dict) -> str:
-    """Backwards-compatible alias for shape-driven tool formatting."""
-    return format_tool_result_response(tool_result)
-
-
 def format_tool_call_preview(message: AIMessage) -> str:
     """Return a human-readable preview for AI messages that contain tool calls."""
     tool_calls = getattr(message, "tool_calls", None) or []

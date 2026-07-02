@@ -18,6 +18,7 @@ from tools.info_ops import get_info_tools
 from tools.rag_ops import get_rag_tools
 from tools.sap_ops import get_sap_tools
 from tools.scada_ops import get_scada_tools
+from tools.vision_ops import get_vision_tools
 
 
 ToolListFactory = Callable[[str, str, WorkspaceRAG, str], list[Any]]
@@ -42,6 +43,7 @@ def _default_tool_list_factory(workspace_root: str, knowledge_root: str, rag_ser
         *get_rag_tools(rag_service),
         *get_sap_tools(workspace_root),
         *get_scada_tools(workspace_root),
+        *get_vision_tools(workspace_root),
     ]
 
 
@@ -71,6 +73,7 @@ def build_app(
     graph_nodes_factory: Callable[..., tuple[Any, Any, Any, Any]] = create_graph_nodes,
     tool_node_factory: Callable[[list[Any]], Any] = ToolNode,
     project_root: Path | None = None,
+    show_raw_llm: bool = False,
 ) -> CompiledStateGraph:
     app_root = project_root or Path(__file__).resolve().parents[1]
     workspace_root = Path(workspace_dir).resolve()
@@ -110,6 +113,7 @@ def build_app(
         casual_system_prompt=casual_system_prompt,
         sap_system_prompt=sap_system_prompt,
         tool_name_set=tool_name_set,
+        show_raw_llm=show_raw_llm,
     )
 
     workflow = StateGraph(AgentState)

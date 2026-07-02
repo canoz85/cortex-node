@@ -1,7 +1,7 @@
 from langchain_core.messages import ToolMessage
 
 from core.graph_messages import normalize_message_content
-from core.graph_response_formatters import format_preferred_tool_response
+from core.graph_response_formatters import format_tool_result_response
 from core.graph_tool_events import extract_tool_signature
 from core.state import AgentState
 from core.tool_output import parse_tool_result, unwrap_tool_output
@@ -10,7 +10,7 @@ from core.tool_output import parse_tool_result, unwrap_tool_output
 def create_capture_tool_output_node():
     def _render_tool_output(unwrapped: object, raw_content: str) -> str:
         if isinstance(unwrapped, dict):
-            rendered = format_preferred_tool_response(unwrapped).strip()
+            rendered = format_tool_result_response(unwrapped).strip()
             return rendered or str(unwrapped)
         if isinstance(unwrapped, list):
             return str(unwrapped)

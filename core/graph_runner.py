@@ -8,7 +8,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage
 
 from core.error_codes import TOOL_UNSTRUCTURED_RESULT
-from core.graph_constants import ANSI_BLUE, ANSI_GREEN, ANSI_ITALIC, ANSI_RED, ANSI_RESET, MAX_REASONING_STEPS
+from core.graph_constants import ANSI_BLUE, ANSI_CYAN, ANSI_GREEN, ANSI_ITALIC, ANSI_LIGHT_BLUE, ANSI_RED, ANSI_RESET, MAX_REASONING_STEPS
 from core.graph_messages import normalize_message_content
 from core.graph_response_formatters import format_tool_call_preview
 from core.logging_utils import get_logger, log_event
@@ -122,7 +122,7 @@ def _render_non_tool_text(*, raw_content: str) -> bool:
     unwrapped = unwrap_tool_output(raw_content)
     if isinstance(unwrapped, dict) and ("success" in unwrapped or "message" in unwrapped):
         # Use existing formatter logic if needed:
-        # print(format_preferred_tool_response(unwrapped))
+        # print(format_tool_result_response(unwrapped))
         summary, _ = ToolResult.split_tool_output(raw_content)
         print(summary or str(unwrapped))
         return True
@@ -196,44 +196,35 @@ def _build_event_frame(
     )
 
 
-def _render_frame(*, frame: EventFrame, show_raw_llm: bool) -> None:
+def _render_frame(*, frame: EventFrame) -> None:
+
+    if frame.message_kind == "none":
+        return
+    
+    color = ANSI_GREEN if frame.node == "planner" else ANSI_CYAN
+
     if frame.message_kind == "planner_plan":
         header = "[planner]"
         if frame.route:
             header = f"[planner:{frame.route}]"
-        print(f"\n{ANSI_GREEN}{header}{ANSI_RESET}")
+        print(f"\n{color}{header}{ANSI_RESET}")
         print(frame.message_text)
-        if show_raw_llm and frame.message_text:
-            _print_raw_llm_response(frame.message_text)
         return
 
-    if frame.message_kind == "none":
-        return
-
-    print(f"\n[{frame.node}]")
+    print(f"\n{color}[{frame.node}]{ANSI_RESET}")
 
     if frame.message_kind == "tool_call":
-        if (
-            show_raw_llm
-            and isinstance(frame.message, AIMessage)
-            and _is_llm_generated_message(frame.message)
-        ):
-            _print_raw_llm_response(_raw_ai_message_payload(frame.message))
         print(format_tool_call_preview(frame.message))
         return
 
     if frame.message_kind == "tool_result":
         _render_non_tool_text(raw_content=frame.message_text)
         return
+    
+    color = ANSI_LIGHT_BLUE
 
     # ai_text
-    if (
-        show_raw_llm
-        and isinstance(frame.message, AIMessage)
-        and _is_llm_generated_message(frame.message)
-    ):
-        _print_raw_llm_response(_raw_ai_message_payload(frame.message))
-    print(frame.message_text)
+    print(f"{color}{frame.message_text}{ANSI_RESET}")
 
 
 def _log_tool_calls(*, run_id: str, node_name: str, tool_calls: list[dict[str, Any]]) -> None:
@@ -346,7 +337,6 @@ def run_prompt(
     prompt: str,
     history: list | None = None,
     rolling_summary: str = "",
-    show_raw_llm: bool = False,
     show_summary: bool = False,
 ) -> tuple[list, str]:
     prior_messages = history or []
@@ -401,7 +391,7 @@ def run_prompt(
                 latest_summary=metrics.latest_summary,
             )
 
-            _render_frame(frame=frame, show_raw_llm=show_raw_llm)
+            _render_frame(frame=frame)
             _update_metrics_from_frame(frame=frame, metrics=metrics)
             _log_frame(frame=frame, run_id=run_id, prev_node=prev_node)
 

@@ -220,7 +220,7 @@ powershell -ExecutionPolicy Bypass -File run-checks.ps1 -RunEvaluation -Evaluati
 1. `main.py` parses CLI args and builds the LangGraph app.
 2. `core/graph.py` builds a small RAG index from `knowledge/` and injects retrieved context into the planner and brain prompts.
 3. The `planner` node analyzes the prompt and creates a step-by-step plan **without** taking actions.
-4. The `brain` node executes the plan by generating tool calls, but now does so through smaller guardrail helpers for fast-path routing, file-generation recovery, response recovery, and action enforcement.
+4. The `brain` node in `core/graph_brain.py` executes the plan by generating tool calls and delegates branching decisions to `core/graph_state_machine.py` for execution policy, action recovery, and repeated-signature enforcement.
 5. If tool calls are requested, execution routes through `ToolNode`.
 6. Tool outputs are normalized and fed back into state.
 7. Loop exits when no tool call remains or step limit is reached (max 24 steps per prompt, after planning).
@@ -263,6 +263,7 @@ cortex-node/
 |-- requirements.txt
 |-- core/
 |   |-- __init__.py
+|   |-- error_codes.py
 |   |-- graph_capture.py
 |   |-- graph_constants.py
 |   |-- graph_context.py
@@ -276,8 +277,10 @@ cortex-node/
 |   |-- graph_response_formatters.py
 |   |-- graph_routing.py
 |   |-- graph_runner.py
+|   |-- graph_state_machine.py
 |   |-- graph_tool_events.py
 |   |-- graph.py
+|   |-- graph_brain.py
 |   |-- logging_utils.py
 |   |-- models.py
 |   |-- rag.py
@@ -327,6 +330,9 @@ cortex-node/
 
 - `core/graph.py`: graph wiring, model setup, and app construction.
 - `core/graph_nodes.py`: planner/brain node orchestration and execution guardrails.
+- `core/graph_brain.py`: route-aware brain execution, response recovery, and repeated-signature enforcement.
+- `core/graph_state_machine.py`: typed decision layer for routing, action recovery, retries, and signature policy.
+- `core/error_codes.py`: canonical tool error codes used for structured failures and observability.
 - `core/graph_filegen_policy.py`: deterministic file-generation verification and repair helpers.
 - `core/graph_messages.py` and `core/graph_tool_events.py`: message normalization and tool-event extraction.
 - `core/graph_response_formatters.py`: deterministic completion and info-tool response formatting.
@@ -336,9 +342,9 @@ cortex-node/
 ## Notes
 
 - File and execution tools enforce sandbox boundaries relative to the selected workspace.
-- `brain_node` in `core/graph_nodes.py` has been decomposed into smaller helpers to make guardrail behavior easier to test and evolve.
+- Brain execution is split across `core/graph_brain.py` (orchestration and LLM invocation) and `core/graph_state_machine.py` (pure decision functions such as `decide_brain_execution`, `decide_action_recovery`, and `decide_repeated_signature`).
 - `core/rag.py` caches search results per query and `top_k`, and `refresh()` clears that cache when the knowledge base changes.
-- `core/graph_runner.py` logs run-level observability counters on completion, including node updates, tool-call counts, tool-result counts, duration, and stop reason.
+- `core/graph_runner.py` logs run-level observability counters on completion, including node updates, tool-call counts, tool-result counts, duration, stop reason, and `error_counts` grouped by error code.
 - Git tools execute in the selected workspace directory and return stdout/stderr/exit code.
 - `current_time` is the preferred path for time/date questions to avoid guessed values.
 - `solve_math` handles deterministic arithmetic and proportional math; proportional conversions are premise-based and reuse user-stated relations within the session.
