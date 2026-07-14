@@ -1,0 +1,299 @@
+# CortexNode Architecture Design Task
+
+You are a senior software architect.
+
+Help me design the execution contract for CortexNode, a local-first AI software engineering agent built with LangGraph.
+
+Do NOT write implementation code first.
+
+Your task is to design the architecture and state contracts.
+
+---
+
+## Goal
+
+I want a deterministic execution engine where each node has exactly one responsibility.
+
+Current workflow:
+
+User
+→ Planner
+→ Controller
+→ Brain
+→ Tool (loop)
+→ Controller
+→ Brain
+→ ...
+→ Summary
+
+The Controller owns the execution loop.
+
+The Brain does NOT.
+
+---
+
+## Design Principles
+
+Follow these principles:
+
+* Single Responsibility Principle
+* Deterministic execution
+* Replayable execution
+* Checkpoint-friendly state
+* LLMs should not own workflow control
+* Every node communicates using structured state
+* Nodes should be independently testable
+* Future Redis checkpointing should require zero architecture changes
+* Future SCADA tools should plug into the same execution model
+
+---
+
+## Node Responsibilities
+
+### Planner
+
+Planner owns:
+
+* understand user intent
+* break task into executable steps
+* assign priorities
+* define dependencies
+* decide when replanning is required
+
+Planner MUST NOT:
+
+* execute tools
+* inspect tool outputs directly
+* mutate execution state
+
+Planner output should be an ExecutionPlan.
+
+---
+
+### Controller
+
+Controller owns:
+
+* execution state
+* current step
+* retries
+* iteration count
+* timeout handling
+* checkpoint updates
+* selecting next step
+* stopping conditions
+* invoking Brain
+
+Controller MUST NOT:
+
+* reason
+* call LLMs for planning
+* execute tools directly
+
+---
+
+### Brain
+
+Brain owns:
+
+* executing ONE execution step
+* deciding whether a tool is required
+* interpreting tool observations
+* validating execution success
+* reporting structured results
+
+Brain MUST NOT:
+
+* change the execution plan
+* reorder steps
+* create new goals
+* own the execution loop
+
+If Brain believes replanning is needed it should return a structured ReplanRequest.
+
+---
+
+### Tool
+
+Tools are deterministic.
+
+Input:
+
+ToolRequest
+
+Output:
+
+ToolResult
+
+No reasoning.
+
+No planning.
+
+---
+
+### Summary
+
+Consumes execution logs only.
+
+Does not inspect planner reasoning.
+
+Does not inspect Brain thoughts.
+
+Produces final report.
+
+---
+
+## Design the State Model
+
+Design immutable state contracts for:
+
+ExecutionState
+
+ExecutionPlan
+
+ExecutionStep
+
+ExecutionContext
+
+BrainInput
+
+BrainResult
+
+ToolRequest
+
+ToolResult
+
+ControllerDecision
+
+ReplanRequest
+
+ExecutionSummary
+
+For each state describe:
+
+* purpose
+* owner
+* producer
+* consumer
+* required fields
+* optional fields
+
+---
+
+## Define State Ownership
+
+For every field answer:
+
+Who creates it?
+
+Who may update it?
+
+Who may read it?
+
+No shared mutable ownership.
+
+---
+
+## Define Node Contracts
+
+For every node provide:
+
+Inputs
+
+Outputs
+
+Preconditions
+
+Postconditions
+
+Failure modes
+
+Recovery strategy
+
+---
+
+## Execution Lifecycle
+
+Describe the lifecycle:
+
+Planner
+↓
+
+Controller
+↓
+
+Brain
+↓
+
+Tool
+↓
+
+Brain
+↓
+
+Controller
+
+Until completion.
+
+Explain exactly what state changes after every transition.
+
+---
+
+## Replanning
+
+Design how replanning works.
+
+Brain cannot modify plans.
+
+Instead Brain returns:
+
+ReplanRequest
+
+Controller forwards it to Planner.
+
+Planner returns a new ExecutionPlan.
+
+Controller resumes execution.
+
+---
+
+## Redis Checkpoint Compatibility
+
+Design the state so Controller can checkpoint after every transition.
+
+The checkpoint should contain everything required to resume execution without rerunning completed work.
+
+---
+
+## Deliverables
+
+Produce:
+
+1. Architecture diagram
+2. Responsibility matrix
+3. State contract diagram
+4. Sequence diagram
+5. Recommended class hierarchy
+6. Suggested LangGraph node layout
+7. Future extension points (Memory, Redis, SCADA, MCP)
+
+Focus on architecture quality rather than implementation.
+
+
+
+I mapped the current architecture before planning. The live control path is still the existing planner → brain → tools → capture → brain loop in graph.py, and the shared mutable state is concentrated in state.py. The main refactor pressure points are graph_planner.py, graph_brain.py, graph_state_machine.py, and the session resume path in main.py.
+
+Plan
+
+Baseline the current execution model and freeze the refactor boundary. Map which node owns control flow, which state fields each node reads or writes, and where manual persistence happens now. This anchors the new contract to the actual runtime behavior instead of a theoretical redesign.
+Define explicit immutable contracts for the new execution model. Design ExecutionState, ExecutionPlan, ExecutionStep, ExecutionContext, BrainInput, BrainResult, ToolRequest, ToolResult, ControllerDecision, ReplanRequest, and ExecutionSummary, with clear ownership, producer, consumer, required fields, and optional fields. This is the core architecture work.
+Redesign node responsibilities around a controller-owned loop. Planner should only create or revise plans, Controller should own iteration/retries/checkpoints/stopping conditions, Brain should execute exactly one step and emit structured results or a replan request, tools should stay deterministic, and Summary should consume logs only. This removes workflow control from the LLM.
+Specify transition rules, replanning, and checkpoint semantics. Document exactly what changes after each transition in Planner → Controller → Brain → Tool → Brain → Controller, and define how a replan preserves completed work without rerunning it. This is the part that makes Redis checkpointing feasible later without changing the architecture.
+Re-layout the LangGraph graph and update the verification surface. Decide whether the Controller becomes a first-class node or a thin orchestration layer, then align graph_nodes.py, graph.py, graph_capture.py, and graph_runner.py to the new contract. Add focused tests in test_graph.py, test_graph_planner.py, test_graph_nodes.py, and test_graph_runner.py for ownership, replanning, and replay behavior.
+Produce the design deliverables as the final output of the planning phase. The expected package is an architecture diagram, responsibility matrix, state contract diagram, sequence diagram, recommended class hierarchy, suggested LangGraph node layout, and future extension points for Memory, Redis, SCADA, and MCP. The source requirement is the note in notes_improvement.
+Verification
+
+Validate the plan against the current code paths in graph.py and state.py to ensure every proposed contract has a real owner.
+Use focused pytest slices around graph planning, node transitions, and runner behavior once the implementation phase starts.
+Run get_errors on the touched graph and state files after the design is translated into code to catch contract mismatches early.
+I saved the detailed version of this plan in session memory so we can refine it without losing the architecture decisions. If you want, the next step can be to tighten this into a formal design spec or start implementation after approval.

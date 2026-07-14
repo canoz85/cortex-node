@@ -402,6 +402,7 @@ def finalize_action_response(response: AIMessage, allowed_tool_names: set[str]) 
 
 
 # ****************************
+#todo: not valid for coder model, start debugging here..
 
 def _normalize_existing_tool_calls(message: AIMessage, allowed_tool_names: set[str]) -> AIMessage | None:
     tool_calls = getattr(message, "tool_calls", None) or []

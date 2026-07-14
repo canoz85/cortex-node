@@ -14,11 +14,11 @@ from core.graph import build_app, run_prompt
 DEFAULT_SETTINGS = {
     "workspace": "workspace",
     "knowledge_dir": "knowledge",
-    "model": "gemma4:12b", #"qwen2.5-coder:14b", # 
+    "model": "qwen2.5-coder:14b", #"gemma4:12b", #"qwen2.5-coder:14b", # 
     "model_planner": "gpt-oss:20b", # qwen2.5:7b
     "embedding_model": "nomic-embed-text",
     "rag_top_k": 4,
-    "raw_llm": False,
+    "raw_llm": True,
     "show_summary": False,
     "log_level": "INFO",
     "json_logs": False,
