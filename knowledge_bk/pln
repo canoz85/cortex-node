@@ -1,0 +1,275 @@
+**CortexNode Architecture Document**
+
+This is the polished target design for the deterministic execution contract, grounded in the current code path in core/graph.py, core/state.py, core/graph_planner.py, core/graph_brain.py, and the source requirements in knowledge_bk/notes_improvement.
+
+### Intent
+CortexNode needs a deterministic execution engine for local-first AI software engineering tasks. The architecture must keep workflow control out of the LLM, preserve replayability, and make checkpointing a first-class property of the execution model.
+
+### Architecture
+Planner creates the plan. Controller owns execution. Brain executes one step. Tool is deterministic. Summary consumes logs only.
+
+```mermaid
+flowchart LR
+    U[User] --> P[Planner]
+    P --> C[Controller]
+    C --> B[Brain]
+    B --> T[Tool]
+    T --> B
+    B --> C
+    C -->|complete| S[Summary]
+    B -->|replan request| C
+    C -->|forward replan| P
+```
+
+### Design Principles
+The design is based on these rules:
+
+- Single responsibility per node
+- Deterministic transitions
+- Replayable execution from checkpoint
+- Structured state instead of implicit conversational control
+- One writer per field
+- No shared mutable ownership
+- Future Redis checkpointing should not change the architecture
+- Future SCADA tools should use the same execution contract as local tools
+
+### State Ownership Matrix
+Each field has exactly one writer. Reads may be shared, but mutation may not be shared.
+
+| State Item | Created by | Updated by | Read by | Notes |
+|---|---|---|---|---|
+| ExecutionState | Controller | Controller | Planner, Brain, Summary | Authoritative runtime snapshot |
+| ExecutionPlan | Planner | Planner | Controller, Brain, Summary | Immutable once accepted unless replanned |
+| ExecutionStep | Planner | Planner | Controller, Brain, Summary | Step definition should remain stable |
+| ExecutionContext | Controller | Controller | Brain, Tool, Summary | Stable runtime and environment inputs |
+| BrainInput | Controller | Controller | Brain | Derived payload for one active step |
+| BrainResult | Brain | Brain | Controller | Step outcome and validation result |
+| ToolRequest | Brain | Brain | Tool, Controller | Deterministic tool envelope |
+| ToolResult | Tool | Tool | Brain, Controller, Summary | Deterministic tool output envelope |
+| ControllerDecision | Controller | Controller | Brain, Summary | Next action and stop reason |
+| ReplanRequest | Brain | Brain | Controller, Planner | Structured replanning trigger |
+| ExecutionSummary | Summary | Summary | User, Controller | Final narrative only |
+
+Ownership summary:
+
+- Planner owns plan creation and revision metadata.
+- Controller owns progress, retries, iteration count, checkpoint state, and the resume cursor.
+- Brain owns step-local reasoning output and replanning requests.
+- Tool owns deterministic result payloads.
+- Summary owns the final execution narrative only.
+
+### Node Contracts
+Each node has explicit inputs, outputs, preconditions, postconditions, failure modes, and recovery strategy.
+
+Planner:
+- Inputs: user intent, execution context, optional replan trigger.
+- Outputs: ExecutionPlan.
+- Preconditions: request is structurally valid.
+- Postconditions: plan is ordered, checkpoint-safe, and accepted by Controller.
+- Failure modes: ambiguous intent, unsupported task shape, invalid plan output.
+- Recovery strategy: return a clarification state or a structured replanning-friendly plan.
+
+Controller:
+- Inputs: current ExecutionState and latest BrainResult or ToolResult.
+- Outputs: ControllerDecision and updated ExecutionState.
+- Preconditions: an accepted plan exists, or a replan has been requested.
+- Postconditions: one execution transition is committed and checkpointed.
+- Failure modes: timeout, stale plan revision, exceeded retries, missing completion signal.
+- Recovery strategy: resume from checkpoint, trigger replan, or terminate with a structured stop reason.
+
+Brain:
+- Inputs: one ExecutionStep, relevant context, and the current execution record.
+- Outputs: BrainResult or ReplanRequest.
+- Preconditions: the selected step is active and the context is stable.
+- Postconditions: step outcome is validated or replanning is requested.
+- Failure modes: invalid tool usage, empty response, failed validation, inability to complete step.
+- Recovery strategy: emit a structured failure or a structured replan request.
+
+Tool:
+- Inputs: ToolRequest.
+- Outputs: ToolResult.
+- Preconditions: request is deterministic and sandbox-safe.
+- Postconditions: requested operation is complete and serialized.
+- Failure modes: validation error, sandbox error, tool runtime failure.
+- Recovery strategy: return a structured failure result; never reason or retry internally.
+
+Summary:
+- Inputs: execution logs, accepted plan, completed step history, final outcomes.
+- Outputs: ExecutionSummary.
+- Preconditions: execution reached a terminal or handoff state.
+- Postconditions: final report is complete and independent of internal reasoning traces.
+- Failure modes: incomplete execution log, missing terminal state.
+- Recovery strategy: summarize what is known and explicitly surface missing information.
+
+### Lifecycle and Transitions
+The lifecycle is Planner → Controller → Brain → Tool → Brain → Controller.
+
+Planner → Controller:
+- Planner creates the accepted ExecutionPlan.
+- Controller initializes execution state, the resume cursor, counters, and checkpoint metadata.
+- The plan becomes the authoritative execution structure.
+
+Controller → Brain:
+- Controller selects the next active step and builds BrainInput.
+- Only the current step and stable context are exposed.
+- Future step ordering is not mutable here.
+
+Brain → Tool:
+- Brain emits a deterministic ToolRequest if a tool is needed.
+- Tool execution is limited to the requested operation.
+- ToolResult is captured without interpretation.
+
+Tool → Brain:
+- Brain consumes ToolResult and validates step completion.
+- Brain may emit a successful result or a ReplanRequest.
+- Completed step state becomes immutable.
+
+Brain → Controller:
+- Controller records the BrainResult, advances the resume cursor, increments retries or iteration counters as needed, and writes a checkpoint.
+- If a ReplanRequest exists, Controller forwards it to Planner while preserving completed work.
+
+### Replanning
+Replanning is controller-mediated and structured.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant P as Planner
+    participant C as Controller
+    participant B as Brain
+    participant T as Tool
+
+    U->>P: request
+    P->>C: ExecutionPlan
+    C->>B: BrainInput for current step
+    B->>T: ToolRequest
+    T->>B: ToolResult
+    B->>C: BrainResult or ReplanRequest
+    alt ReplanRequest
+        C->>P: ReplanRequest
+        P->>C: New ExecutionPlan
+        C->>B: Resume at preserved cursor
+    else Success
+        C->>C: checkpoint + advance
+    end
+```
+
+Replanning rules:
+- Replanning is allowed only when Brain cannot safely complete the current step or detects plan invalidation.
+- Completed steps remain immutable and are not rerun unless explicitly invalidated by policy.
+- Controller preserves completed work, execution logs, and stable context.
+- The new plan must record revision lineage so replay is auditable.
+
+### Checkpoint Contract
+Checkpointing occurs after every meaningful transition.
+
+Checkpoint contents:
+- Accepted ExecutionPlan and revision metadata
+- Current step cursor and step status history
+- Controller counters and stop reasons
+- Last BrainResult, ToolResult, and any ReplanRequest
+- Execution log or append-only transition history, if used
+
+Resume requirements:
+- The current execution cursor must be recoverable.
+- Completed steps must be distinguishable from pending steps.
+- Tool results must remain readable as structured state.
+
+### State Contract Diagram
+
+```mermaid
+classDiagram
+    class ExecutionState
+    class ExecutionPlan
+    class ExecutionStep
+    class ExecutionContext
+    class BrainInput
+    class BrainResult
+    class ToolRequest
+    class ToolResult
+    class ControllerDecision
+    class ReplanRequest
+    class ExecutionSummary
+
+    ExecutionState --> ExecutionPlan
+    ExecutionState --> ExecutionContext
+    ExecutionState --> ControllerDecision
+    ControllerDecision --> BrainInput
+    BrainInput --> ExecutionStep
+    BrainResult --> ToolRequest
+    ToolRequest --> ToolResult
+    BrainResult --> ReplanRequest
+    ExecutionSummary --> ExecutionState
+```
+
+### LangGraph Layout
+The current graph should be evaluated against the controller-owned model.
+
+Recommended layout:
+- Planner node: create and revise plans
+- Controller node: own the execution loop and checkpoint writes
+- Brain node: evaluate one step
+- Tool node: execute deterministic requests
+- Capture node, if retained: normalize tool outputs only
+- Summary node: generate final output from execution logs
+
+Preferred decision:
+- Use an explicit Controller node if checkpoint fidelity and replay clarity are the priority.
+- Keep orchestration thin so the Brain does not secretly own workflow control.
+
+### Extension Points
+The design should explicitly reserve extension hooks for:
+
+- Memory persistence
+- Redis checkpoint store
+- SCADA tool adapters
+- MCP integration
+
+### Verification Criteria
+The architecture is complete when it can answer these questions without ambiguity:
+
+- Which node owns each field?
+- Which state changes occur at each transition?
+- How does replanning preserve completed work?
+- What exactly is checkpointed?
+- How can a future Redis saver resume without design changes?
+- How do Summary and SCADA fit without violating execution ownership?
+
+### Relevant Files
+- core/graph.py — graph assembly and node wiring
+- core/state.py — current shared state shape to decompose
+- core/graph_planner.py — planner behavior and plan output
+- core/graph_brain.py — step execution and recovery logic
+- core/graph_state_machine.py — deterministic transition and stopping rules
+- core/graph_nodes.py — node factory layer to align with the new ownership model
+- core/graph_capture.py — tool-result normalization and state capture
+- core/graph_runner.py — runtime execution and observability
+- core/models.py — structured tool/result models that can inform the new contracts
+- main.py — current manual session persistence and resume flow
+- tests/test_graph.py — graph assembly and dependency injection seams
+- tests/test_graph_planner.py — planner route and plan-shaping behavior
+- tests/test_graph_nodes.py — node guard and transition behavior
+- tests/test_graph_runner.py — lifecycle and replay observability
+- knowledge_bk/notes_improvement — source requirements for the architecture task
+
+If you want, the next step can be turning this into an implementation-ready RFC with section numbers, acceptance criteria, and a migration sequence.
+
+
+
+
+Suggested 1-week plan
+
+Day 1: skeleton + event catalog
+Day 2: transition table and illegal transitions
+Day 3: payload contracts per event
+Day 4: failures, retries, timeout rules, replanning rules
+Day 5: checkpoint and resume contract
+Day 6: acceptance scenarios (happy path + failure + replan + resume)
+Day 7: review and freeze v1
+Use this simple acceptance gate
+You are done when:
+
+Two engineers can implement independently and produce the same runtime behavior
+A replay engine can reconstruct execution from events/checkpoints only
+No section depends on class names, graph topology, or framework internals
+If you want, I can draft the exact first version template (pre-filled with your current event flow) so you can start writing immediately.

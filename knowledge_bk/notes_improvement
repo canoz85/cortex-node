@@ -297,3 +297,194 @@ Validate the plan against the current code paths in graph.py and state.py to ens
 Use focused pytest slices around graph planning, node transitions, and runner behavior once the implementation phase starts.
 Run get_errors on the touched graph and state files after the design is translated into code to catch contract mismatches early.
 I saved the detailed version of this plan in session memory so we can refine it without losing the architecture decisions. If you want, the next step can be to tighten this into a formal design spec or start implementation after approval.
+
+
+plan.md
+## Design Spec: Deterministic Execution Contract for CortexNode
+
+### Purpose
+Define a controller-owned execution architecture for CortexNode that is local-first, deterministic, replayable, and checkpoint-friendly. The spec formalizes ownership boundaries between Planner, Controller, Brain, Tool, and Summary so workflow control cannot be owned by the LLM.
+
+### Scope
+Included:
+- Execution contracts for planning, step execution, tool invocation, replanning, and summary generation
+- State ownership and transition rules
+- Checkpoint-resume compatibility, including future Redis persistence
+- Suggested LangGraph node layout and extension points for Memory, Redis, SCADA, and MCP
+
+Excluded:
+- Implementation code
+- Non-execution product features
+- Tool redesign beyond deterministic request/response adaptation
+
+### Architecture Summary
+User -> Planner -> Controller -> Brain -> Tool -> Brain -> Controller -> ... -> Summary
+
+Responsibilities:
+- Planner produces and revises `ExecutionPlan`
+- Controller owns iteration, retries, step selection, stopping conditions, and checkpointing
+- Brain executes one step at a time and emits structured results or `ReplanRequest`
+- Tool is deterministic and side-effect scoped to the requested operation
+- Summary consumes execution logs only
+
+### Design Principles
+- Single responsibility per node
+- Immutable or append-only state where feasible
+- Deterministic transitions
+- Replayable execution from checkpoint
+- Structured state over implicit conversation memory
+- No shared mutable ownership
+- Tool and summary behavior must remain independently testable
+- Redis checkpointing should require no architecture changes
+- SCADA tools must fit the same execution model as current local tools
+
+### Canonical Contracts
+The spec must define the following immutable or snapshot-friendly contracts:
+- ExecutionState
+- ExecutionPlan
+- ExecutionStep
+- ExecutionContext
+- BrainInput
+- BrainResult
+- ToolRequest
+- ToolResult
+- ControllerDecision
+- ReplanRequest
+- ExecutionSummary
+
+For each contract, the design must specify:
+- Purpose
+- Owner
+- Producer
+- Consumer
+- Required fields
+- Optional fields
+- Mutability rules
+
+### State Ownership Rules
+Every field must have exactly one writer. Read access may be shared, but mutation may not be shared.
+
+Required ownership questions for every field:
+- Who creates it?
+- Who may update it?
+- Who may read it?
+
+Primary ownership intent:
+- Planner owns plan creation and plan revision metadata
+- Controller owns execution progress, retries, iteration count, and checkpoint state
+- Brain owns step-local reasoning output and replanning requests
+- Tool owns deterministic operation result payloads
+- Summary owns final execution narrative only
+
+### Node Contracts
+Each node must define:
+- Inputs
+- Outputs
+- Preconditions
+- Postconditions
+- Failure modes
+- Recovery strategy
+
+Node-specific constraints:
+- Planner must not execute tools or mutate execution state
+- Controller must not reason or call LLMs for planning
+- Brain must not reorder steps, create goals, or own the loop
+- Tools must not perform reasoning or planning
+- Summary must ignore planner reasoning and brain thought traces
+
+### Lifecycle Contract
+The spec must define exact state deltas for the lifecycle:
+Planner -> Controller -> Brain -> Tool -> Brain -> Controller
+
+For each transition, the design must state:
+- Which fields change
+- Which fields remain stable
+- What constitutes a completed step
+- How retries and iteration counters advance
+- How tool observations are captured and preserved
+- How completion is detected without rerunning completed work
+
+### Replanning Contract
+Replanning is structured and controller-mediated.
+Flow:
+- Brain emits ReplanRequest
+- Controller forwards to Planner
+- Planner returns a new ExecutionPlan
+- Controller resumes from preserved execution history
+
+The spec must define:
+- When replanning is allowed
+- What state is carried forward
+- What state is invalidated
+- How plan revision is recorded
+- How completed steps remain immutable
+
+### Checkpoint Contract
+The checkpoint boundary is after every meaningful transition.
+The checkpoint must contain enough information to resume without rerunning completed work.
+
+The spec must define:
+- Snapshot contents
+- Log contents, if any
+- What is required for resume
+- What is optional for diagnostics
+- How future Redis storage fits without changing the model
+
+### LangGraph Layout
+The current topology should be evaluated against the target controller-owned model.
+The spec must decide whether to:
+- Introduce an explicit Controller node, or
+- Keep Controller as orchestration around existing nodes
+
+The final graph layout must identify:
+- Node responsibilities
+- Edge conditions
+- Where checkpoints are written
+- How tool execution and capture are separated
+
+### Recommended Extension Points
+The spec should explicitly reserve extension hooks for:
+- Memory persistence
+- Redis checkpoint store
+- SCADA tool adapters
+- MCP integration
+
+### Relevant Files
+- `core/graph.py` — graph assembly and node wiring
+- `core/state.py` — current shared state shape to be decomposed
+- `core/graph_planner.py` — planner behavior and plan output
+- `core/graph_brain.py` — step execution and recovery logic
+- `core/graph_state_machine.py` — deterministic transition and stopping rules
+- `core/graph_nodes.py` — node factory layer to align with the new ownership model
+- `core/graph_capture.py` — tool-result normalization and state capture
+- `core/graph_runner.py` — runtime execution and observability
+- `core/models.py` — structured tool/result models that can inform the new contracts
+- `main.py` — current manual session persistence and resume flow
+- `tests/test_graph.py` — graph assembly and DI seams
+- `tests/test_graph_planner.py` — planner route and plan-shaping behavior
+- `tests/test_graph_nodes.py` — node guard and transition behavior
+- `tests/test_graph_runner.py` — lifecycle and replay observability
+- `knowledge_bk/notes_improvement` — source requirements for this architecture task
+
+### Verification Criteria
+The spec is complete when it can answer all of the following without ambiguity:
+- Which node owns each field?
+- Which state changes occur at each transition?
+- How does replanning preserve completed work?
+- What exactly is checkpointed?
+- How can a future Redis saver resume without design changes?
+- How do Summary and SCADA fit without violating execution ownership?
+
+### Open Design Decisions
+1. Controller as explicit node versus orchestration layer. Recommendation: explicit node if checkpoint fidelity is the priority.
+2. ExecutionPlan as ordered list versus DAG. Recommendation: ordered list if replay simplicity is the priority; DAG only if parallel step execution is required later.
+3. Checkpoint payload as state snapshot only versus snapshot plus execution log. Recommendation: both, with the log treated as append-only diagnostics and the snapshot as the authoritative resume state.
+-----
+
+-----
+ceps remaining..
+CEP-007 — Error Codes & Failure Classification
+CEP-008 — Protocol Versioning & Compatibility
+CEP-009 — Protocol Observability & Metrics
+CEP-010 — Reference Execution Examples
+-----

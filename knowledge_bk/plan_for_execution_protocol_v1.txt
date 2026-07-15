@@ -1,0 +1,201 @@
+# CortexNode Execution Protocol v1
+
+## 1. Purpose and Non-Goals
+
+### 1.1 Purpose
+
+### 1.2 Design Principles
+
+### 1.3 Scope
+
+### 1.4 Non-Goals
+
+---
+
+## 2. Actors
+
+### 2.1 Planner
+
+#### Responsibilities
+
+#### Inputs
+
+#### Outputs
+
+#### Forbidden Responsibilities
+
+---
+
+### 2.2 Controller
+
+#### Responsibilities
+
+#### Inputs
+
+#### Outputs
+
+#### Forbidden Responsibilities
+
+---
+
+### 2.3 Brain
+
+#### Responsibilities
+
+#### Inputs
+
+#### Outputs
+
+#### Forbidden Responsibilities
+
+---
+
+### 2.4 Tool
+
+#### Responsibilities
+
+#### Inputs
+
+#### Outputs
+
+#### Forbidden Responsibilities
+
+---
+
+### 2.5 Summary
+
+#### Responsibilities
+
+#### Inputs
+
+#### Outputs
+
+#### Forbidden Responsibilities
+
+---
+
+## 3. Event Catalog
+
+### 3.1 Event Philosophy
+
+### 3.2 Planning Events
+
+### 3.3 Execution Events
+
+### 3.4 Tool Events
+
+### 3.5 Lifecycle Events
+
+### 3.6 Error Events
+
+### 3.7 Replanning Events
+
+---
+
+## 4. Transition Rules
+
+### 4.1 Execution Lifecycle
+
+### 4.2 Allowed Transitions
+
+### 4.3 Invalid Transitions
+
+### 4.4 Replanning Flow
+
+### 4.5 Completion Flow
+
+### 4.6 Pause and Resume Flow
+
+---
+
+## 5. Payload Contracts
+
+### 5.1 Common Envelope
+
+### 5.2 Command Payloads
+
+### 5.3 Event Payloads
+
+### 5.4 Tool Payloads
+
+### 5.5 Summary Payload
+
+### 5.6 Metadata
+
+---
+
+## 6. Invariants
+
+### 6.1 Ownership Rules
+
+### 6.2 Execution Rules
+
+### 6.3 State Rules
+
+### 6.4 Event Rules
+
+### 6.5 Tool Rules
+
+### 6.6 Summary Rules
+
+---
+
+## 7. Failure and Retry Semantics
+
+### 7.1 Failure Classification
+
+### 7.2 Retry Policy
+
+### 7.3 Recovery Flow
+
+### 7.4 Replanning Triggers
+
+### 7.5 Terminal Failures
+
+---
+
+## 8. Checkpoint Semantics
+
+### 8.1 Checkpoint Lifecycle
+
+### 8.2 Checkpoint Contents
+
+### 8.3 Resume Rules
+
+### 8.4 Replay Rules
+
+### 8.5 Consistency Guarantees
+
+---
+
+## 9. Versioning and Compatibility
+
+### 9.1 Protocol Version
+
+### 9.2 Payload Compatibility
+
+### 9.3 Event Compatibility
+
+### 9.4 Migration Strategy
+
+### 9.5 Extension Points
+
+---
+
+## 10. Acceptance Tests
+
+### 10.1 Planning
+
+### 10.2 Execution
+
+### 10.3 Tool Invocation
+
+### 10.4 Replanning
+
+### 10.5 Checkpoint and Resume
+
+### 10.6 Failure Recovery
+
+### 10.7 Summary Generation
+
+### 10.8 Protocol Compliance
