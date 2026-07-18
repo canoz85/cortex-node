@@ -3,7 +3,7 @@
 - Protocol Family: CortexNode Execution Protocol (CEP)
 - Document ID: CEP-006
 - Version: 1.0
-- Status: Draft
+- Status: Review Candidate
 - Layer: Layer 2 (Execution Protocol)
 
 ## 1. Purpose

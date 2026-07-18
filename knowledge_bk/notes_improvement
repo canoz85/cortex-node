@@ -488,3 +488,51 @@ CEP-008 — Protocol Versioning & Compatibility
 CEP-009 — Protocol Observability & Metrics
 CEP-010 — Reference Execution Examples
 -----
+
+-----
+cis remaining..
+docs/
+│
+├── architecture/
+│   ├── ARCH-001-system-overview.md
+│   ├── ARCH-002-runtime-architecture.md
+│   ├── ARCH-003-component-responsibilities.md
+│   └── ARCH-004-future-architecture.md
+│
+├── protocol/
+│   ├── README.md
+│   ├── CEP-001-runtime-protocol.md
+│   ├── CEP-002-execution-lifecycle.md
+│   ├── CEP-003-state-and-checkpoint.md
+│   ├── CEP-004-worker-contracts.md
+│   ├── CEP-005-protocol-data-contracts.md
+│   └── CEP-006-protocol-compliance.md
+│
+├── implementation/
+│   ├── README.md
+│   ├── CIS-001-execution-mapping.md
+│   ├── CIS-002-runtime-state-model.md
+│   ├── CIS-003-langgraph-execution-graph.md
+│   ├── CIS-004-checkpoint-recovery.md
+│   ├── CIS-005-worker-runtime.md
+│   └── CIS-006-testing-verification.md
+│
+├── decisions/
+│   ├── ADR-001-controller-owns-execution.md
+│   ├── ADR-002-immutable-events.md
+│   ├── ADR-003-controller-mediated-workers.md
+│   └── ...
+│
+├── development/
+│   ├── roadmap.md
+│   ├── milestones.md
+│   ├── implementation-plan.md
+│   └── release-plan.md
+│
+├── diagrams/
+│   ├── architecture/
+│   ├── protocol/
+│   └── implementation/
+│
+└── README.md
+-----
