@@ -30,6 +30,7 @@ from core.graph_state_machine import (
 )
 from core.graph_summarize import rolling_summary_message
 from core.graph_tool_events import message_repeats_signature
+from core.protocol.bridge import build_brain_input
 
 from core.state import AgentState
 
@@ -283,7 +284,7 @@ def create_brain_node(
         if "Action-required run stopped" in normalize_message_content(decision):
             last_tool_output = state.get("last_tool_output", "")
             if isinstance(last_tool_output, dict):
-                rendered = format_preferred_tool_response(last_tool_output)
+                rendered = format_tool_result_response(last_tool_output)
                 if rendered.strip():
                     return AIMessage(content=rendered)
 
@@ -465,13 +466,15 @@ def create_brain_node(
     def _resolve_execution_context_from_route(
         *, 
         state, 
+        brain_input,
         brain_llm, 
         tool_brain_llm, 
         agent_system_prompt,
         casual_system_prompt
     ):
         planner_route = str(state.get("planner_route", ""))
-        plan_text = str(state.get("plan", "") or "")
+        # Phase 1.1: read plan from BrainInput first, then strictly fall back to legacy state.
+        plan_text = str((getattr(brain_input, "active_plan", None).objective if getattr(brain_input, "active_plan", None) is not None else state.get("plan", "")) or "")
 
         route_execution_policy = decide_brain_execution(planner_route, plan_text)
 
@@ -486,9 +489,14 @@ def create_brain_node(
 
 
     def brain_node(state: AgentState):
+        # Phase 1 protocol consumption: construct BrainInput once at the brain boundary.
+        # Legacy dict state remains authoritative for behavior in this phase.
+        brain_input = build_brain_input(state)
+        _ = brain_input
 
         llm, system_prompt, action_required, planner_brief = _resolve_execution_context_from_route(
             state=state,
+            brain_input=brain_input,
             brain_llm=brain_llm,
             tool_brain_llm=tool_brain_llm,
             agent_system_prompt=agent_system_prompt,

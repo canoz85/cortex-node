@@ -86,6 +86,17 @@ def create_planner_node(
                 HumanMessage(content=latest_user_prompt),
             ]
 
+            ###
+            # TODO (Planner)
+            #
+            # Investigate planner/tool routing:
+            # - workspace listing prompt
+            # - planner confidence
+            # - tool selection
+            # - route heuristics
+            #
+            # Deferred until protocol migration is complete.
+
             plan_response = planner_llm.invoke([*pre_messages])
             plan_text = str(plan_response.content)
 
