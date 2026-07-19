@@ -13,6 +13,8 @@ from core.graph_messages import normalize_message_content
 from core.graph_response_formatters import format_tool_call_preview
 from core.logging_utils import get_logger, log_event
 from core.models import ToolResult
+from core.protocol.bridge import legacy_state_to_execution_state
+from core.runtime.accessors import get_execution_state
 from core.state import AgentState
 from core.tool_output import parse_tool_result, unwrap_tool_output
 
@@ -368,6 +370,13 @@ def run_prompt(
         "tool_text_retry_used": False,
         "run_id": run_id,
     }
+
+    # Migration boundary: legacy runtime state and protocol ExecutionState coexist here.
+    # The protocol state is read-only and mirrors the same legacy inputs without
+    # changing execution order, routing, or worker behavior.
+    execution_state = legacy_state_to_execution_state(initial_state)
+    initial_state["execution_state"] = execution_state
+    _ = get_execution_state(initial_state)
 
     final_messages = list(initial_state["messages"])
     metrics = RunMetrics()

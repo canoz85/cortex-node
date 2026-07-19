@@ -4,6 +4,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 from core.models import TokenUsage
+from core.protocol.models import ExecutionState
 
 
 class AgentState(TypedDict, total=False):
@@ -26,3 +27,4 @@ class AgentState(TypedDict, total=False):
     rolling_summary: str
     retrieval_messages: list[BaseMessage]
     run_id: str
+    execution_state: ExecutionState

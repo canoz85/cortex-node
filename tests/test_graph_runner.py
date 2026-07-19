@@ -5,6 +5,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from core.graph_constants import MAX_REASONING_STEPS
 from core.graph_runner import run_prompt
 from core.models import ToolResult
+from core.protocol.models import ExecutionState
 
 
 class FakeApp:
@@ -156,3 +157,14 @@ def test_run_prompt_logs_completion_metrics(caplog):
     assert completed.max_steps_reached is False
     assert completed.stopped_on_pseudo_call is False
     assert completed.stopped_on_action_stop is False
+
+
+def test_run_prompt_attaches_execution_state_before_first_node():
+    app = FakeApp([])
+
+    run_prompt(app, "do task")
+
+    assert app.initial_state is not None
+    execution_state = app.initial_state.get("execution_state")
+    assert isinstance(execution_state, ExecutionState)
+    assert app.initial_state["execution_state"] is execution_state

@@ -536,3 +536,24 @@ docs/
 │
 └── README.md
 -----
+
+
+----
+roadmap
+✓ Models
+✓ Bridge
+✓ Accessors
+✓ Runner Boundary
+
+↓
+
+1. Controller Facade
+2. Controller predicates
+3. Controller evaluation tests
+4. Passive runtime integration
+5. Brain migration
+6. Planner migration
+7. Tool migration
+8. Remove bridge
+9. Remove legacy dict
+-------

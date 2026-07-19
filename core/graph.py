@@ -10,6 +10,7 @@ from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, MAX_REASONING_ST
 from core.graph_nodes import create_graph_nodes
 from core.graph_runner import run_prompt
 from core.rag import WorkspaceRAG
+from core.runtime.state_propagation import propagate_execution_state
 from core.state import AgentState
 from tools.exec_ops import get_exec_tools
 from tools.file_ops import get_file_tools
@@ -24,6 +25,15 @@ from tools.vision_ops import get_vision_tools
 ToolListFactory = Callable[[str, str, WorkspaceRAG, str], list[Any]]
 ChatModelFactory = Callable[[str, float], Any]
 RAGFactory = Callable[[Path, str, int], WorkspaceRAG]
+StateNodeCallable = Callable[[AgentState], Any]
+StatePropagator = Callable[
+    [AgentState, Any],
+    Any,
+]
+
+_STATE_PROPAGATORS: tuple[StatePropagator, ...] = (
+    propagate_execution_state,
+)
 
 
 def _default_rag_factory(knowledge_root: Path, embedding_model: str, rag_top_k: int) -> WorkspaceRAG:
@@ -60,6 +70,31 @@ def _load_sap_system_prompt(project_root: Path) -> str | None:
     return content or None
 
 
+def _apply_state_propagators(state: AgentState, node_update: Any) -> Any:
+    propagated_update = node_update
+    for propagator in _STATE_PROPAGATORS:
+        propagated_update = propagator(state, propagated_update)
+    return propagated_update
+
+
+def _invoke_state_node(node: Any, state: AgentState) -> Any:
+    if callable(node):
+        return node(state)
+
+    invoke = getattr(node, "invoke", None)
+    if callable(invoke):
+        return invoke(state)
+
+    raise TypeError(f"State node '{getattr(node, 'name', type(node).__name__)}' is not executable")
+
+
+def _register_state_node(workflow: StateGraph, name: str, node: StateNodeCallable | Any) -> None:
+    def _state_node(state: AgentState) -> Any:
+        return _apply_state_propagators(state, _invoke_state_node(node, state))
+
+    workflow.add_node(name, _state_node)
+
+
 def build_app(
     workspace_dir: str = "workspace",
     model: str = "gpt-oss:20b", #"qwen2.5-coder:14b",
@@ -70,7 +105,7 @@ def build_app(
     rag_factory: RAGFactory = _default_rag_factory,
     tool_list_factory: ToolListFactory = _default_tool_list_factory,
     chat_model_factory: ChatModelFactory = _default_chat_model_factory,
-    graph_nodes_factory: Callable[..., tuple[Any, Any, Any, Any]] = create_graph_nodes,
+    graph_nodes_factory: Callable[..., tuple[Any, Any, Any, Any, Any]] = create_graph_nodes,
     tool_node_factory: Callable[[list[Any]], Any] = ToolNode,
     project_root: Path | None = None,
     show_raw_llm: bool = False,
@@ -117,11 +152,11 @@ def build_app(
     )
 
     workflow = StateGraph(AgentState)
-    workflow.add_node("planner", planner_node)
-    workflow.add_node("brain", brain_node)
-    workflow.add_node("tools", tool_node_factory(tools))
-    workflow.add_node("capture_tool_output", capture_tool_output_node)
-    workflow.add_node("summarize_memory", summarize_memory_node)
+    _register_state_node(workflow, "planner", planner_node)
+    _register_state_node(workflow, "brain", brain_node)
+    _register_state_node(workflow, "tools", tool_node_factory(tools))
+    _register_state_node(workflow, "capture_tool_output", capture_tool_output_node)
+    _register_state_node(workflow, "summarize_memory", summarize_memory_node)
 
     workflow.set_entry_point("planner")
     workflow.add_edge("planner", "brain")
