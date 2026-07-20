@@ -7,6 +7,20 @@ from langchain_core.messages import (
     HumanMessage, SystemMessage, ToolMessage
 )
 
+from core.protocol.enums import (
+    BrainOutcome,
+    StepStatus,
+    WorkerRole,
+)
+
+from core.protocol.models import (
+    BrainResult,
+    ToolRequest,
+)
+
+from core.protocol.bridge import brain_result_to_legacy
+
+
 from core.graph_pseudo_tools import (
     finalize_action_response,
     is_generic_json_tool_response,
@@ -547,6 +561,44 @@ def create_brain_node(
             planner_brief=planner_brief
         )
 
-        return response_with_usage(state, response)
+
+        #
+        # Phase 1 bridge
+        #
+
+        if getattr(response, "tool_calls", None):
+
+            tool_call = response.tool_calls[0]
+
+            brain_result = BrainResult(
+                outcome=BrainOutcome.TOOL_REQUEST,
+                message="Brain requested tool execution.",
+                tool_request=ToolRequest(
+                    request_id="legacy-tool-request", # TODO(protocol): Controller generates request ids.
+                    tool_name=tool_call["name"],
+                    arguments=tool_call.get("args", {}),
+                    requested_by=WorkerRole.BRAIN,
+                ),
+            )
+
+        else:
+
+            brain_result = BrainResult(
+                outcome=BrainOutcome.FINAL_ANSWER,
+                message=str(response.content),
+                proposed_step_status=StepStatus.COMPLETED,
+            )
+
+        legacy = brain_result_to_legacy(brain_result)
+
+        #
+        # Existing bridge remains unchanged for now.
+        #
+
+        legacy.update(
+            response_with_usage(state, response)
+        )
+
+        return legacy
 
     return brain_node
