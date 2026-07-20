@@ -204,6 +204,35 @@ class BrainResult(ImmutableProtocolModel):
     proposed_step_status: StepStatus | None = None
 
 
+class PlannerInput(ImmutableProtocolModel):
+    """Controller-governed input contract for planner execution.
+
+    Protocol purpose: define legal planner input envelope.
+    Runtime purpose: assemble role-scoped planning context without direct worker coupling.
+    Ownership: prepared by runtime services under controller authority.
+    Visibility: Protocol-visible envelope with scoped runtime context.
+    """
+
+    identity: ExecutionIdentity
+    context: "ExecutionContext"
+    active_plan: ExecutionPlan | None = None
+    completed_step_ids: StepIdList = Field(default_factory=tuple)
+    retry: RetryMetadata = Field(default_factory=RetryMetadata)
+
+class PlannerResult(ImmutableProtocolModel):
+    """Typed outcome contract emitted by planner runtime realization.
+
+    Protocol purpose: represent a candidate plan revision.
+    Runtime purpose: provide a structured planning result for controller evaluation.
+    Ownership: produced by planner role, interpreted by controller role.
+    Visibility: Protocol-visible exchange object.
+    """
+
+    proposed_plan: ExecutionPlan
+    message: str = ""
+    planning_rationale: str = ""
+    change_summary: str = ""
+
 class ExecutionSummary(ImmutableProtocolModel):
     """Terminal summary generated from accepted protocol-visible facts.
 

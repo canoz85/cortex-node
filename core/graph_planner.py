@@ -1,10 +1,13 @@
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 
+from core.protocol.bridge import build_planner_input, planner_result_to_legacy
+
 from core.graph_constants import RECENT_MESSAGE_WINDOW
 from core.graph_context import retrieval_message
 from core.graph_intents import planner_routing_decision, preferred_info_tool
 from core.graph_messages import latest_human_message_str, recent_messages
+from core.protocol.models import ExecutionPlan, PlannerResult
 from core.rag import WorkspaceRAG
 from core.state import AgentState
 
@@ -45,10 +48,12 @@ def create_planner_node(
 ):
     def planner_node(state: AgentState):
         """First pass: analyze prompt and create a plan WITHOUT taking actions."""
-        history = state.get("messages", [])
+
+        planner_input = build_planner_input(state)
         
         retrieval_messages = []
-        latest_user_prompt = latest_human_message_str(history)
+        latest_user_prompt = planner_input.context.user_request
+
         routing_decision = planner_routing_decision(latest_user_prompt, router_llm=router_llm, tool_name_set=tool_name_set)
         planner_route = routing_decision.route
 
@@ -100,8 +105,30 @@ def create_planner_node(
             plan_response = planner_llm.invoke([*pre_messages])
             plan_text = str(plan_response.content)
 
-        return {
-            "plan": plan_text,
+        active_plan = planner_input.active_plan
+        planner_result = PlannerResult(
+            proposed_plan=ExecutionPlan(
+            plan_id=(
+                active_plan.plan_id
+                if active_plan
+                else "legacy-plan"
+            ),
+            revision=(
+                active_plan.revision + 1
+                if active_plan
+                else 1
+            ),
+                objective=plan_text,
+                steps=tuple(),
+            ),
+            message="Plan generated successfully.",
+        )
+
+        # TODO(CEP-006):
+        # Remove legacy bridge after Controller consumes PlannerResult directly.
+        legacy = planner_result_to_legacy(planner_result)
+
+        legacy.update({
             "retrieval_messages": retrieval_messages,
             "planner_route": routing_decision.route,
             "planner_domain": routing_decision.domain,
@@ -109,11 +136,13 @@ def create_planner_node(
             "planner_domain_enforced": routing_decision.enforced,
             "planner_route_source": routing_decision.source,
             "planner_needs_clarification": routing_decision.needs_clarification,
-            "steps": 0,
+            "steps": 0, # TODO: remove after controller migration
             "last_tool_rendered": "",
             "last_tool_success": None,
             "repeat_fail_count": 0,
             "tool_text_retry_used": False,
-        }
+        })
+
+        return legacy
 
     return planner_node

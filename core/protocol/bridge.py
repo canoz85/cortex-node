@@ -43,6 +43,8 @@ from .enums import (
 from .models import (
     BrainInput,
     BrainResult,
+    PlannerInput,
+    PlannerResult,
     ControllerDecision,
     EventRecord,
     ExecutionContext,
@@ -454,8 +456,8 @@ def build_protocol_visible_state(
     resolved_cursor = cursor or build_execution_cursor(state)
     resolved_status = _enum_or_default(ExecutionStatus, state.get("execution_status"), ExecutionStatus.NON_TERMINAL)
 
-    active_plan = _build_active_plan(state, resolved_identity)
-    active_step = _build_active_step(state)
+    active_plan = build_execution_plan(state, identity=resolved_identity,)
+    active_step = build_execution_step(state)
     retry = _build_retry_metadata(state)
     accepted_event_history = _build_event_history(state)
 
@@ -519,6 +521,59 @@ def build_execution_state(
         working=build_working_state(state),
     )
 
+def build_execution_step(
+    legacy_state: LegacyState | None = None,
+) -> ExecutionStep | None:
+    """Build ExecutionStep contract from legacy runtime state."""
+    return _build_active_step(legacy_state)
+
+def build_execution_plan(
+    legacy_state: LegacyState | None = None,
+    *,
+    identity: ExecutionIdentity | None = None,
+) -> ExecutionPlan | None:
+    """Build ExecutionPlan contract from legacy planning state."""
+
+    state = _state_or_empty(legacy_state)
+
+    resolved_identity = (
+        identity
+        if identity is not None
+        else build_execution_identity(state)
+    )
+
+    return _build_active_plan(state, resolved_identity)
+
+
+def build_planner_input(legacy_state: LegacyState | None = None) -> PlannerInput:
+    """Build PlannerInput contract from legacy runtime state."""
+
+    execution_state = build_execution_state(legacy_state)
+
+    return PlannerInput(
+        identity=execution_state.protocol_visible.identity,
+        context=build_execution_context(
+            legacy_state,
+            role=WorkerRole.PLANNER,
+        ),
+        active_plan=execution_state.protocol_visible.active_plan,
+        completed_step_ids=execution_state.protocol_visible.completed_step_ids,
+        retry=execution_state.protocol_visible.retry,
+    )
+
+def planner_result_to_legacy(result: PlannerResult) -> dict[str, Any]:
+    """Translate PlannerResult into a legacy-friendly dictionary payload."""
+
+    payload: LegacyPayload = {
+        "planner_message": result.message,
+    }
+
+    if result.proposed_plan is not None:
+        payload["plan"] = result.proposed_plan.objective
+        payload["plan_id"] = result.proposed_plan.plan_id
+        payload["plan_revision"] = result.proposed_plan.revision
+
+    return payload
 
 def build_brain_input(legacy_state: LegacyState | None = None) -> BrainInput:
     """Build BrainInput contract from legacy runtime state."""
@@ -680,6 +735,7 @@ __all__ = [
     "build_working_state",
     "build_execution_state",
     "build_brain_input",
+    "build_planner_input",
     "brain_result_to_legacy",
     "tool_result_to_legacy",
     "controller_decision_to_legacy",

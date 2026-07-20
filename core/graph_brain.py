@@ -527,7 +527,6 @@ def create_brain_node(
         # Phase 1 protocol consumption: construct BrainInput once at the brain boundary.
         # Legacy dict state remains authoritative for behavior in this phase.
         brain_input = build_brain_input(state)
-        _ = brain_input
 
         llm, system_prompt, action_required, planner_brief = _resolve_execution_context_from_route(
             state=state,
