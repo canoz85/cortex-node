@@ -113,6 +113,7 @@ def create_brain_node(
         response: AIMessage,
         action_required: bool,
         state: AgentState,
+        brain_input,
         tool_name_set: set[str],
     ) -> AIMessage:
     
@@ -136,6 +137,7 @@ def create_brain_node(
                 llm=llm,
                 pre_messages=pre_messages,
                 state=state,
+                brain_input=brain_input,
                 response=response,
                 tool_name_set=tool_name_set,
             )
@@ -182,6 +184,7 @@ def create_brain_node(
         response: AIMessage,
         action_required: bool,
         state: AgentState,
+        brain_input,
     ) -> AIMessage:
         
         last_tool_signature = str(state.get("last_tool_signature", ""))
@@ -227,7 +230,11 @@ def create_brain_node(
             )
 
             if getattr(final_response, "tool_calls", None):
-                last_tool_output = state.get("last_tool_output", "")
+                last_tool_output = (
+                    brain_input.last_tool_result
+                    if brain_input.last_tool_result is not None
+                    else state.get("last_tool_output", "")
+                )
                 if isinstance(last_tool_output, dict):
                     return AIMessage(content=format_tool_result_response(last_tool_output))
                 return AIMessage(
@@ -245,6 +252,7 @@ def create_brain_node(
         llm: ChatOllama,
         pre_messages: list[BaseMessage],
         state: AgentState,
+        brain_input,
         response: AIMessage,
         tool_name_set: set[str],
     ) -> AIMessage:
@@ -282,7 +290,12 @@ def create_brain_node(
 
         # Last-resort fallback keeps the flow deterministic when model output is unusable.
         if "Action-required run stopped" in normalize_message_content(decision):
-            last_tool_output = state.get("last_tool_output", "")
+
+            last_tool_output = (
+                brain_input.last_tool_result
+                if brain_input.last_tool_result is not None
+                else state.get("last_tool_output", "")
+            )
             if isinstance(last_tool_output, dict):
                 rendered = format_tool_result_response(last_tool_output)
                 if rendered.strip():
@@ -365,6 +378,7 @@ def create_brain_node(
         *,
         active_system_prompt: str,
         state: AgentState,
+        brain_input,
         action_required: bool,
         planner_brief: str,
 
@@ -374,8 +388,15 @@ def create_brain_node(
         retrieval_messages = state.get("retrieval_messages", [])
         rolling_summary = state.get("rolling_summary", "")
 
+        # Phase 1.2:
+        # Read protocol ToolResult first, then strictly fall back to legacy state.
+        last_tool_output = (
+            brain_input.last_tool_result
+            if brain_input.last_tool_result is not None
+            else state.get("last_tool_output", "")
+        )
+
         last_tool_success = state.get("last_tool_success")
-        last_tool_output = state.get("last_tool_output", "")
         last_tool_rendered = str(state.get("last_tool_rendered", "") or "")
         last_tool_signature = str(state.get("last_tool_signature", "") or "")
 
@@ -409,6 +430,7 @@ def create_brain_node(
         response: AIMessage,
         action_required: bool,
         state: AgentState,
+        brain_input,
         tool_name_set: set[str],
     ) -> AIMessage:
         response = _recover_response_for_action_flow(
@@ -417,6 +439,7 @@ def create_brain_node(
             response=response,
             action_required=action_required,
             state=state,
+            brain_input=brain_input,
             tool_name_set=tool_name_set,
         )
         response = _enforce_repeated_signature_policy(
@@ -425,12 +448,14 @@ def create_brain_node(
             response=response,
             action_required=action_required,
             state=state,
+            brain_input=brain_input,
         )
         return response
     
     def _resolve_brain_response(
         *,
         state: AgentState,
+        brain_input,
         tool_name_set: set[str],
         llm: ChatOllama,
         active_system_prompt: str,
@@ -441,6 +466,7 @@ def create_brain_node(
         pre_messages = _build_pre_messages(
             active_system_prompt=active_system_prompt,
             state=state,
+            brain_input=brain_input,
             action_required=action_required,
             planner_brief=planner_brief,
         )
@@ -458,6 +484,7 @@ def create_brain_node(
             response=response,
             action_required=action_required,
             state=state,
+            brain_input=brain_input,
             tool_name_set=tool_name_set,
         )
 
@@ -472,9 +499,17 @@ def create_brain_node(
         agent_system_prompt,
         casual_system_prompt
     ):
+        
+        
         planner_route = str(state.get("planner_route", ""))
         # Phase 1.1: read plan from BrainInput first, then strictly fall back to legacy state.
-        plan_text = str((getattr(brain_input, "active_plan", None).objective if getattr(brain_input, "active_plan", None) is not None else state.get("plan", "")) or "")
+        active_plan = brain_input.active_plan
+
+        plan_text = (
+            active_plan.objective
+            if active_plan is not None
+            else str(state.get("plan", ""))
+        )
 
         route_execution_policy = decide_brain_execution(planner_route, plan_text)
 
@@ -505,6 +540,7 @@ def create_brain_node(
 
         response = _resolve_brain_response(
             state=state,
+            brain_input=brain_input,
             tool_name_set=tool_name_set,
             llm=llm,
             active_system_prompt=system_prompt,

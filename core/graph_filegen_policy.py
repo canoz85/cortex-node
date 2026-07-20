@@ -7,20 +7,6 @@ from core.graph_constants import MODIFYING_TOOL_NAMES, VERIFICATION_TOOL_NAMES
 from core.graph_tool_events import current_turn_tool_events, parse_tool_signature
 from core.state import AgentState
 
-
-def last_read_file_snapshot(state: AgentState) -> tuple[str, str] | None:
-    """Return the latest read_file path/content snapshot from state if available."""
-    last_tool_output = state.get("last_tool_output", "")
-    if not isinstance(last_tool_output, dict):
-        return None
-
-    path = str(last_tool_output.get("path", "") or "").strip()
-    content = str(last_tool_output.get("content", "") or "")
-    if not path:
-        return None
-    return path, content
-
-
 def response_has_unchanged_write(message: AIMessage, snapshot: tuple[str, str] | None) -> bool:
     """Detect write_file calls that rewrite exactly the same file content."""
     if snapshot is None:
@@ -167,35 +153,6 @@ def next_file_generation_verification_call(history: list) -> dict | None:
     return {
         "name": "run_python",
         "args": run_args,
-        "id": f"pseudo-{uuid4()}",
-        "type": "tool_call",
-    }
-
-
-def next_file_generation_repair_call(state: AgentState) -> dict | None:
-    """After a failed verification, inspect the generated file before retrying execution."""
-    if state.get("last_tool_success") is not False:
-        return None
-
-    parsed_signature = parse_tool_signature(str(state.get("last_tool_signature", "")))
-    if not parsed_signature:
-        return None
-
-    tool_name, tool_args = parsed_signature
-    if tool_name != "run_python":
-        return None
-
-    path = str(tool_args.get("path", "")).strip()
-    if not path.endswith(".py"):
-        return None
-
-    last_tool_output = state.get("last_tool_output", "")
-    if last_tool_missing_required_args(last_tool_output):
-        return None
-
-    return {
-        "name": "read_file",
-        "args": {"path": path},
         "id": f"pseudo-{uuid4()}",
         "type": "tool_call",
     }
