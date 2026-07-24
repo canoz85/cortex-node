@@ -6,6 +6,7 @@ from langchain_core.messages import (
     AIMessage, BaseMessage, 
     HumanMessage, SystemMessage, ToolMessage
 )
+from uuid_utils import uuid4
 
 from core.protocol.enums import (
     BrainOutcome,
@@ -18,7 +19,7 @@ from core.protocol.models import (
     ToolRequest,
 )
 
-from core.protocol.bridge import brain_result_to_legacy
+from core.protocol.bridge import brain_result_to_legacy, tool_result_to_legacy
 
 
 from core.graph_pseudo_tools import (
@@ -200,8 +201,7 @@ def create_brain_node(
         state: AgentState,
         brain_input,
     ) -> AIMessage:
-        
-        last_tool_signature = str(state.get("last_tool_signature", ""))
+        last_tool_signature = _resolved_tool_signature(state=state, brain_input=brain_input)
         has_last_signature = bool(last_tool_signature)
         initial_repeats_signature = (
             message_repeats_signature(response, last_tool_signature)
@@ -212,7 +212,7 @@ def create_brain_node(
             action_required=action_required,
             has_last_tool_signature=has_last_signature,
             response_repeats_signature=initial_repeats_signature,
-            last_tool_success=(state.get("last_tool_success") is True),
+            last_tool_success=(_resolved_tool_success(state=state, brain_input=brain_input) is True),
             corrected_repeats_signature=False,
         )
         if not repeated_signature_guard_decision.apply_guard:
@@ -230,7 +230,7 @@ def create_brain_node(
             action_required=action_required,
             has_last_tool_signature=has_last_signature,
             response_repeats_signature=initial_repeats_signature,
-            last_tool_success=(state.get("last_tool_success") is True),
+            last_tool_success=(_resolved_tool_success(state=state, brain_input=brain_input) is True),
             corrected_repeats_signature=corrected_repeats_signature,
         )
 
@@ -244,11 +244,7 @@ def create_brain_node(
             )
 
             if getattr(final_response, "tool_calls", None):
-                last_tool_output = (
-                    brain_input.last_tool_result
-                    if brain_input.last_tool_result is not None
-                    else state.get("last_tool_output", "")
-                )
+                last_tool_output = _resolved_tool_output_payload(state=state, brain_input=brain_input)
                 if isinstance(last_tool_output, dict):
                     return AIMessage(content=format_tool_result_response(last_tool_output))
                 return AIMessage(
@@ -304,12 +300,7 @@ def create_brain_node(
 
         # Last-resort fallback keeps the flow deterministic when model output is unusable.
         if "Action-required run stopped" in normalize_message_content(decision):
-
-            last_tool_output = (
-                brain_input.last_tool_result
-                if brain_input.last_tool_result is not None
-                else state.get("last_tool_output", "")
-            )
+            last_tool_output = _resolved_tool_output_payload(state=state, brain_input=brain_input)
             if isinstance(last_tool_output, dict):
                 rendered = format_tool_result_response(last_tool_output)
                 if rendered.strip():
@@ -402,17 +393,11 @@ def create_brain_node(
         retrieval_messages = state.get("retrieval_messages", [])
         rolling_summary = state.get("rolling_summary", "")
 
-        # Phase 1.2:
-        # Read protocol ToolResult first, then strictly fall back to legacy state.
-        last_tool_output = (
-            brain_input.last_tool_result
-            if brain_input.last_tool_result is not None
-            else state.get("last_tool_output", "")
-        )
-
-        last_tool_success = state.get("last_tool_success")
+        # Prefer protocol ToolResult, with legacy fallbacks for compatibility.
+        last_tool_output = _resolved_tool_output_payload(state=state, brain_input=brain_input)
+        last_tool_success = _resolved_tool_success(state=state, brain_input=brain_input)
         last_tool_rendered = str(state.get("last_tool_rendered", "") or "")
-        last_tool_signature = str(state.get("last_tool_signature", "") or "")
+        last_tool_signature = _resolved_tool_signature(state=state, brain_input=brain_input)
 
         # Route guard: think to add something
 
@@ -436,6 +421,24 @@ def create_brain_node(
         )
 
         return pre_messages
+
+    def _resolved_tool_output_payload(*, state: AgentState, brain_input) -> object:
+        last_tool_result = getattr(brain_input, "last_tool_result", None)
+        if last_tool_result is not None:
+            return tool_result_to_legacy(last_tool_result)
+        return state.get("last_tool_output", "")
+
+    def _resolved_tool_success(*, state: AgentState, brain_input) -> object:
+        last_tool_result = getattr(brain_input, "last_tool_result", None)
+        if last_tool_result is not None:
+            return last_tool_result.success
+        return state.get("last_tool_success")
+
+    def _resolved_tool_signature(*, state: AgentState, brain_input) -> str:
+        last_tool_result = getattr(brain_input, "last_tool_result", None)
+        if last_tool_result is not None:
+            return str(last_tool_result.request_id or "")
+        return str(state.get("last_tool_signature", "") or "")
     
     def _finalize_brain_response(
         *,
@@ -515,9 +518,11 @@ def create_brain_node(
     ):
         
         
+        # TODO(protocol-refinement): planner_route is still legacy-owned; keep this
+        # fallback read until route ownership migrates into protocol/controller input.
         planner_route = str(state.get("planner_route", ""))
         # Phase 1.1: read plan from BrainInput first, then strictly fall back to legacy state.
-        active_plan = brain_input.active_plan
+        active_plan = getattr(brain_input, "active_plan", None)
 
         plan_text = (
             active_plan.objective
@@ -574,13 +579,12 @@ def create_brain_node(
                 outcome=BrainOutcome.TOOL_REQUEST,
                 message="Brain requested tool execution.",
                 tool_request=ToolRequest(
-                    request_id="legacy-tool-request", # TODO(protocol): Controller generates request ids.
+                    request_id=f"{brain_input.identity.execution_id}:tool:{uuid4().hex}",
                     tool_name=tool_call["name"],
                     arguments=tool_call.get("args", {}),
                     requested_by=WorkerRole.BRAIN,
                 ),
             )
-
         else:
 
             brain_result = BrainResult(
@@ -590,6 +594,7 @@ def create_brain_node(
             )
 
         legacy = brain_result_to_legacy(brain_result)
+        legacy["brain_result"] = brain_result
 
         #
         # Existing bridge remains unchanged for now.

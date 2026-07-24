@@ -135,9 +135,30 @@ class ToolRequest(ImmutableProtocolModel):
 
     request_id: str = Field(min_length=1)
     tool_name: str = Field(min_length=1)
-    arguments: JsonValue = None
+    arguments: dict[str, Any] = Field(default_factory=dict)
     requested_by: WorkerRole = WorkerRole.BRAIN
 
+
+class ToolInput(ImmutableProtocolModel):
+    """Controller-governed input contract for tool execution.
+
+    Protocol purpose: define legal tool execution envelope.
+    Runtime purpose: provide the requested tool invocation together with
+    execution-scoped protocol context.
+    Ownership: prepared by controller.
+    Visibility: Protocol-visible envelope.
+    """
+
+    identity: ExecutionIdentity
+    cursor: ExecutionCursor
+    context: "ExecutionContext"
+
+    tool_request: ToolRequest
+
+    active_plan: ExecutionPlan | None = None
+    active_step: ExecutionStep | None = None
+
+    retry: RetryMetadata = Field(default_factory=RetryMetadata)
 
 class ToolResult(ImmutableProtocolModel):
     """Deterministic tool invocation outcome consumed by continuation logic.
@@ -202,6 +223,27 @@ class BrainResult(ImmutableProtocolModel):
     tool_request: ToolRequest | None = None
     replan_request: ReplanRequest | None = None
     proposed_step_status: StepStatus | None = None
+
+
+class ControllerInput(ImmutableProtocolModel):
+    """Controller-governed input contract for continuation decisions.
+
+    Protocol purpose: define legal controller input envelope.
+    Runtime purpose: assemble role-scoped execution context and latest worker
+    outputs without coupling controller logic to legacy state shape.
+    Ownership: prepared by runtime services under controller authority.
+    Visibility: Protocol-visible envelope with scoped runtime context.
+    """
+
+    identity: ExecutionIdentity
+    cursor: ExecutionCursor
+    context: "ExecutionContext"
+    active_plan: ExecutionPlan | None = None
+    active_step: ExecutionStep | None = None
+    planner_result: PlannerResult | None = None
+    brain_result: BrainResult | None = None
+    tool_result: ToolResult | None = None
+    retry: RetryMetadata = Field(default_factory=RetryMetadata)
 
 
 class PlannerInput(ImmutableProtocolModel):

@@ -8,7 +8,6 @@ from core.graph_constants import ANSI_BLUE, ANSI_ITALIC, ANSI_RED, ANSI_GREEN, A
 
 from core.graph_planner import create_planner_node
 from core.graph_summarize import create_summarize_memory_node
-from core.graph_routing import route_after_brain
 
 from core.rag import WorkspaceRAG
 
@@ -45,4 +44,4 @@ def create_graph_nodes(
         show_raw_llm=show_raw_llm,
     )
 
-    return planner_node, brain_node, capture_tool_output_node, route_after_brain, summarize_memory_node
+    return planner_node, brain_node, capture_tool_output_node, summarize_memory_node

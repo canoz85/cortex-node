@@ -43,6 +43,7 @@ from .enums import (
 from .models import (
     BrainInput,
     BrainResult,
+    ControllerInput,
     PlannerInput,
     PlannerResult,
     ControllerDecision,
@@ -57,6 +58,7 @@ from .models import (
     ProtocolVisibleState,
     ReplanRequest,
     RetryMetadata,
+    ToolInput,
     ToolRequest,
     ToolResult,
     WorkingState,
@@ -86,6 +88,7 @@ _DEBUG_METADATA_KEYS: tuple[str, ...] = (
 _WORKING_STATE_CONSUMED_KEYS: Final[frozenset[str]] = frozenset({
     "messages",
     "last_tool_output",
+    "last_tool_result",
     "last_tool_rendered",
     "last_tool_signature",
     "last_tool_success",
@@ -94,6 +97,7 @@ _WORKING_STATE_CONSUMED_KEYS: Final[frozenset[str]] = frozenset({
     "steps",
     "token_usage",
     "plan",
+    "planner_result",
     "planner_route",
     "planner_domain",
     "planner_confidence",
@@ -121,6 +125,7 @@ _WORKING_STATE_CONSUMED_KEYS: Final[frozenset[str]] = frozenset({
     "last_error_code",
     "last_error_message",
     "routing_metadata",
+    "brain_result",
 })
 
 
@@ -345,8 +350,12 @@ def _build_event_history(legacy_state: LegacyState | None) -> tuple[EventRecord,
     return tuple(records)
 
 
-def _legacy_tool_result_to_model(legacy_state: LegacyState | None) -> ToolResult | None:
+def legacy_tool_result_to_model(legacy_state: LegacyState | None) -> ToolResult | None:
     state = _state_or_empty(legacy_state)
+    existing = state.get("last_tool_result")
+    if isinstance(existing, ToolResult):
+        return existing
+
     raw = state.get("last_tool_output")
     if raw in (None, ""):
         return None
@@ -370,6 +379,88 @@ def _legacy_tool_result_to_model(legacy_state: LegacyState | None) -> ToolResult
         message=_to_str(raw, default=""),
         data=None,
         error_code=None,
+    )
+
+
+def _legacy_tool_request_to_model(value: Any) -> ToolRequest | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    tool_name = _to_str(value.get("tool_name"), default="").strip()
+    if not tool_name:
+        return None
+
+    return ToolRequest(
+        request_id=_to_str(value.get("request_id"), default="legacy-tool-request"),
+        tool_name=tool_name,
+        arguments=_json_compatible(value.get("arguments")),
+        requested_by=_enum_or_default(WorkerRole, value.get("requested_by"), WorkerRole.BRAIN),
+    )
+
+
+def _legacy_replan_request_to_model(value: Any) -> ReplanRequest | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    reason = _to_str(value.get("reason"), default="").strip()
+    if not reason:
+        return None
+
+    raw_constraints = value.get("constraints")
+    constraints = tuple(str(item) for item in raw_constraints) if isinstance(raw_constraints, Sequence) else tuple()
+
+    return ReplanRequest(
+        reason=reason,
+        failed_step_id=_to_str(value.get("failed_step_id"), default="") or None,
+        constraints=constraints,
+        requested_by=_enum_or_default(WorkerRole, value.get("requested_by"), WorkerRole.BRAIN),
+    )
+
+
+def _legacy_planner_result_to_model(legacy_state: LegacyState | None, execution_plan: ExecutionPlan | None) -> PlannerResult | None:
+    state = _state_or_empty(legacy_state)
+    if execution_plan is None:
+        return None
+
+    planner_message = _to_str(state.get("planner_message"), default="")
+    planner_rationale = _to_str(state.get("planner_rationale"), default="")
+    planner_change_summary = _to_str(state.get("planner_change_summary"), default="")
+
+    if not any((planner_message.strip(), planner_rationale.strip(), planner_change_summary.strip(), execution_plan.objective.strip())):
+        return None
+
+    return PlannerResult(
+        proposed_plan=execution_plan,
+        message=planner_message,
+        planning_rationale=planner_rationale,
+        change_summary=planner_change_summary,
+    )
+
+
+def _legacy_brain_result_to_model(legacy_state: LegacyState | None) -> BrainResult | None:
+    state = _state_or_empty(legacy_state)
+
+    outcome = _enum_or_none(BrainOutcome, state.get("brain_outcome"))
+    tool_request = _legacy_tool_request_to_model(state.get("tool_request"))
+    replan_request = _legacy_replan_request_to_model(state.get("replan_request"))
+    proposed_step_status = _enum_or_none(StepStatus, state.get("proposed_step_status"))
+    message = _to_str(state.get("brain_message"), default="")
+
+    if outcome is None:
+        if tool_request is not None:
+            outcome = BrainOutcome.TOOL_REQUEST
+        elif replan_request is not None:
+            outcome = BrainOutcome.REPLAN_REQUEST
+
+    if outcome is None:
+        return None
+
+    return BrainResult(
+        outcome=outcome,
+        message=message,
+        tool_request=tool_request,
+        replan_request=replan_request,
+        proposed_step_status=proposed_step_status,
     )
 
 
@@ -437,7 +528,15 @@ def build_execution_cursor(
         phase=resolved_phase,
         step_id=_to_str(state.get("step_id") or state.get("active_step_id"), default="") or None,
         event_index=_to_int(state.get("event_index"), default=0, minimum=0),
-        plan_revision=_to_optional_int(state.get("plan_revision"), minimum=1),
+        plan_revision=(
+            _to_optional_int(state.get("plan_revision"), minimum=1)
+            or (
+                state.get("planner_result").proposed_plan.revision
+                if isinstance(state.get("planner_result"), PlannerResult)
+                and state.get("planner_result").proposed_plan is not None
+                else None
+            )
+        ),
         step_attempt=_to_optional_int(state.get("step_attempt"), minimum=0),
         current_worker=_enum_or_none(WorkerRole, state.get("current_worker")),
         controller_iteration=_to_optional_int(state.get("steps"), minimum=0),
@@ -482,7 +581,7 @@ def build_protocol_visible_state(
 def build_working_state(legacy_state: LegacyState | None = None) -> WorkingState:
     """Build WorkingState from runtime helper metadata and non-authoritative values."""
     state = _state_or_empty(legacy_state)
-    last_tool_result = _legacy_tool_result_to_model(state)
+    last_tool_result = legacy_tool_result_to_model(state)
 
     retrieval = _sequence_or_empty(state.get("retrieval_messages"))
     retrieval_context = tuple(_message_text(item) for item in retrieval)
@@ -536,6 +635,10 @@ def build_execution_plan(
 
     state = _state_or_empty(legacy_state)
 
+    planner_result = state.get("planner_result")
+    if isinstance(planner_result, PlannerResult):
+        return planner_result.proposed_plan
+
     resolved_identity = (
         identity
         if identity is not None
@@ -573,6 +676,13 @@ def planner_result_to_legacy(result: PlannerResult) -> dict[str, Any]:
         payload["plan_id"] = result.proposed_plan.plan_id
         payload["plan_revision"] = result.proposed_plan.revision
 
+
+    if result.planning_rationale:
+        payload["planner_rationale"] = result.planning_rationale
+
+    if result.change_summary:
+        payload["planner_change_summary"] = result.change_summary
+    
     return payload
 
 def build_brain_input(legacy_state: LegacyState | None = None) -> BrainInput:
@@ -585,6 +695,47 @@ def build_brain_input(legacy_state: LegacyState | None = None) -> BrainInput:
         active_plan=execution_state.protocol_visible.active_plan,
         active_step=execution_state.protocol_visible.active_step,
         last_tool_result=execution_state.working.last_tool_result,
+        retry=execution_state.protocol_visible.retry,
+    )
+
+
+def build_controller_input(legacy_state: LegacyState | None = None) -> ControllerInput:
+    """Build ControllerInput contract from legacy runtime state."""
+
+    execution_state = build_execution_state(legacy_state)
+    state = _state_or_empty(legacy_state)
+
+    pr = state.get("planner_result")
+    print(
+        "CONTROLLER STATE:",
+        pr.proposed_plan.plan_id if pr else None,
+        id(pr) if pr else None,
+    )
+
+    active_plan = execution_state.protocol_visible.active_plan
+
+    planner_result = state.get("planner_result") if isinstance(state.get("planner_result"), PlannerResult) else None
+    if planner_result is None:
+        planner_result = _legacy_planner_result_to_model(legacy_state, active_plan)
+
+    brain_result = state.get("brain_result") if isinstance(state.get("brain_result"), BrainResult) else None
+    if brain_result is None:
+        brain_result = _legacy_brain_result_to_model(legacy_state)
+
+    tool_result = execution_state.working.last_tool_result
+
+    return ControllerInput(
+        identity=execution_state.protocol_visible.identity,
+        cursor=execution_state.protocol_visible.cursor,
+        context=build_execution_context(
+            legacy_state,
+            role=WorkerRole.CONTROLLER,
+        ),
+        active_plan=active_plan,
+        active_step=execution_state.protocol_visible.active_step,
+        planner_result=planner_result,
+        brain_result=brain_result,
+        tool_result=tool_result,
         retry=execution_state.protocol_visible.retry,
     )
 
@@ -617,6 +768,47 @@ def brain_result_to_legacy(result: BrainResult) -> dict[str, Any]:
 
     return payload
 
+def build_tool_input(legacy_state: LegacyState | None = None,) -> ToolInput:
+    """Build ToolInput contract from legacy runtime state."""
+
+    execution_state = build_execution_state(legacy_state)
+
+    tool_result = execution_state.working.last_tool_result
+
+    request_id = (
+        tool_result.request_id
+        if tool_result is not None
+        else _to_str(
+            _state_or_empty(legacy_state).get(
+                "last_tool_signature"
+            ),
+            default="legacy-tool-request",
+        )
+    )
+
+    tool_request = ToolRequest(
+        request_id=request_id,
+        tool_name=_to_str(
+            _state_or_empty(legacy_state).get("tool_name"),
+            default="",
+        ),
+        arguments=_mapping_or_empty(
+            _state_or_empty(legacy_state).get("tool_args")
+        ),
+    )
+
+    return ToolInput(
+        identity=execution_state.protocol_visible.identity,
+        cursor=execution_state.protocol_visible.cursor,
+        context=build_execution_context(
+            legacy_state,
+            role=WorkerRole.TOOL,
+        ),
+        tool_request=tool_request,
+        active_plan=execution_state.protocol_visible.active_plan,
+        active_step=execution_state.protocol_visible.active_step,
+        retry=execution_state.protocol_visible.retry,
+    )
 
 def tool_result_to_legacy(result: ToolResult) -> dict[str, Any]:
     """Translate ToolResult into the existing legacy structured tool payload shape."""
@@ -736,8 +928,11 @@ __all__ = [
     "build_execution_state",
     "build_brain_input",
     "build_planner_input",
+    "build_controller_input",
+    "build_tool_input",
     "brain_result_to_legacy",
     "tool_result_to_legacy",
+    "legacy_tool_result_to_model",
     "controller_decision_to_legacy",
     "legacy_state_to_execution_state",
     "execution_state_to_legacy",

@@ -15,6 +15,9 @@ from .enums import (
 from .models import (
     BrainInput,
     BrainResult,
+    ControllerInput,
+    PlannerInput,
+    PlannerResult,
     CheckpointState,
     ControllerDecision,
     EventRecord,
@@ -28,6 +31,7 @@ from .models import (
     ProtocolVisibleState,
     ReplanRequest,
     RetryMetadata,
+    ToolInput,
     ToolRequest,
     ToolResult,
     WorkingState,
@@ -52,6 +56,9 @@ __all__ = [
     # Models
     "BrainInput",
     "BrainResult",
+    "ControllerInput",
+    "PlannerInput",
+    "PlannerResult",
     "CheckpointState",
     "ControllerDecision",
     "EventRecord",
@@ -66,6 +73,7 @@ __all__ = [
     "ReplanRequest",
     "RetryMetadata",
     "ToolRequest",
+    "ToolInput",
     "ToolResult",
     "WorkingState",
 

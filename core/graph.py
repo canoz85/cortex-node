@@ -8,6 +8,7 @@ from langgraph.prebuilt import ToolNode
 
 from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE
 from core.graph_nodes import create_graph_nodes
+from core.graph_routing import route_after_brain, route_after_planner
 from core.graph_runner import run_prompt
 from core.rag import WorkspaceRAG
 from core.runtime.state_propagation import propagate_execution_state
@@ -105,7 +106,7 @@ def build_app(
     rag_factory: RAGFactory = _default_rag_factory,
     tool_list_factory: ToolListFactory = _default_tool_list_factory,
     chat_model_factory: ChatModelFactory = _default_chat_model_factory,
-    graph_nodes_factory: Callable[..., tuple[Any, Any, Any, Any, Any]] = create_graph_nodes,
+    graph_nodes_factory: Callable[..., tuple[Any, Any, Any, Any]] = create_graph_nodes,
     tool_node_factory: Callable[[list[Any]], Any] = ToolNode,
     project_root: Path | None = None,
     show_raw_llm: bool = False,
@@ -138,7 +139,7 @@ def build_app(
     brain_llm = chat_model_factory(model, 0)
     tool_brain_llm = chat_model_factory(model, 0).bind_tools(tools)
 
-    planner_node, brain_node, capture_tool_output_node, route_after_brain, summarize_memory_node = graph_nodes_factory(
+    planner_node, brain_node, capture_tool_output_node, summarize_memory_node = graph_nodes_factory(
         brain_llm=brain_llm,
         tool_brain_llm=tool_brain_llm,
         planner_llm=planner_llm,
@@ -159,7 +160,7 @@ def build_app(
     _register_state_node(workflow, "summarize_memory", summarize_memory_node)
 
     workflow.set_entry_point("planner")
-    workflow.add_edge("planner", "brain")
+    workflow.add_conditional_edges("planner", route_after_planner)
     workflow.add_conditional_edges("brain", route_after_brain)
     workflow.add_edge("tools", "capture_tool_output")
     workflow.add_edge("capture_tool_output", "brain")

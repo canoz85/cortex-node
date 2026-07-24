@@ -7,7 +7,7 @@ from core.graph_constants import RECENT_MESSAGE_WINDOW
 from core.graph_context import retrieval_message
 from core.graph_intents import planner_routing_decision, preferred_info_tool
 from core.graph_messages import latest_human_message_str, recent_messages
-from core.protocol.models import ExecutionPlan, PlannerResult
+from core.protocol.models import ExecutionPlan, ExecutionStep, PlannerResult
 from core.rag import WorkspaceRAG
 from core.state import AgentState
 
@@ -107,21 +107,52 @@ def create_planner_node(
 
         active_plan = planner_input.active_plan
         planner_result = PlannerResult(
-            proposed_plan=ExecutionPlan(
-            plan_id=(
-                active_plan.plan_id
-                if active_plan
-                else "legacy-plan"
-            ),
-            revision=(
-                active_plan.revision + 1
-                if active_plan
-                else 1
-            ),
-                objective=plan_text,
-                steps=tuple(),
-            ),
-            message="Plan generated successfully.",
+            proposed_plan=ExecutionPlan(        
+                plan_id=(
+                    active_plan.plan_id
+                    if active_plan
+                    else f"{planner_input.identity.execution_id}:plan"
+                ),
+                revision=(
+                    active_plan.revision + 1
+                    if active_plan
+                    else 1
+                ),
+                    objective=plan_text,
+                    steps=(
+                        (
+                            ExecutionStep(
+                                step_id="step-1",
+                                title="Respond",
+                                description="Respond directly to the user.",
+                            ),
+                        )
+                        if planner_route in {
+                            "conversation",
+                            "casual",
+                            "coding_discussion",
+                            "info",
+                            "clarify_domain",
+                        }
+                        else (
+                            ExecutionStep(
+                                step_id="step-1",
+                                title="Execute plan",
+                                description="Perform the first planned action.",
+                            ),
+                            ExecutionStep(
+                                step_id="step-2",
+                                title="Finalize",
+                                description="Complete the request and return the final answer.",
+                                depends_on_step_ids=("step-1",),
+                            ),
+                        )
+                    ),            ),
+                message="Plan generated successfully.",
+                planning_rationale=(
+                    f"Route '{planner_route}' selected with "
+                    f"confidence {routing_decision.confidence:.2f}."
+                ),
         )
 
         # TODO(CEP-006):
@@ -129,6 +160,7 @@ def create_planner_node(
         legacy = planner_result_to_legacy(planner_result)
 
         legacy.update({
+            "planner_result": planner_result,
             "retrieval_messages": retrieval_messages,
             "planner_route": routing_decision.route,
             "planner_domain": routing_decision.domain,
@@ -142,6 +174,12 @@ def create_planner_node(
             "repeat_fail_count": 0,
             "tool_text_retry_used": False,
         })
+
+        print(
+            "PLANNER RETURN:",
+            planner_result.proposed_plan.plan_id,
+            id(planner_result),
+        )
 
         return legacy
 

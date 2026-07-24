@@ -88,7 +88,7 @@ MATH_INTENT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CASUAL_CHAT_PATTERN = re.compile(
-    r"\b(hi|hello|hey|thanks|thank you|how are you|what'?s up|good morning|good afternoon|good evening|my name is|i am|call me|what is my name|who am i|nice to meet you|bye|goodbye|see you)\b",
+    r"\b(hi |hello |hey|thanks|thank you|how are you|what'?s up|good morning|good afternoon|good evening|my name is|i am|call me|what is my name|who am i|nice to meet you|bye|goodbye|see you)\b",
     re.IGNORECASE,
 )
 CODE_DISCUSSION_PATTERN = re.compile(

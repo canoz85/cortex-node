@@ -557,3 +557,82 @@ roadmap
 8. Remove bridge
 9. Remove legacy dict
 -------
+
+
+-------
+planner improvement:
+Yes — this is feasible, and it fits the current architecture well.
+
+## What I found
+
+The main limitation is not the protocol itself. The current flow already has the right building blocks:
+
+- graph_planner.py creates an `ExecutionPlan`
+- models.py already has `ExecutionStep` with `title` and `description`
+- graph_brain.py currently does not use the plan steps directly; it mostly uses the plan objective and a shallow planner brief
+
+So the brain is not “ignoring” the planner because the model is incapable — it is mostly because the planner output is still too generic and the brain is not consuming the step list.
+
+## Recommended approach
+
+### Phase 1: make planner output more concrete
+The planner should emit explicit execution steps such as:
+
+- Inspect workspace
+- Create or edit the target file
+- Run the script or verify the result
+- Report the outcome
+
+That means the planner should stop producing only a generic “execute plan” / “finalize” pair.
+
+### Phase 2: make brain consume those steps
+The brain should receive a compact “next step” context derived from the active plan, for example:
+
+- current step
+- remaining steps
+- the step description to follow
+
+This is a small change and should work well with the current schema.
+
+## Implementation steps
+
+1. Improve the planner prompt in graph_planner.py
+   - Tell the planner to produce 3–5 concrete steps.
+   - Each step should be action-oriented and tool-aware.
+   - Example wording: “Use the next unfinished step as the immediate execution target.”
+
+2. Stop using only generic fallback steps
+   - Right now the planner creates very generic steps like “Execute plan” and “Finalize”.
+   - Replace that with a step list derived from the planner’s own output, or at least a better fallback mapping.
+
+3. Add a step-to-brain formatter
+   - Add a helper in graph_node_helpers.py that turns the active plan’s steps into a concise brief for the brain.
+   - Example: “Next step: create the requested script. Remaining steps: run it, verify output.”
+
+4. Update the brain context assembly in graph_brain.py
+   - Read `active_plan.steps`
+   - Build a prompt section like:
+     - “Current step: …”
+     - “Remaining plan: …”
+   - Use that as higher-priority guidance before the model chooses the next tool.
+
+5. Keep the current behavior as fallback
+   - If the planner does not produce strong steps, fall back to the older generic behavior.
+   - That keeps the system stable while the new flow is being introduced.
+
+6. Add regression tests
+   - One test for planner step generation
+   - One test that the brain prompt includes the step list
+   - One lightweight end-to-end flow test for planner → brain → tool execution
+
+## My recommendation
+
+I would implement this in two layers:
+
+- Minimal version: use the existing `ExecutionStep.title` and `ExecutionStep.description` only
+- Later refinement: add optional tool hints to the step model in models.py, such as `tool_name` or `tool_hint`
+
+That keeps the first version simple and still very useful.
+
+If you want, I can turn this into the actual patch next and start with the planner-side change first.
+-------
