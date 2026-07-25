@@ -1,42 +1,51 @@
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
+from typing import Dict, Any, Set
 
 from core.protocol.bridge import build_planner_input, planner_result_to_legacy
 
 from core.graph_constants import RECENT_MESSAGE_WINDOW
 from core.graph_context import retrieval_message
-from core.graph_intents import planner_routing_decision, preferred_info_tool
-from core.graph_messages import latest_human_message_str, recent_messages
+from core.graph_intents import planner_routing_decision
 from core.protocol.models import ExecutionPlan, ExecutionStep, PlannerResult
 from core.rag import WorkspaceRAG
 from core.state import AgentState
 
+CONCRETE_PLANNING_SYSTEM_PROMPT = """
+You are a strategic execution planner for an autonomous AI agent.
+Your goal is to turn the user's request into a strict, executable plan based on the upstream classification.
 
-PLANNING_SYSTEM_PROMPT_TEMP = """You are a strategic planner. Analyze the user's request and create a clear step-by-step plan.
-DO NOT take any actions yet. Just output:
-1. What needs to be done (list of 2-4 key tasks)
-2. File/tool sequence required
-3. Expected outcome
-
-Be concise. Format as a numbered list."""
-
-PLANNING_SYSTEM_PROMPT = """You are a strategic planner for an execution agent. 
-Analyze the user's request and create a step-by-step plan using only the agent's available tools.
+ROUTER CONTEXT:
+- Target Route: {route}
+- Target Domain: {domain}
+- Intent Justification: {reason}
 
 AVAILABLE AGENT TOOLS:
 {available_tools}
 
-CRITICAL RULES:
-1. If the user asks to create code/scripts and run or execute them, your plan MUST explicitly divide this into separate steps using the agent's tools:
-   - A step to save the code to disk using the `write_file` tool.
-   - A subsequent step to execute that script using the `run_python` tool.
-2. Do not describe the internal libraries of the script (like os or pathlib) in the tool sequence. Describe what the AGENT must do with its tools.
-3. DO NOT generate or output any code blocks in this phase.
+PLANNING RULES:
+1. Generate between 3 and 5 logical, sequential steps.
+2. If Target Route is "conversation", do NOT assign tools to steps. Write conversational step titles (e.g., "Synthesize explanation").
+3. If Target Route is "info" or "action", EVERY step MUST explicitly name the tool to use in the description (e.g., "Use `rag_search` to...").
+4. Keep steps strictly aligned with the "{domain}" domain. Do not invoke unrelated tools.
+5. Keep execution safe: perform read/validation steps before state-changing write actions.
 
-Format as a numbered list:
-1. Tasks to be done
-2. Agent tool sequence required (e.g., write_file -> run_python)
-3. Expected outcome"""
+FORMAT REQUIREMENT:
+Output ONLY a numbered list in this exact format (no markdown code blocks, no introduction, no conversational wrap-up):
+
+1. <title (≤10 words)> – <description (≤30 words)>
+2. <title (≤10 words)> – <description (≤30 words)>
+3. <title (≤10 words)> – <description (≤30 words)>
+"""
+
+# Static set for non-tool/direct response routes
+DIRECT_RESPONSE_ROUTES: Set[str] = {
+    "conversation",
+    "casual",
+    "coding_discussion",
+    "info",
+    "clarify_domain",
+}
 
 def create_planner_node(
     *,
@@ -46,113 +55,119 @@ def create_planner_node(
     rag_top_k: int,
     tool_name_set: set[str],
 ):
-    def planner_node(state: AgentState):
-        """First pass: analyze prompt and create a plan WITHOUT taking actions."""
 
-        planner_input = build_planner_input(state)
+    def _decide_route_and_plan(
+        latest_user_prompt: str,
+        router_llm: ChatOllama | None,
+        planner_llm: ChatOllama,
+        tool_name_set: set[str],
+        rag_service: WorkspaceRAG,
+        rag_top_k: int,
+    ) -> tuple[Any, str, list]:
+        """Decides the routing direction and constructs the initial objective plan text."""
         
-        retrieval_messages = []
-        latest_user_prompt = planner_input.context.user_request
-
-        routing_decision = planner_routing_decision(latest_user_prompt, router_llm=router_llm, tool_name_set=tool_name_set)
+        routing_decision = planner_routing_decision(
+            latest_user_prompt, 
+            router_llm=router_llm, 
+            tool_name_set=tool_name_set
+        )
         planner_route = routing_decision.route
+        retrieval_messages = []
 
-        if planner_route == "info":
-            plan_text = f"Info query detected: call {routing_decision.reason} tool and report the result."
-        elif planner_route == "clarify_domain":
+        # 1. Direct Conversational / Non-Tool Routes
+        if planner_route == "conversation":
             plan_text = (
-                "Ambiguous domain detected: ask the user to choose SAP or Python before taking actions. "
-                "Do not call tools until clarified."
+                "You are in standard conversation mode. Under no circumstances should you "
+                "invoke any function, plugin, or external tool. Answer the user directly using text only."
+                f"ROUTER CONTEXT: {routing_decision.reason}"
             )
-        elif planner_route == "casual":
+        elif planner_route == "clarify_domain" or routing_decision.needs_clarification:
             plan_text = (
-                "Casual conversation detected: respond directly without tools. "
-                "Use conversation context for personal facts already shared and keep the reply brief."
+                "The request is ambiguous or spans multiple domains. "
+                "Ask a targeted clarifying question to determine the user's explicit intent."
             )
-        elif planner_route == "coding_discussion":
-            plan_text = (
-                "Coding discussion detected: answer directly unless a targeted tool becomes necessary. "
-                "Use conversation context, retrieved knowledge, and keep the reply concise."
-            )
-        elif planner_route == "conversation":
-            plan_text = "Conversation detected: respond directly and briefly without tools unless the user asks for concrete action."
+        # 2. Tool / Execution Required Routes
         else:
-            retrieval_messages = retrieval_message(rag_service, latest_user_prompt, rag_top_k)
-
-            # Format the available tools into a clean, scannable string block
             tools_list_str = "\n".join([f"- {name}" for name in sorted(tool_name_set) if name])
+            runtime_planning_prompt = CONCRETE_PLANNING_SYSTEM_PROMPT.format(
+                available_tools=tools_list_str,
+                route=planner_route,
+                domain=routing_decision.domain,
+                reason=routing_decision.reason,
+            )
 
-            # Dynamically build the definitive prompt for this instance
-            runtime_planning_prompt = PLANNING_SYSTEM_PROMPT.format(available_tools=tools_list_str)
-
+            retrieval_messages = retrieval_message(rag_service, latest_user_prompt, rag_top_k)
             pre_messages = [
                 SystemMessage(content=runtime_planning_prompt),
                 *retrieval_messages,
                 HumanMessage(content=latest_user_prompt),
             ]
 
-            ###
-            # TODO (Planner)
-            #
-            # Investigate planner/tool routing:
-            # - workspace listing prompt
-            # - planner confidence
-            # - tool selection
-            # - route heuristics
-            #
-            # Deferred until protocol migration is complete.
-
-            plan_response = planner_llm.invoke([*pre_messages])
+            plan_response = planner_llm.invoke(pre_messages)
             plan_text = str(plan_response.content)
 
+        return routing_decision, plan_text, retrieval_messages
+    
+    def planner_node(state: AgentState):
+        """First pass: analyze prompt and create a plan WITHOUT taking actions."""
+
+        planner_input = build_planner_input(state)
+        latest_user_prompt = planner_input.context.user_request
+
+        # Run decision layer
+        routing_decision, plan_text, retrieval_messages = _decide_route_and_plan(
+            latest_user_prompt=latest_user_prompt,
+            router_llm=router_llm,
+            planner_llm=planner_llm,
+            tool_name_set=tool_name_set,
+            rag_service=rag_service,
+            rag_top_k=rag_top_k,
+        )
+
+        planner_route = routing_decision.route
         active_plan = planner_input.active_plan
+
+        # Construct single vs multi-step plan depending on route
+        if planner_route in DIRECT_RESPONSE_ROUTES:
+            steps = (
+                ExecutionStep(
+                    step_id="step-1",
+                    title="Respond",
+                    description="Respond directly to the user.",
+                ),
+            )
+        else:
+            steps = (
+                ExecutionStep(
+                    step_id="step-1",
+                    title="Execute plan",
+                    description="Perform the first planned action.",
+                ),
+                ExecutionStep(
+                    step_id="step-2",
+                    title="Finalize",
+                    description="Complete the request and return the final answer.",
+                    depends_on_step_ids=("step-1",),
+                ),
+            )
+
+        # Build structured execution plan
         planner_result = PlannerResult(
-            proposed_plan=ExecutionPlan(        
+            proposed_plan=ExecutionPlan(
                 plan_id=(
                     active_plan.plan_id
                     if active_plan
                     else f"{planner_input.identity.execution_id}:plan"
                 ),
-                revision=(
-                    active_plan.revision + 1
-                    if active_plan
-                    else 1
-                ),
-                    objective=plan_text,
-                    steps=(
-                        (
-                            ExecutionStep(
-                                step_id="step-1",
-                                title="Respond",
-                                description="Respond directly to the user.",
-                            ),
-                        )
-                        if planner_route in {
-                            "conversation",
-                            "casual",
-                            "coding_discussion",
-                            "info",
-                            "clarify_domain",
-                        }
-                        else (
-                            ExecutionStep(
-                                step_id="step-1",
-                                title="Execute plan",
-                                description="Perform the first planned action.",
-                            ),
-                            ExecutionStep(
-                                step_id="step-2",
-                                title="Finalize",
-                                description="Complete the request and return the final answer.",
-                                depends_on_step_ids=("step-1",),
-                            ),
-                        )
-                    ),            ),
-                message="Plan generated successfully.",
-                planning_rationale=(
-                    f"Route '{planner_route}' selected with "
-                    f"confidence {routing_decision.confidence:.2f}."
-                ),
+                revision=(active_plan.revision + 1 if active_plan else 1),
+                objective=plan_text,
+                steps=steps,
+            ),
+            message="Plan generated successfully.",
+            planning_rationale=(
+                f"Route '{planner_route}' selected with "
+                f"confidence {routing_decision.confidence:.2f}."
+            ),
         )
 
         # TODO(CEP-006):

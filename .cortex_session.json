@@ -3226,6 +3226,359 @@
                     "total_tokens": 781
                 }
             }
+        },
+        {
+            "type": "human",
+            "data": {
+                "content": "list ws files",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "human",
+                "name": null,
+                "id": "f6592f1d-9d72-4f2a-8d19-cfd1c78d9891"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "ai",
+                "name": null,
+                "id": "97e8de76-f7a8-41a4-917d-24b44eb89bf0",
+                "tool_calls": [
+                    {
+                        "name": "list_files",
+                        "args": {
+                            "path": "."
+                        },
+                        "id": "d55c6964-de4d-41ae-839f-10acc195531d",
+                        "type": "tool_call"
+                    }
+                ],
+                "invalid_tool_calls": [],
+                "usage_metadata": null
+            }
+        },
+        {
+            "type": "tool",
+            "data": {
+                "content": "Listing for .\n<tool_result_json>\n{\"display\": \"Files under .:\\n- knowledge/\\n- network_logs/\\n- check_env.py\\n- cortexnode_logo.png\\n- cortexnode_logo.svg\\n- count_chars.py\\n- create_logo.py\\n- create_structure_cli.py\\n- create_svg_logo.py\\n- generate_project_structure.py\\n- hello.py\\n- migration_test.txt\\n- monitor_network.py\\n- notes.txt\\n- personal.md\\n- project_template.txt\\n- README.md\\n- test_image_check.py\\n- web_search_tool.py\", \"error_code\": null, \"error_details\": null, \"success\": true, \"message\": \"Listing for .\", \"path\": \".\", \"entries\": [\"knowledge/\", \"network_logs/\", \"check_env.py\", \"cortexnode_logo.png\", \"cortexnode_logo.svg\", \"count_chars.py\", \"create_logo.py\", \"create_structure_cli.py\", \"create_svg_logo.py\", \"generate_project_structure.py\", \"hello.py\", \"migration_test.txt\", \"monitor_network.py\", \"notes.txt\", \"personal.md\", \"project_template.txt\", \"README.md\", \"test_image_check.py\", \"web_search_tool.py\"], \"is_file\": false}",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "tool",
+                "name": "list_files",
+                "id": "a3ad30c0-dd49-4eb7-9b1a-e392d24aa75e",
+                "tool_call_id": "d55c6964-de4d-41ae-839f-10acc195531d",
+                "artifact": null,
+                "status": "success"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "ai",
+                "name": null,
+                "id": "0f1546eb-3296-44fa-8ddc-f03686842ad0",
+                "tool_calls": [
+                    {
+                        "name": "list_files",
+                        "args": {
+                            "path": "knowledge/"
+                        },
+                        "id": "d66f5000-bb59-4ff3-b3ab-479b9fc382f5",
+                        "type": "tool_call"
+                    }
+                ],
+                "invalid_tool_calls": [],
+                "usage_metadata": null
+            }
+        },
+        {
+            "type": "tool",
+            "data": {
+                "content": "Listing for knowledge\n<tool_result_json>\n{\"display\": \"No files found under knowledge/.\", \"error_code\": null, \"error_details\": null, \"success\": true, \"message\": \"Listing for knowledge\", \"path\": \"knowledge/\", \"entries\": [], \"is_file\": false}",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "tool",
+                "name": "list_files",
+                "id": "bbf73448-23d2-4851-abd9-76c4146ed52f",
+                "tool_call_id": "d66f5000-bb59-4ff3-b3ab-479b9fc382f5",
+                "artifact": null,
+                "status": "success"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "ai",
+                "name": null,
+                "id": "c46637b1-3d54-41e4-999b-1523eb553cc6",
+                "tool_calls": [
+                    {
+                        "name": "list_files",
+                        "args": {
+                            "path": "network_logs/"
+                        },
+                        "id": "1ad8f12c-2304-4135-ae59-c9613d9f1ad6",
+                        "type": "tool_call"
+                    }
+                ],
+                "invalid_tool_calls": [],
+                "usage_metadata": null
+            }
+        },
+        {
+            "type": "tool",
+            "data": {
+                "content": "Listing for network_logs\n<tool_result_json>\n{\"display\": \"Files under network_logs/:\\n- reachability.log\", \"error_code\": null, \"error_details\": null, \"success\": true, \"message\": \"Listing for network_logs\", \"path\": \"network_logs/\", \"entries\": [\"reachability.log\"], \"is_file\": false}",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "tool",
+                "name": "list_files",
+                "id": "772934fd-a6bc-41c1-af4c-8505c611d036",
+                "tool_call_id": "1ad8f12c-2304-4135-ae59-c9613d9f1ad6",
+                "artifact": null,
+                "status": "success"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "No `.ws` files were found in the workspace.",
+                "additional_kwargs": {},
+                "response_metadata": {
+                    "model": "gemma4:12b",
+                    "created_at": "2026-07-24T21:20:39.0468562Z",
+                    "done": true,
+                    "done_reason": "stop",
+                    "total_duration": 7154377000,
+                    "load_duration": 868975700,
+                    "prompt_eval_count": 2973,
+                    "prompt_eval_duration": 299965000,
+                    "eval_count": 334,
+                    "eval_duration": 5967990000,
+                    "logprobs": null,
+                    "model_name": "gemma4:12b",
+                    "model_provider": "ollama"
+                },
+                "type": "ai",
+                "name": null,
+                "id": "lc_run--019f9600-5493-78d1-891a-0c6af7d71753-0",
+                "tool_calls": [],
+                "invalid_tool_calls": [],
+                "usage_metadata": {
+                    "input_tokens": 2973,
+                    "output_tokens": 334,
+                    "total_tokens": 3307
+                }
+            }
+        },
+        {
+            "type": "human",
+            "data": {
+                "content": "list all tools name",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "human",
+                "name": null,
+                "id": "1840c973-193c-4b6d-a21c-d48109f16e38"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "ai",
+                "name": null,
+                "id": "bec685fa-394f-454d-bf90-e8308df82f4a",
+                "tool_calls": [
+                    {
+                        "name": "agent_info",
+                        "args": {},
+                        "id": "f57fc346-2f2a-41d5-b3fd-5b467c3a5c94",
+                        "type": "tool_call"
+                    }
+                ],
+                "invalid_tool_calls": [],
+                "usage_metadata": null
+            }
+        },
+        {
+            "type": "tool",
+            "data": {
+                "content": "CortexNode runtime info\n<tool_result_json>\n{\"display\": \"Agent info: Model=gemma4:12b, Context window=~128k tokens, Workspace=D:\\\\Projects\\\\AIOT\\\\cortex-node\\\\workspace\", \"error_code\": null, \"error_details\": null, \"success\": true, \"message\": \"CortexNode runtime info\", \"data\": {\"model\": \"gemma4:12b\", \"context_window\": \"~128k tokens\", \"workspace\": \"D:\\\\Projects\\\\AIOT\\\\cortex-node\\\\workspace\", \"max_steps\": 24, \"token_usage\": {\"prompt_tokens\": 2973, \"completion_tokens\": 334, \"total_tokens\": 3307}}}",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "tool",
+                "name": "agent_info",
+                "id": "fd6009b8-154b-4966-83cd-5fa8b0fc6034",
+                "tool_call_id": "f57fc346-2f2a-41d5-b3fd-5b467c3a5c94",
+                "artifact": null,
+                "status": "success"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "Here are the available tools:\n\n1. agent_info\n2. current_time\n3. describe_image\n4. execute_abap_report\n5. get_report_data\n6. git_diff\n7. git_log\n8. git_show\n9. git_status\n10. install_package\n11. list_files\n12. lookup_material\n13. make_directory\n14. query_abap_table\n15. rag_refresh_index\n16. rag_search\n17. read_file\n18. read_knowledge_file\n19. run_python\n20. scada_status\n21. solve_math\n22. token_usage\n23. write_file",
+                "additional_kwargs": {},
+                "response_metadata": {
+                    "model": "gemma4:12b",
+                    "created_at": "2026-07-24T21:22:17.7709099Z",
+                    "done": true,
+                    "done_reason": "stop",
+                    "total_duration": 8010596800,
+                    "load_duration": 625209400,
+                    "prompt_eval_count": 2575,
+                    "prompt_eval_duration": 226828000,
+                    "eval_count": 401,
+                    "eval_duration": 7146194000,
+                    "logprobs": null,
+                    "model_name": "gemma4:12b",
+                    "model_provider": "ollama"
+                },
+                "type": "ai",
+                "name": null,
+                "id": "lc_run--019f9601-d2df-7460-9695-4bcc9d3ceec3-0",
+                "tool_calls": [],
+                "invalid_tool_calls": [],
+                "usage_metadata": {
+                    "input_tokens": 2575,
+                    "output_tokens": 401,
+                    "total_tokens": 2976
+                }
+            }
+        },
+        {
+            "type": "human",
+            "data": {
+                "content": "hi",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "human",
+                "name": null,
+                "id": "a131fd48-e8a7-40cf-b53b-db6cd55fd60d"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "Hello! How can I help you with your projects or coding questions today?",
+                "additional_kwargs": {},
+                "response_metadata": {
+                    "model": "gemma4:12b",
+                    "created_at": "2026-07-24T21:39:56.2921854Z",
+                    "done": true,
+                    "done_reason": "stop",
+                    "total_duration": 5892439100,
+                    "load_duration": 3978816700,
+                    "prompt_eval_count": 56,
+                    "prompt_eval_duration": 135482000,
+                    "eval_count": 107,
+                    "eval_duration": 1774097000,
+                    "logprobs": null,
+                    "model_name": "gemma4:12b",
+                    "model_provider": "ollama"
+                },
+                "type": "ai",
+                "name": null,
+                "id": "lc_run--019f9612-01ff-7971-8e73-e5c22c897600-0",
+                "tool_calls": [],
+                "invalid_tool_calls": [],
+                "usage_metadata": {
+                    "input_tokens": 56,
+                    "output_tokens": 107,
+                    "total_tokens": 163
+                }
+            }
+        },
+        {
+            "type": "human",
+            "data": {
+                "content": "what time is it",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "human",
+                "name": null,
+                "id": "6176413a-1725-4ad6-9512-3ff07798d87e"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "ai",
+                "name": null,
+                "id": "703eba7b-9e72-4966-b995-fd4659fc16a4",
+                "tool_calls": [
+                    {
+                        "name": "current_time",
+                        "args": {},
+                        "id": "aa9f1324-9274-41d1-83ac-748846eb3d45",
+                        "type": "tool_call"
+                    }
+                ],
+                "invalid_tool_calls": [],
+                "usage_metadata": null
+            }
+        },
+        {
+            "type": "tool",
+            "data": {
+                "content": "Current local system time\n<tool_result_json>\n{\"display\": \"The current time is: 2026-07-25 00:40:26\", \"error_code\": null, \"error_details\": null, \"success\": true, \"message\": \"Current local system time\", \"data\": {\"iso\": \"2026-07-25T00:40:26.379660\", \"formatted\": \"2026-07-25 00:40:26\", \"format\": \"%Y-%m-%d %H:%M:%S\"}}",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "tool",
+                "name": "current_time",
+                "id": "ae3e4ca1-83e0-49ee-a00d-0400736088cd",
+                "tool_call_id": "aa9f1324-9274-41d1-83ac-748846eb3d45",
+                "artifact": null,
+                "status": "success"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "The current time is 2026-07-25 00:40:26.",
+                "additional_kwargs": {},
+                "response_metadata": {
+                    "model": "gemma4:12b",
+                    "created_at": "2026-07-24T21:40:28.6154667Z",
+                    "done": true,
+                    "done_reason": "stop",
+                    "total_duration": 2233354400,
+                    "load_duration": 560309400,
+                    "prompt_eval_count": 2460,
+                    "prompt_eval_duration": 162972000,
+                    "eval_count": 86,
+                    "eval_duration": 1455389000,
+                    "logprobs": null,
+                    "model_name": "gemma4:12b",
+                    "model_provider": "ollama"
+                },
+                "type": "ai",
+                "name": null,
+                "id": "lc_run--019f9612-8e8d-7580-8c61-1062aa2f78be-0",
+                "tool_calls": [],
+                "invalid_tool_calls": [],
+                "usage_metadata": {
+                    "input_tokens": 2460,
+                    "output_tokens": 86,
+                    "total_tokens": 2546
+                }
+            }
         }
     ]
 }

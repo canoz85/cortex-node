@@ -14,14 +14,42 @@ from core.graph_constants import (
     TOKEN_USAGE_INTENT_PATTERN,
 )
 
-ROUTER_PROMPT = """
+PLANNER_ROUTER_PROMPT_OLD = """
     You are a strict router.
-    Return ONLY valid JSON with keys:
-    route, domain, confidence, enforced, reason, needs_clarification.
-    Allowed routes: info, action, action:list_workspace, action:read_workspace, action:analyze_workspace, action:generate_workspace, casual, coding_discussion, conversation, clarify_domain.
+    Return ONLY valid JSON with keys: route, domain, confidence, enforced, reason, needs_clarification.
+    Allowed routes: info, action, conversation, clarify_domain.
     Allowed domains: general, python, sap.
     Confidence must be 0.0..1.0.
     If uncertain, choose conversation with low confidence.
+"""
+
+PLANNER_ROUTER_PROMPT = """
+You are a fast, high-precision intent router for an AI agent system.
+
+YOUR TASK:
+Analyze the user's input and classify it into a route and domain to guide downstream planning.
+
+ROUTE DEFINITIONS:
+- "info": Read-only requests requiring tool lookup (reading files, searching docs/RAG, git status/log, querying SCADA state, checking SAP records).
+- "action": State-changing operations requiring execution tools (creating/modifying files, running python scripts, git commit/push, executing SCADA actions or SAP updates).
+- "conversation": General Q&A, explanations, chit-chat, or reasoning that requires NO tool execution.
+- "clarify_domain": Ambiguous requests where the domain or intent cannot be safely determined without user input.
+
+DOMAIN DEFINITIONS:
+- "python": Code generation, debugging, file system operations, execution, or git management.
+- "sap": Anything related to SAP systems, BAPIs, enterprise data, or SAP tool execution.
+- "general": General queries, SCADA/hardware control, vision tasks, or cross-domain requests.
+
+OUTPUT REQUIREMENTS:
+Return ONLY a valid JSON object matching this exact schema:
+{
+  "route": "info" | "action" | "conversation" | "clarify_domain",
+  "domain": "python" | "sap" | "general",
+  "confidence": float (0.0 to 1.0),
+  "enforced": boolean (true if safety rules or explicit user instruction force this route),
+  "needs_clarification": boolean,
+  "reason": "Short 1-sentence justification for this route and domain decision"
+}
 """
 
 
@@ -38,25 +66,10 @@ class RoutingDecision:
 ALLOWED_ROUTES = {
     "info",
     "action",
-    "action:list_workspace",
-    "action:read_workspace",
-    "action:analyze_workspace",
-    "action:generate_workspace",
     "casual",
     "coding_discussion",
     "conversation",
     "clarify_domain",
-}
-
-SAFE_NON_MUTATING_ROUTES = {
-    "info",
-    "casual",
-    "coding_discussion",
-    "conversation",
-    "clarify_domain",
-    "action:list_workspace",
-    "action:read_workspace",
-    "action:analyze_workspace",
 }
 
 
@@ -202,7 +215,7 @@ def _llm_route_decision(
     try:
         resp = llm.invoke(
             [
-                SystemMessage(content=ROUTER_PROMPT),
+                SystemMessage(content=PLANNER_ROUTER_PROMPT),
                 HumanMessage(content=user_text),
             ]
         )
@@ -250,7 +263,7 @@ def _arbiter_route(
         conf = llm_decision.confidence
 
         # Strong confidence for potentially mutating/action routes
-        if route.startswith("action") and route not in SAFE_NON_MUTATING_ROUTES:
+        if route.startswith("action") and route not in ALLOWED_ROUTES:
             if conf >= 0.80:
                 return llm_decision
         else:
@@ -289,49 +302,49 @@ def planner_routing_decision(
 
     hard_decision: RoutingDecision | None = None
 
-    info_tool = preferred_info_tool(text)
-    if info_tool:
-        hard_decision = RoutingDecision(
-            route="info",
-            domain="general",
-            confidence=1.0,
-            enforced=False,
-            reason=info_tool,
-            needs_clarification=False,
-            source="hard_rule",
-        )
+    # info_tool = preferred_info_tool(text)
+    # if info_tool:
+    #     hard_decision = RoutingDecision(
+    #         route="info",
+    #         domain="general",
+    #         confidence=1.0,
+    #         enforced=False,
+    #         reason=info_tool,
+    #         needs_clarification=False,
+    #         source="hard_rule",
+    #     )
 
-    if hard_decision is None:
-        # Optional: explicit domain override hard rule
-        # Reuse your existing _domain_decision behavior if needed.
-        intent = _workspace_intent(text)
-        if intent:
-            route_map = {
-                "LIST": "action:list_workspace",
-                "READ": "action:read_workspace",
-                "ANALYZE": "action:analyze_workspace",
-                "GENERATE": "action:generate_workspace",
-            }
-            hard_decision = RoutingDecision(
-                route=route_map[intent],
-                domain="general",
-                confidence=1.0,
-                enforced=False,
-                reason=f"{intent} workspace intent",
-                needs_clarification=False,
-                source="hard_rule",
-            )
+    # if hard_decision is None:
+    #     # Optional: explicit domain override hard rule
+    #     # Reuse your existing _domain_decision behavior if needed.
+    #     intent = _workspace_intent(text)
+    #     if intent:
+    #         route_map = {
+    #             "LIST": "action:list_workspace",
+    #             "READ": "action:read_workspace",
+    #             "ANALYZE": "action:analyze_workspace",
+    #             "GENERATE": "action:generate_workspace",
+    #         }
+    #         hard_decision = RoutingDecision(
+    #             route=route_map[intent],
+    #             domain="general",
+    #             confidence=1.0,
+    #             enforced=False,
+    #             reason=f"{intent} workspace intent",
+    #             needs_clarification=False,
+    #             source="hard_rule",
+    #         )
 
-    if hard_decision is None and _is_casual_chat(text):
-        hard_decision = RoutingDecision(
-            route="casual",
-            domain="general",
-            confidence=1.0,
-            enforced=False,
-            reason="casual chat",
-            needs_clarification=False,
-            source="hard_rule",
-        )
+    # if hard_decision is None and _is_casual_chat(text):
+    #     hard_decision = RoutingDecision(
+    #         route="casual",
+    #         domain="general",
+    #         confidence=1.0,
+    #         enforced=False,
+    #         reason="casual chat",
+    #         needs_clarification=False,
+    #         source="hard_rule",
+    #     )
 
     llm_decision = None
     if hard_decision is None and router_llm is not None:
