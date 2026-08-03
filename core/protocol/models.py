@@ -369,7 +369,6 @@ class WorkingState(ImmutableProtocolModel):
     hints and must not be treated as accepted protocol facts.
     """
 
-    planner_route: str = Field(default="")
     retrieval_context: RetrievalContext = Field(default_factory=tuple)
     last_tool_result: ToolResult | None = None
     routing_metadata: dict[str, JsonValue] = Field(default_factory=dict)

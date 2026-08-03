@@ -100,7 +100,6 @@ _WORKING_STATE_CONSUMED_KEYS: Final[frozenset[str]] = frozenset({
     "token_usage",
     "plan",
     "planner_result",
-    "planner_route",
     "planner_domain",
     "planner_confidence",
     "planner_domain_enforced",
@@ -594,7 +593,6 @@ def build_working_state(legacy_state: LegacyState | None = None) -> WorkingState
     capture_state = _build_capture_state(state)
 
     return WorkingState(
-        planner_route=_to_str(state.get("planner_route"), default=""),
         retrieval_context=retrieval_context,
         last_tool_result=last_tool_result,
         routing_metadata=routing_metadata,
@@ -980,7 +978,6 @@ def execution_state_to_legacy(state: ExecutionState) -> dict[str, Any]:
     if pv.summary is not None:
         legacy["execution_summary"] = pv.summary.summary_text
 
-    legacy["planner_route"] = wk.planner_route
     legacy["retrieval_messages"] = list(wk.retrieval_context)
     legacy["routing_metadata"] = dict(wk.routing_metadata)
     legacy["planner_metadata"] = dict(wk.planner_metadata)

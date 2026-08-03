@@ -32,7 +32,6 @@ def test_planner_node_info_route_uses_synthetic_plan():
     state = {"messages": [HumanMessage(content="show token usage")], "rolling_summary": ""}
     result = planner_node(state)
 
-    assert result["planner_route"] == "info"
     assert result["planner_plan_source"] == "synthetic"
     assert "call token_usage tool" in result["plan"]
 
@@ -44,7 +43,6 @@ def test_planner_node_action_route_uses_llm_plan():
     state = {"messages": [HumanMessage(content="create hello.py and run it")], "rolling_summary": ""}
     result = planner_node(state)
 
-    assert result["planner_route"].startswith("action")
     assert result["planner_plan_source"] == "llm"
     assert "create file" in result["plan"]
     assert len(llm.invocations) >= 1

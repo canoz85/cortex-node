@@ -4619,6 +4619,167 @@
                     "total_tokens": 435
                 }
             }
+        },
+        {
+            "type": "human",
+            "data": {
+                "content": "hi",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "human",
+                "name": null,
+                "id": "c423a1fe-605f-4950-87d9-05d4a3a8786a"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "Hello! How can I help you with your projects or coding questions today?",
+                "additional_kwargs": {},
+                "response_metadata": {
+                    "model": "gemma4:12b",
+                    "created_at": "2026-08-03T18:42:30.2697301Z",
+                    "done": true,
+                    "done_reason": "stop",
+                    "total_duration": 6374772900,
+                    "load_duration": 4507091500,
+                    "prompt_eval_count": 56,
+                    "prompt_eval_duration": 160038000,
+                    "eval_count": 107,
+                    "eval_duration": 1701962000,
+                    "logprobs": null,
+                    "model_name": "gemma4:12b",
+                    "model_provider": "ollama"
+                },
+                "type": "ai",
+                "name": null,
+                "id": "lc_run--019fc8ef-2614-7140-acdc-64f954e48ed1-0",
+                "tool_calls": [],
+                "invalid_tool_calls": [],
+                "usage_metadata": {
+                    "input_tokens": 56,
+                    "output_tokens": 107,
+                    "total_tokens": 163
+                }
+            }
+        },
+        {
+            "type": "human",
+            "data": {
+                "content": "Create a directory named test_cleanup and create a file hello.txt inside it containing \"hello world\".",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "human",
+                "name": null,
+                "id": "becab2f6-9b83-4199-8d12-92ede1939644"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "ai",
+                "name": null,
+                "id": "529e2fe5-435c-4be6-8b8a-7c3cd53bc317",
+                "tool_calls": [
+                    {
+                        "name": "make_directory",
+                        "args": {
+                            "path": "test_cleanup"
+                        },
+                        "id": "f2c95fa5-01a9-4ef3-ada9-69d8f859ce95",
+                        "type": "tool_call"
+                    }
+                ],
+                "invalid_tool_calls": [],
+                "usage_metadata": null
+            }
+        },
+        {
+            "type": "tool",
+            "data": {
+                "content": "Directory ready: test_cleanup\n<tool_result_json>\n{\"display\": \"Directory ready: test_cleanup\", \"error_code\": null, \"error_details\": null, \"success\": true, \"message\": \"Directory ready: test_cleanup\", \"path\": \"test_cleanup\"}",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "tool",
+                "name": "make_directory",
+                "id": "5a3ec92e-6190-4a60-8214-739bf74d9627",
+                "tool_call_id": "f2c95fa5-01a9-4ef3-ada9-69d8f859ce95",
+                "artifact": null,
+                "status": "success"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "ai",
+                "name": null,
+                "id": "0fe8ad64-7182-4800-93a5-3283a6c5cc53",
+                "tool_calls": [
+                    {
+                        "name": "write_file",
+                        "args": {
+                            "content": "hello world",
+                            "path": "test_cleanup/hello.txt"
+                        },
+                        "id": "ea8d115c-4ff6-4984-a1c4-05b52dfb7b32",
+                        "type": "tool_call"
+                    }
+                ],
+                "invalid_tool_calls": [],
+                "usage_metadata": null
+            }
+        },
+        {
+            "type": "tool",
+            "data": {
+                "content": "Wrote 11 characters to test_cleanup/hello.txt\n<tool_result_json>\n{\"display\": \"Wrote 11 characters to test_cleanup/hello.txt\", \"error_code\": null, \"error_details\": null, \"success\": true, \"message\": \"Wrote 11 characters to test_cleanup/hello.txt\", \"path\": \"test_cleanup/hello.txt\", \"characters_written\": 11}",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "tool",
+                "name": "write_file",
+                "id": "3ba4bb3a-31ac-4140-a32a-75cd6093a1f0",
+                "tool_call_id": "ea8d115c-4ff6-4984-a1c4-05b52dfb7b32",
+                "artifact": null,
+                "status": "success"
+            }
+        },
+        {
+            "type": "ai",
+            "data": {
+                "content": "- Created directory `test_cleanup`.\n- Created file `test_cleanup/hello.txt` with content \"hello world\".",
+                "additional_kwargs": {},
+                "response_metadata": {
+                    "model": "gemma4:12b",
+                    "created_at": "2026-08-03T18:54:11.3677349Z",
+                    "done": true,
+                    "done_reason": "stop",
+                    "total_duration": 3115448900,
+                    "load_duration": 580590500,
+                    "prompt_eval_count": 210,
+                    "prompt_eval_duration": 344062000,
+                    "eval_count": 107,
+                    "eval_duration": 1840672000,
+                    "logprobs": null,
+                    "model_name": "gemma4:12b",
+                    "model_provider": "ollama"
+                },
+                "type": "ai",
+                "name": null,
+                "id": "lc_run--019fc8f9-e57b-7de0-bef3-d9991fd1c379-0",
+                "tool_calls": [],
+                "invalid_tool_calls": [],
+                "usage_metadata": {
+                    "input_tokens": 210,
+                    "output_tokens": 107,
+                    "total_tokens": 317
+                }
+            }
         }
     ]
 }

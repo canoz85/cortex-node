@@ -22,7 +22,6 @@ class AgentState(TypedDict, total=False):
     token_usage: TokenUsage
     plan: str
     planner_result: PlannerResult
-    planner_route: str
     planner_domain: str
     planner_confidence: float
     planner_domain_enforced: bool

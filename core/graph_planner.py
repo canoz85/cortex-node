@@ -369,7 +369,6 @@ def create_planner_node(
         legacy.update({
             "planner_result": planner_result,
             "retrieval_messages": retrieval_messages,
-            "planner_route": routing_decision.route,
 
              # Legacy runtime fields
             "steps": 0, 

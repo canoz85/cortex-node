@@ -23,7 +23,6 @@ def test_run_prompt_handles_tool_flow_and_updates_summary(capsys):
     planner_event = {
         "planner": {
             "steps": 1,
-            "planner_route": "action",
             "plan": "1. call list_files\n2. summarize",
             "rolling_summary": "summary-after-plan",
         }
@@ -108,7 +107,6 @@ def test_run_prompt_logs_completion_metrics(caplog):
     planner_event = {
         "planner": {
             "steps": 1,
-            "planner_route": "action",
             "plan": "1. call list_files",
         }
     }

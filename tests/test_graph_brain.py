@@ -36,7 +36,6 @@ def test_brain_node_constructs_brain_input_once(monkeypatch):
 
     state = {
         "messages": [HumanMessage(content="hello")],
-        "planner_route": "conversation",
         "plan": "",
         "steps": 0,
         "retrieval_messages": [],

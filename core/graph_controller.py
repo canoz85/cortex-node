@@ -66,18 +66,18 @@ def create_controller_node(
             update["final_answer"] = brain_result.final_answer
 
 
-        print("\n====CONTROLLER====:")
-        print("current_worker:", execution_state.protocol_visible.cursor.current_worker)
-        print("---------------")
-        if execution_state.protocol_visible.cursor.current_worker == WorkerRole.PLANNER:
-            print("active_plan:", execution_state.protocol_visible.active_plan)
-            print("---------------")
-        print("active_step:", execution_state.protocol_visible.active_step)
-        print("---------------")
-        if execution_state.protocol_visible.cursor.current_worker == WorkerRole.BRAIN:
-            print("brain_result:", controller_input.brain_result)
-            print("---------------")
-        print("====END CONTROLLER====\n")
+        # print("\n====CONTROLLER====:")
+        # print("current_worker:", execution_state.protocol_visible.cursor.current_worker)
+        # print("---------------")
+        # if execution_state.protocol_visible.cursor.current_worker == WorkerRole.PLANNER:
+        #     print("active_plan:", execution_state.protocol_visible.active_plan)
+        #     print("---------------")
+        # print("active_step:", execution_state.protocol_visible.active_step)
+        # print("---------------")
+        # if execution_state.protocol_visible.cursor.current_worker == WorkerRole.BRAIN:
+        #     print("brain_result:", controller_input.brain_result)
+        #     print("---------------")
+        # print("====END CONTROLLER====\n")
 
 
         return update
