@@ -1,14 +1,16 @@
 from pathlib import Path
+
 from typing import Any, Callable
+
 
 from langchain_ollama import ChatOllama
 from langgraph.graph import StateGraph
 from langgraph.graph.state import END, CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 
-from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE
+from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, FINAL_ANSWER_SYSTEM_PROMPT, MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE
 from core.graph_nodes import create_graph_nodes
-from core.graph_routing import route_after_brain, route_after_planner
+from core.graph_routing import  route_after_controller
 from core.graph_runner import run_prompt
 from core.rag import WorkspaceRAG
 from core.runtime.state_propagation import propagate_execution_state
@@ -71,10 +73,13 @@ def _load_sap_system_prompt(project_root: Path) -> str | None:
     return content or None
 
 
-def _apply_state_propagators(state: AgentState, node_update: Any) -> Any:
+def _apply_state_propagators(state, node_update):
+
     propagated_update = node_update
+
     for propagator in _STATE_PROPAGATORS:
         propagated_update = propagator(state, propagated_update)
+
     return propagated_update
 
 
@@ -91,7 +96,8 @@ def _invoke_state_node(node: Any, state: AgentState) -> Any:
 
 def _register_state_node(workflow: StateGraph, name: str, node: StateNodeCallable | Any) -> None:
     def _state_node(state: AgentState) -> Any:
-        return _apply_state_propagators(state, _invoke_state_node(node, state))
+        result = _invoke_state_node(node, state)
+        return _apply_state_propagators(state, result)
 
     workflow.add_node(name, _state_node)
 
@@ -106,7 +112,7 @@ def build_app(
     rag_factory: RAGFactory = _default_rag_factory,
     tool_list_factory: ToolListFactory = _default_tool_list_factory,
     chat_model_factory: ChatModelFactory = _default_chat_model_factory,
-    graph_nodes_factory: Callable[..., tuple[Any, Any, Any, Any]] = create_graph_nodes,
+    graph_nodes_factory: Callable[..., tuple[Any, Any, Any, Any, Any]] = create_graph_nodes,
     tool_node_factory: Callable[[list[Any]], Any] = ToolNode,
     project_root: Path | None = None,
     show_raw_llm: bool = False,
@@ -120,10 +126,10 @@ def build_app(
     sap_system_prompt = _load_sap_system_prompt(app_root)
 
     tools = tool_list_factory(workspace_root_str, str(knowledge_root), rag_service, model)
-    tool_name_set = {getattr(tool, "name", "") for tool in tools}
+    tools_set = {getattr(tool, "name", "") for tool in tools}
 
     # Format the available tools into a clean, scannable string block
-    tools_list_str = "\n".join([f"- {name}" for name in sorted(tool_name_set) if name])
+    tools_list_str = "\n".join([f"- {name}" for name in sorted(tools_set) if name])
 
     agent_system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         model=model,
@@ -135,35 +141,44 @@ def build_app(
 
     casual_system_prompt = CASUAL_SYSTEM_PROMPT_TEMPLATE
 
+    final_answer_system_prompt = FINAL_ANSWER_SYSTEM_PROMPT
+
     planner_llm = chat_model_factory(model_planner, 0)
     brain_llm = chat_model_factory(model, 0)
     tool_brain_llm = chat_model_factory(model, 0).bind_tools(tools)
 
-    planner_node, brain_node, capture_tool_output_node, summarize_memory_node = graph_nodes_factory(
+    controller_node, planner_node, brain_node, capture_tool_output_node, summarize_memory_node = graph_nodes_factory(
         brain_llm=brain_llm,
         tool_brain_llm=tool_brain_llm,
         planner_llm=planner_llm,
         rag_service=rag_service,
         rag_top_k=rag_top_k,
         agent_system_prompt=agent_system_prompt,
+        final_answer_system_prompt=final_answer_system_prompt,
         casual_system_prompt=casual_system_prompt,
         sap_system_prompt=sap_system_prompt,
-        tool_name_set=tool_name_set,
+        tools_set=tools_set,
         show_raw_llm=show_raw_llm,
     )
 
     workflow = StateGraph(AgentState)
     _register_state_node(workflow, "planner", planner_node)
+    _register_state_node(workflow, "controller", controller_node)
     _register_state_node(workflow, "brain", brain_node)
     _register_state_node(workflow, "tools", tool_node_factory(tools))
     _register_state_node(workflow, "capture_tool_output", capture_tool_output_node)
     _register_state_node(workflow, "summarize_memory", summarize_memory_node)
 
     workflow.set_entry_point("planner")
-    workflow.add_conditional_edges("planner", route_after_planner)
-    workflow.add_conditional_edges("brain", route_after_brain)
+
+    workflow.add_edge("planner", "controller")
+    workflow.add_conditional_edges("controller", route_after_controller)
+
+    # workflow.add_conditional_edges("planner", route_after_planner)
+    # workflow.add_conditional_edges("brain", route_after_brain)
     workflow.add_edge("tools", "capture_tool_output")
-    workflow.add_edge("capture_tool_output", "brain")
+    workflow.add_edge("capture_tool_output", "controller")
+    workflow.add_edge("brain", "controller")
     workflow.add_edge("summarize_memory", END)
 
     return workflow.compile()

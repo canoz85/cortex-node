@@ -54,11 +54,18 @@ def configure_logging(level: str = "INFO", json_logs: bool = False) -> None:
     root = logging.getLogger()
     root.handlers.clear()
 
+    log_format = "%(asctime)s | %(levelname)s | %(name)s | %(node)s | %(transition)s | %(message)s"
+
+    text_formatter = logging.Formatter(
+        fmt = log_format,
+        defaults={"node": "N/A", "transition": "N/A"}
+    )
+
     handler = logging.StreamHandler()
     if json_logs:
         handler.setFormatter(_JsonFormatter())
     else:
-        handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
+        handler.setFormatter(text_formatter)
 
     root.addHandler(handler)
     root.setLevel(getattr(logging, str(level).upper(), logging.INFO))

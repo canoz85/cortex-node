@@ -3,10 +3,9 @@ from dataclasses import dataclass
 from langgraph.graph import END
 
 from core.protocol.enums import BrainOutcome, ControllerDecisionType, ExecutionPhase, WorkerRole
-from core.protocol.models import ControllerDecision, ControllerInput, ExecutionState
+from core.protocol.models import BrainInput, ControllerDecision, ControllerInput, ExecutionPlan, ExecutionState, PlannerResult
 
 from core.graph_constants import MAX_REASONING_STEPS
-from core.graph_node_helpers import planner_execution_brief
 from core.state import AgentState
 
 
@@ -22,6 +21,7 @@ class BrainExecutionDecision:
     include_retrieval: bool
     reason: str
     planner_brief: str = ""  # Added default value for planner_brief
+    final_answer: bool = False
 
 @dataclass(frozen=True)
 class ActionRecoveryDecision:
@@ -38,123 +38,129 @@ class RepeatedSignatureDecision:
     repeat_reason: str
     reason: str
 
-def apply_controller_decision_to_state(state: AgentState, decision: ControllerDecision) -> AgentState:
-    if not isinstance(state, dict):
-        state = dict(state)
+def get_controller_decision(state: AgentState) -> ControllerDecision | None:
+    decision = state.get("controller_decision")
 
-    if decision.cursor is not None:
-        phase = decision.cursor.phase
-        if hasattr(phase, "value"):
-            phase_value = phase.value
-        else:
-            phase_value = phase
-        state["phase"] = phase_value
+    if isinstance(decision, ControllerDecision):
+        return decision
 
-        current_worker = decision.cursor.current_worker
-        state["current_worker"] = current_worker.value if hasattr(current_worker, "value") and current_worker is not None else current_worker
-        state["steps"] = decision.cursor.controller_iteration if decision.cursor.controller_iteration is not None else state.get("steps", 0)
+    return None
 
-    if decision.requires_checkpoint:
-        run_id = state.get("run_id") or "execution"
-        state["checkpoint_id"] = f"{run_id}:checkpoint"
+def map_controller_decision(
+    decision: ControllerDecision,
+) -> str:
+    """Translate a protocol ControllerDecision into a LangGraph node.
 
-    execution_state = state.get("execution_state")
-    if execution_state is None:
-        execution_state = ExecutionState(
-            protocol_visible={
-                "identity": {"execution_id": state.get("run_id") or "execution", "protocol_version": "1.0"},
-                "cursor": decision.cursor or {"phase": ExecutionPhase.INITIALIZING},
-            },
-            working={},
+    This function is the only place that knows LangGraph node names.
+    The protocol layer must never depend on graph topology.
+    """
+
+    match decision.decision_type:
+
+        case ControllerDecisionType.DISPATCH_PLANNER:
+            return "planner"
+
+        case ControllerDecisionType.DISPATCH_BRAIN:
+            return "brain"
+
+        case ControllerDecisionType.DISPATCH_TOOL_RUNTIME:
+            return "tools"
+
+        case ControllerDecisionType.DISPATCH_SUMMARY:
+             return END #return "summarize_memory" todo commented for debugging, we are not using summarize_memory node
+
+        case ControllerDecisionType.TERMINATE:
+            return END
+
+    raise ValueError(
+        f"Unsupported controller decision: {decision.decision_type}"
+    )
+
+def apply_controller_decision_to_state(
+    execution_state: ExecutionState,
+    decision: ControllerDecision,
+) -> ExecutionState:
+    """
+    Apply a ControllerDecision to the protocol ExecutionState.
+
+    This function is protocol-only. It never mutates AgentState.
+    """
+
+    protocol_visible = execution_state.protocol_visible
+    working = execution_state.working
+
+    #
+    # Cursor
+    #
+    cursor = (
+        decision.cursor
+        if decision.cursor is not None
+        else protocol_visible.cursor
+    )
+
+    #
+    # Active plan
+    #
+    active_plan = (
+        decision.accepted_plan
+        if decision.accepted_plan is not None
+        else protocol_visible.active_plan
+    )
+
+    #
+    # Active step
+    #
+    active_step = None
+
+    if decision.clear_active_step:
+        active_step = None
+    else:
+        step_id = (
+            decision.next_step_id
+            or (
+                protocol_visible.active_step.step_id
+                if protocol_visible.active_step is not None
+                else None
+            )
         )
-    elif decision.cursor is not None:
-        if isinstance(execution_state, ExecutionState):
-            execution_state = execution_state.model_copy(
+
+        if (
+            active_plan is not None
+            and step_id is not None
+        ):
+            active_step = next(
+                (
+                    step
+                    for step in active_plan.steps
+                    if step.step_id == step_id
+                ),
+                None,
+            )
+
+    #
+    # Working state
+    #
+    if decision.clear_last_tool_result:
+        working = working.model_copy(
+            update={
+                "last_tool_result": None,
+            }
+        )
+
+    #
+    # Return updated immutable state
+    #
+    return execution_state.model_copy(
+        update={
+            "protocol_visible": protocol_visible.model_copy(
                 update={
-                    "protocol_visible": execution_state.protocol_visible.model_copy(
-                        update={"cursor": decision.cursor}
-                    )
+                    "cursor": cursor,
+                    "active_plan": active_plan,
+                    "active_step": active_step,
                 }
-            )
-        elif isinstance(execution_state, dict):
-            protocol_visible = dict(execution_state.get("protocol_visible") or {})
-            protocol_visible["cursor"] = decision.cursor
-            execution_state = dict(execution_state)
-            execution_state["protocol_visible"] = protocol_visible
-
-    state["execution_state"] = execution_state
-    return state
-
-
-def decide_controller_decision(
-    state: AgentState,
-    *,
-    controller_input: ControllerInput | None = None,
-) -> ControllerDecision:
-    history = state.get("messages", [])
-    if not history:
-        return ControllerDecision(
-            decision_type=ControllerDecisionType.TERMINATE,
-            reason="empty_history",
-            terminal=True,
-        )
-
-    steps = state.get("steps", 0)
-    if controller_input is not None and controller_input.cursor is not None:
-        cursor_steps = controller_input.cursor.controller_iteration
-        if cursor_steps is not None:
-            steps = cursor_steps
-
-    if steps >= MAX_REASONING_STEPS:
-        return ControllerDecision(
-            decision_type=ControllerDecisionType.TERMINATE,
-            reason="max_steps",
-            terminal=True,
-        )
-
-    if controller_input is not None and controller_input.planner_result is not None:
-        return ControllerDecision(
-            decision_type=ControllerDecisionType.DISPATCH_BRAIN,
-            reason="planner_result_ready",
-            next_worker=WorkerRole.BRAIN,
-            requires_checkpoint=False,
-        )
-
-    if controller_input is not None and controller_input.brain_result is not None:
-        if controller_input.brain_result.outcome == BrainOutcome.TOOL_REQUEST:
-            return ControllerDecision(
-                decision_type=ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
-                reason="tool_request",
-                next_worker=WorkerRole.TOOL_RUNTIME,
-                requires_checkpoint=False,
-            )
-        if controller_input.brain_result.outcome == BrainOutcome.REPLAN_REQUEST:
-            cursor = None
-            if controller_input.cursor is not None:
-                cursor = controller_input.cursor.model_copy(update={"phase": "replanning", "current_worker": WorkerRole.PLANNER})
-            return ControllerDecision(
-                decision_type=ControllerDecisionType.REQUEST_REPLAN,
-                reason="replan_request",
-                next_worker=WorkerRole.PLANNER,
-                requires_checkpoint=True,
-                cursor=cursor,
-            )
-        if controller_input.brain_result.outcome == BrainOutcome.FINAL_ANSWER:
-            cursor = None
-            if controller_input.cursor is not None:
-                cursor = controller_input.cursor.model_copy(update={"phase": "terminating", "current_worker": WorkerRole.SUMMARY})
-            return ControllerDecision(
-                decision_type=ControllerDecisionType.DISPATCH_SUMMARY,
-                reason="final_answer",
-                next_worker=WorkerRole.SUMMARY,
-                requires_checkpoint=False,
-                cursor=cursor,
-            )
-
-    return ControllerDecision(
-        decision_type=ControllerDecisionType.TERMINATE,
-        reason="finalize_turn",
-        terminal=True,
+            ),
+            "working": working,
+        }
     )
 
 def decide_after_brain(
@@ -185,29 +191,95 @@ def decide_after_brain(
         return TransitionDecision(next_node="tools", reason="tool_calls_present")
 
     return TransitionDecision(next_node=END, reason="finalize_turn")
-    #commented
+    #commented for now..
     #return TransitionDecision(next_node="summarize_memory", reason="finalize_turn")
 
 
-def decide_brain_execution(planner_route: str, plan_text: str) -> BrainExecutionDecision:
-    if planner_route.startswith("action"):
+def decide_brain_execution(
+    brain_input: BrainInput,
+) -> BrainExecutionDecision:
+    """
+    Decide whether the Brain should execute tools or respond directly.
+
+    The Brain operates entirely from the protocol contract
+    (BrainInput), not from legacy state.
+    """
+
+    if brain_input.active_plan is None:
         return BrainExecutionDecision(
-            action_required=True,
-            include_retrieval=True,
-            reason="action_route",
-            planner_brief=planner_execution_brief(planner_route, plan_text),
-        )
-    if planner_route.startswith("info"):
-        return BrainExecutionDecision(
-            action_required=True,
+            action_required=False,
             include_retrieval=False,
-            reason="info_route",
+            reason="direct_response",
+            planner_brief="",
+            final_answer=False
         )
+
+    if brain_input.active_step is None:
+        return BrainExecutionDecision(
+            action_required=False,
+            include_retrieval=False,
+            final_answer=True,
+            reason="final_answer",
+            planner_brief="",
+        )
+
     return BrainExecutionDecision(
-        action_required=False,
+        action_required=True,
         include_retrieval=False,
-        reason="discussion_route",
+        reason="execution_plan",
+        planner_brief=_build_brain_execution_brief(brain_input),
     )
+
+
+def _build_brain_execution_brief(
+    brain_input: BrainInput,
+) -> str:
+    """
+    Build the execution instructions passed to the Brain LLM.
+
+    The planner owns the plan.
+    The controller owns progression through the plan.
+    The Brain only performs the current step.
+    """
+
+    plan = brain_input.active_plan
+    current_step = brain_input.active_step
+
+    if plan is None or not plan.steps:
+        return ""
+
+    lines: list[str] = [
+        "Execution plan:",
+    ]
+
+    for index, step in enumerate(plan.steps, start=1):
+        marker = ">>" if current_step and step.step_id == current_step.step_id else "  "
+
+        lines.append(
+            f"{marker} {index}. {step.title} – {step.description}"
+        )
+
+    lines.extend(
+        [
+            "",
+            "Execution rules:",
+            "- Execute ONLY the current highlighted step.",
+            "- Never skip steps.",
+            "- Never reorder steps.",
+            "- Never invent additional steps.",
+            "- Never call tools not implied by the current step.",
+            "- After completing the current step:",
+            "  * request the required tool, or",
+            "  * if this was the final step, provide the final answer.",
+        ]
+    )
+
+    rendered = "\n".join(lines)
+
+    if len(rendered) > 2000:
+        rendered = rendered[:2000] + "..."
+
+    return rendered
 
 
 def decide_action_recovery(

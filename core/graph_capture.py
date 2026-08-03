@@ -1,7 +1,7 @@
 import uuid
 from langchain_core.messages import ToolMessage
 
-from core.protocol.bridge import tool_result_to_legacy
+from core.protocol.bridge import build_execution_state, tool_result_to_legacy, with_cursor, WorkerRole
 from core.protocol.models import ToolResult
 
 from core.graph_messages import normalize_message_content
@@ -51,10 +51,9 @@ def create_capture_tool_output_node():
 
         last_message = history[-1]
 
-        # Guard: Only process state changes if the last node was an actual tool execution
+        # Ignore non-tool messages.
         if not isinstance(last_message, ToolMessage):
-            return {}  # Safe: Returns empty dict so existing state values remain pristine
-
+            return {}
         
         raw_content = normalize_message_content(last_message)
         parsed = parse_tool_result(raw_content)
@@ -80,17 +79,14 @@ def create_capture_tool_output_node():
             data = unwrapped.get("data")
             message = str(unwrapped.get("message", ""))
             error_code = unwrapped.get("error_code")
-        
         elif isinstance(unwrapped, list):
             data = unwrapped
             message = str(unwrapped)
             error_code = None
-        
         elif isinstance(unwrapped, str):
             data = None
             message = unwrapped
             error_code = None
-
         else:
             data = None
             message = raw_content
@@ -108,12 +104,22 @@ def create_capture_tool_output_node():
             error_code=error_code,
         )
         
-        legacy_tool_result = tool_result_to_legacy(tool_result)
+        execution_state = build_execution_state(state)
+        updated_execution_state = with_cursor(
+            execution_state,
+            current_worker=WorkerRole.TOOL_RUNTIME, 
+        )
 
         return {
-            "last_tool_result": tool_result,      # protocol
-            "last_tool_output": tool_result.model_dump(),  # temporary legacy compatibility
-            **legacy_tool_result,
+            "execution_state": updated_execution_state,
+            "last_tool_result": tool_result,    # protocol
+            "brain_result": None,               # Brain request has now been consumed.
+
+            # Legacy compatibility
+            "last_tool_output": tool_result.model_dump(),
+            **tool_result_to_legacy(tool_result),
+
+            # Diagnostics
             "last_tool_rendered": rendered_output,
             "last_tool_signature": current_signature,
             "last_tool_success": tool_result.success,

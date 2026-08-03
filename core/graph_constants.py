@@ -1,9 +1,11 @@
 import re
+from typing import Set, Dict
 
 MAX_REASONING_STEPS = 24
 RECENT_MESSAGE_WINDOW = 12
 MAX_SUMMARY_TURNS = 6
 MAX_SUMMARY_CHARS = 4000
+
 ANSI_GREEN = "\033[32m"
 ANSI_RED = "\033[31m"
 ANSI_BLUE = "\033[34m"
@@ -13,6 +15,16 @@ ANSI_YELLOW = "\033[33m"
 ANSI_ITALIC = "\033[3m"
 ANSI_RESET = "\033[0m"
 MAX_PSEUDO_RETRIES = 10
+
+SYSTEM_CAPABILITIES_TEXT = """SYSTEM CAPABILITIES & AVAILABLE TOOLS:
+- Time & Environment: `current_time` (real-time clock/date), `agent_info`, `token_usage`, `solve_math` (arithmetic)
+- File System: `list_files`, `read_file`, `write_file`, `make_directory`
+- Code Execution: `run_python`, `install_package`
+- Git Operations: `git_status`, `git_log`, `git_show`, `git_diff`
+- RAG & Knowledge: `rag_search` (semantic search), `read_knowledge_file`, `rag_refresh_index`
+- SAP Operations: `lookup_material`, `query_abap_table`, `execute_abap_report`, `get_report_data`
+- SCADA & Industrial: `scada_status` (PLC/telemetry status)
+- Vision & Multimodal: `describe_image`"""
 
 SYSTEM_PROMPT_TEMPLATE = """You are CortexNode, a local-first autonomous software engineering agent.
 You can reason, use tools, and iterate until the task is complete.
@@ -44,6 +56,51 @@ Rules:
 - Only respond naturally to the user.
 - Use provided history if needed."""
 
+FINAL_ANSWER_SYSTEM_PROMPT = """
+You are CortexNode.
+
+You are in FINAL ANSWER mode.
+
+The requested work has already been completed.
+Your only responsibility is to report the execution result.
+
+Rules:
+- Report only actions that were actually completed.
+- Base the response only on the execution context, tool results, and conversation.
+- Do not invent or infer missing information.
+- Do not generate code.
+- Do not explain how the task could be performed.
+- Do not provide tutorials, examples, or alternative solutions.
+- Do not suggest next steps unless the user explicitly requested them.
+- If a verification step was executed, include the verification result.
+- Prefer short, factual bullet points.
+- When available, include the exact output returned by the verification tool.
+- Do not use introductory phrases such as "The following actions were completed."
+"""
+
+
+# Map domains and routes to allowed tool categories
+DOMAIN_TOOL_MAP: Dict[str, Set[str]] = {
+    "python": {
+        "run_python", "install_package", "list_files", "read_file", 
+        "write_file", "make_directory", "git_status", "git_log", 
+        "git_show", "git_diff", "solve_math"
+    },
+    "sap": {
+        "lookup_material", "query_abap_table", "execute_abap_report", 
+        "get_report_data", "read_knowledge_file"
+    },
+    "general": {
+        "current_time", "agent_info", "token_usage", "describe_image", 
+        "scada_status", "rag_search", "read_knowledge_file", "rag_refresh_index"
+    }
+}
+
+MUTATING_TOOLS: Set[str] = {
+    "write_file", "make_directory", "install_package", 
+    "execute_abap_report", "run_python"
+}
+
 PSEUDO_TOOL_CALL_PATTERN = re.compile(
     r"\b(?:list_files|read_file|write_file|make_directory|run_python|git_status|git_diff|git_log|git_show|agent_info|token_usage|current_time|solve_math|scada_status|rag_search|rag_refresh_index|query_abap_table|execute_abap_report|lookup_material|get_report_data)\s*\(",
     re.IGNORECASE,
@@ -53,62 +110,3 @@ PSEUDO_JSON_TOOL_CALL_PATTERN = re.compile(
     r'\{\s*"name"\s*:\s*"(?:list_files|read_file|write_file|make_directory|run_python|git_status|git_diff|git_log|git_show|agent_info|token_usage|current_time|solve_math|scada_status|rag_search|rag_refresh_index|query_abap_table|execute_abap_report|lookup_material|get_report_data)"\s*,\s*"arguments"\s*:',
     re.IGNORECASE,
 )
-
-ACTION_INTENT_PATTERN = re.compile(
-    r"\b(create|write|edit|update|modify|generate|implement|fix|refactor|run|execute|test|build|add|remove|delete)\b",
-    re.IGNORECASE,
-)
-TOKEN_USAGE_INTENT_PATTERN = re.compile(
-    r"\b(token|tokens|usage|consumed|consume|spent|prompt tokens|completion tokens)\b",
-    re.IGNORECASE,
-)
-CURRENT_TIME_INTENT_PATTERN = re.compile(
-    r"\b(?:"
-    r"what\s+time\s+is\s+it|"
-    r"what(?:'s|\s+is)\s+the\s+time|"
-    r"current\s+time|"
-    r"time\s+now|"
-    r"now\b.*\btime|"
-    r"what\s+date\s+is\s+it|"
-    r"what(?:'s|\s+is)\s+(?:today'?s\s+)?date|"
-    r"current\s+date|"
-    r"today'?s\s+date|"
-    r"date\s+today|"
-    r"current\s+datetime|"
-    r"date\s+and\s+time"
-    r")\b",
-    re.IGNORECASE,
-)
-AGENT_INFO_INTENT_PATTERN = re.compile(
-    r"\b(model|runtime|context window|max steps|agent info|configuration)\b",
-    re.IGNORECASE,
-)
-MATH_INTENT_PATTERN = re.compile(
-    r"(^\s*[-+*/().\d\s]+\s*$)|(\bwhat\s+is\s+[-+*/().\d\s]+\??\s*$)|(\b(?:what\s+is|how\s+much(?:\s+is)?)\s+\d+(?:\.\d+)?\s*[a-zA-Z]+(?:\s*(?:in|to)\s*[a-zA-Z]+)?\s*\??\s*$)|(\b\d+(?:\.\d+)?\s*[a-zA-Z]+\b.*\b(?:is|=|equals?)\b.*\b\d+(?:\.\d+)?\s*[a-zA-Z]+\b.*\b(?:what\s+is|how\s+much\s+is|calculate)\b.*\b\d+(?:\.\d+)?\s*[a-zA-Z]+\b)",
-    re.IGNORECASE,
-)
-CASUAL_CHAT_PATTERN = re.compile(
-    r"\b(hi |hello |hey|thanks|thank you|how are you|what'?s up|good morning|good afternoon|good evening|my name is|i am|call me|what is my name|who am i|nice to meet you|bye|goodbye|see you)\b",
-    re.IGNORECASE,
-)
-CODE_DISCUSSION_PATTERN = re.compile(
-    r"\b(code|coding|bug|debug|error|issue|python|javascript|typescript|file|function|class|test|build|repo|repository|project|app|script|refactor|stack trace|traceback|api|database|sql|json|yaml|docker|git|langgraph|ollama|tool|workspace)\b",
-    re.IGNORECASE,
-)
-CODING_DISCUSSION_QUESTION_PATTERN = re.compile(
-    r"^(how|why|what|when|where|can|could|would|should|do)\b|\b(explain|help me|walk me through|show me how)\b",
-    re.IGNORECASE,
-)
-
-FILE_GENERATION_PATTERN = re.compile(
-    r"\b(create|generate|build|write|implement|design)\b.*\b(app|tool|script|cli|program|module|project|service)\b",
-    re.IGNORECASE,
-)
-
-SAP_INTENT_PATTERN = re.compile(
-    r"\b(sap|abap|material master|material|mm|fi|purchase order|po|vendor|mara|marc|table|query|report|rmmg|mfbf|transaction|tcode)\b",
-    re.IGNORECASE,
-)
-
-MODIFYING_TOOL_NAMES = {"write_file", "make_directory"}
-VERIFICATION_TOOL_NAMES = {"run_python"}

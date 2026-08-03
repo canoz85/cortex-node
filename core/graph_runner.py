@@ -211,22 +211,28 @@ def _render_frame(*, frame: EventFrame) -> None:
             header = f"[planner:{frame.route}]"
         print(f"\n{color}{header}{ANSI_RESET}")
         print(frame.message_text)
+        print("\n\n")
         return
 
     print(f"\n{color}[{frame.node}]{ANSI_RESET}")
 
     if frame.message_kind == "tool_call":
         print(format_tool_call_preview(frame.message))
+        print("\n")
+
         return
 
     if frame.message_kind == "tool_result":
         _render_non_tool_text(raw_content=frame.message_text)
+        print("\n")
         return
     
     color = ANSI_LIGHT_BLUE
 
     # ai_text
     print(f"{color}{frame.message_text}{ANSI_RESET}")
+    print("\n\n")
+
 
 
 def _log_tool_calls(*, run_id: str, node_name: str, tool_calls: list[dict[str, Any]]) -> None:
@@ -262,7 +268,7 @@ def _update_metrics_from_frame(*, frame: EventFrame, metrics: RunMetrics) -> Non
 def _log_frame(*, frame: EventFrame, run_id: str, prev_node: str) -> None:
     log_event(
         logger,
-        logging.INFO,
+        logging.INFO, 
         "Graph node update",
         event_name="graph_node_update",
         run_id=run_id,
@@ -276,6 +282,9 @@ def _log_frame(*, frame: EventFrame, run_id: str, prev_node: str) -> None:
         has_summary_update=frame.has_summary_update,
         planner_route=frame.route or None,
     )
+
+    _render_frame(frame=frame)
+
 
 
 def _derive_stop_reason(*, metrics: RunMetrics, last_text: str) -> tuple[str, bool, bool]:
@@ -400,7 +409,6 @@ def run_prompt(
                 latest_summary=metrics.latest_summary,
             )
 
-            _render_frame(frame=frame)
             _update_metrics_from_frame(frame=frame, metrics=metrics)
             _log_frame(frame=frame, run_id=run_id, prev_node=prev_node)
 

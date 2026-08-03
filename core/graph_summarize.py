@@ -2,7 +2,7 @@ import hashlib
 import json
 import re
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_ollama import ChatOllama
 
 from core.graph_constants import MAX_SUMMARY_CHARS, MAX_SUMMARY_TURNS
@@ -575,6 +575,13 @@ def create_summarize_memory_node(*, summarize_llm: ChatOllama):
             tool_events=tool_events,
             turn_index=turn_index,
         )
-        return {"rolling_summary": updated_summary}
+
+        return {
+            "rolling_summary": updated_summary,
+            "messages": [
+                AIMessage(content=state["final_answer"])
+            ],
+            "final_answer": "",
+        }
 
     return summarize_memory_node

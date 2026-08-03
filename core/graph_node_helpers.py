@@ -1,10 +1,6 @@
-from langchain_core.messages import AIMessage, SystemMessage
-from langchain_ollama import ChatOllama
+from langchain_core.messages import AIMessage
 
-from core.graph_summarize import rolling_summary_message
 from core.graph_filegen_policy import last_tool_stderr
-from core.graph_messages import normalize_message_content
-from core.graph_pseudo_tools import looks_like_pseudo_tool_text
 from core.models import TokenUsage
 from tools.info_ops import update_token_usage
 
@@ -39,18 +35,3 @@ def detect_missing_dependency(tool_output_raw: str) -> str | None:
     return None
 
 
-def planner_execution_brief(route: str, plan_text: str) -> str:
-    """Return a concise planner brief for the brain LLM on action routes."""
-    normalized_plan = str(plan_text or "").strip()
-    if not normalized_plan:
-        return ""
-
-    if len(normalized_plan) > 1500:
-        normalized_plan = f"{normalized_plan[:1500]}..."
-
-    return (
-        "Planner execution brief below. Use it as guidance, but produce executable next steps now.\n"
-        f"Route: {route}\n"
-        "Plan:\n"
-        f"{normalized_plan}"
-    )

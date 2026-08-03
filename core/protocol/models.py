@@ -18,6 +18,7 @@ from .enums import (
     EventType,
     ExecutionPhase,
     ExecutionStatus,
+    PlannerOutcome,
     StepStatus,
     WorkerRole,
 )
@@ -82,6 +83,8 @@ class ExecutionStep(ImmutableProtocolModel):
     step_id: str = Field(min_length=1)
     title: str = Field(min_length=1)
     description: str = ""
+    primary_tool: str | None = None
+
     status: StepStatus = StepStatus.PENDING
     attempt: int = Field(default=0, ge=0)
     depends_on_step_ids: StepIdList = Field(default_factory=tuple)
@@ -205,6 +208,7 @@ class BrainInput(ImmutableProtocolModel):
     context: "ExecutionContext"
     active_plan: ExecutionPlan | None = None
     active_step: ExecutionStep | None = None
+    #planner_result: PlannerResult | None = None
     last_tool_result: ToolResult | None = None
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
 
@@ -222,6 +226,7 @@ class BrainResult(ImmutableProtocolModel):
     message: str = ""
     tool_request: ToolRequest | None = None
     replan_request: ReplanRequest | None = None
+    final_answer: str | None = None
     proposed_step_status: StepStatus | None = None
 
 
@@ -270,7 +275,8 @@ class PlannerResult(ImmutableProtocolModel):
     Visibility: Protocol-visible exchange object.
     """
 
-    proposed_plan: ExecutionPlan
+    outcome: PlannerOutcome
+    proposed_plan: ExecutionPlan | None = None
     message: str = ""
     planning_rationale: str = ""
     change_summary: str = ""
@@ -411,6 +417,7 @@ class ControllerDecision(ImmutableProtocolModel):
     Visibility: Protocol-visible decision envelope.
     """
 
+    accepted_plan: ExecutionPlan | None = None
     decision_type: ControllerDecisionType
     reason: str = ""
     next_worker: WorkerRole | None = None
@@ -418,4 +425,6 @@ class ControllerDecision(ImmutableProtocolModel):
     next_step_id: str | None = None
     requires_checkpoint: bool = False
     requires_replan: bool = False
+    clear_last_tool_result: bool = False
+    clear_active_step: bool = False
     terminal: bool = False

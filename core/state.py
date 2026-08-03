@@ -4,7 +4,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 from core.models import TokenUsage
-from core.protocol.models import BrainResult, ExecutionState, PlannerResult, ToolResult
+from core.protocol.models import BrainResult, ControllerDecision, ExecutionState, PlannerResult, ToolResult
 
 
 class AgentState(TypedDict, total=False):
@@ -31,3 +31,5 @@ class AgentState(TypedDict, total=False):
     brain_result: BrainResult
     run_id: str
     execution_state: ExecutionState
+    controller_decision: ControllerDecision
+

@@ -50,6 +50,12 @@ class StepStatus(StrEnum):
     FAILED = "failed"
     SKIPPED = "skipped"
 
+class PlannerOutcome(StrEnum):
+    EXECUTION_PLAN = "execution_plan"
+    DIRECT_RESPONSE = "direct_response"
+    CLARIFICATION_REQUIRED = "clarification_required"
+    FAILED = "failed"
+
 
 class BrainOutcome(StrEnum):
     """Step-scoped outcomes produced by BrainResult."""
@@ -70,6 +76,11 @@ class ControllerDecisionType(StrEnum):
     DISPATCH_TOOL_RUNTIME = "dispatch_tool_runtime"
     DISPATCH_SUMMARY = "dispatch_summary"
     REQUEST_REPLAN = "request_replan"
+
+    PAUSE = "pause"
+    RESUME = "resume"
+    CANCEL = "cancel"
+    
     TERMINATE = "terminate"
 
 

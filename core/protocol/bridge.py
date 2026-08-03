@@ -25,6 +25,8 @@ from typing import Any, Mapping, Sequence, Final
 
 from pydantic import BaseModel
 
+from core import protocol
+
 from .converters import (
     _to_int,
     _to_optional_int,
@@ -612,6 +614,31 @@ def build_execution_state(
 ) -> ExecutionState:
     """Build ExecutionState by combining protocol-visible and working state translations."""
     state = _state_or_empty(legacy_state)
+
+    existing = state.get("execution_state")
+
+    if isinstance(existing, ExecutionState):
+        protocol_visible = existing.protocol_visible
+
+        if identity is not None:
+            protocol_visible = protocol_visible.model_copy(
+                update={
+                    "identity": identity
+                }
+            )
+
+        if cursor is not None:
+            protocol_visible = protocol_visible.model_copy(
+                update={
+                    "cursor": cursor
+                }
+            )
+
+        return ExecutionState(
+            protocol_visible=protocol_visible,
+            working=build_working_state(state),
+        )
+
     resolved_identity = identity or build_execution_identity(state)
     resolved_cursor = cursor or build_execution_cursor(state)
 
@@ -636,8 +663,10 @@ def build_execution_plan(
     state = _state_or_empty(legacy_state)
 
     planner_result = state.get("planner_result")
+    
     if isinstance(planner_result, PlannerResult):
-        return planner_result.proposed_plan
+        if planner_result.proposed_plan is not None:
+            return planner_result.proposed_plan
 
     resolved_identity = (
         identity
@@ -687,7 +716,9 @@ def planner_result_to_legacy(result: PlannerResult) -> dict[str, Any]:
 
 def build_brain_input(legacy_state: LegacyState | None = None) -> BrainInput:
     """Build BrainInput contract from legacy runtime state."""
+
     execution_state = build_execution_state(legacy_state)
+
     return BrainInput(
         identity=execution_state.protocol_visible.identity,
         cursor=execution_state.protocol_visible.cursor,
@@ -699,34 +730,84 @@ def build_brain_input(legacy_state: LegacyState | None = None) -> BrainInput:
     )
 
 
-def build_controller_input(legacy_state: LegacyState | None = None) -> ControllerInput:
+def build_controller_input(
+    legacy_state: LegacyState | None = None,
+) -> ControllerInput:
     """Build ControllerInput contract from legacy runtime state."""
 
     execution_state = build_execution_state(legacy_state)
     state = _state_or_empty(legacy_state)
 
-    pr = state.get("planner_result")
-    print(
-        "CONTROLLER STATE:",
-        pr.proposed_plan.plan_id if pr else None,
-        id(pr) if pr else None,
-    )
+    protocol = execution_state.protocol_visible
 
-    active_plan = execution_state.protocol_visible.active_plan
+    planner_result: PlannerResult | None = None
+    brain_result: BrainResult | None = None
+    tool_result: ToolResult | None = None
 
-    planner_result = state.get("planner_result") if isinstance(state.get("planner_result"), PlannerResult) else None
-    if planner_result is None:
-        planner_result = _legacy_planner_result_to_model(legacy_state, active_plan)
+    #
+    # Consume newest event first.
+    #
+    if state.get("brain_result") is not None:
+        brain_result = state["brain_result"]
+    
+    elif state.get("last_tool_result") is not None:
+        tool_result = state["last_tool_result"]
 
-    brain_result = state.get("brain_result") if isinstance(state.get("brain_result"), BrainResult) else None
-    if brain_result is None:
-        brain_result = _legacy_brain_result_to_model(legacy_state)
-
-    tool_result = execution_state.working.last_tool_result
+    elif state.get("planner_result") is not None:
+        planner_result = state["planner_result"]
 
     return ControllerInput(
+        identity=protocol.identity,
+        cursor=protocol.cursor,
+        context=build_execution_context(state),
+        active_plan=protocol.active_plan,
+        active_step=protocol.active_step,
+        planner_result=planner_result,
+        brain_result=brain_result,
+        tool_result=tool_result,
+    )
+
+# def build_controller_input(legacy_state: LegacyState | None = None) -> ControllerInput:
+#     """Build ControllerInput contract from legacy runtime state."""
+
+#     execution_state = build_execution_state(legacy_state)
+#     state = _state_or_empty(legacy_state)
+
+
+#     active_plan = execution_state.protocol_visible.active_plan
+#     cursor = execution_state.protocol_visible.cursor
+
+    
+#     planner_result: PlannerResult | None = None
+#     brain_result: BrainResult | None = None
+#     tool_result: ToolResult | None = None
+
+#     # if state.get("last_tool_result") is not None:
+#     #     tool_result = state["last_tool_result"]
+
+#     # elif state.get("brain_result") is not None:
+#     #     brain_result = state["brain_result"]
+
+#     # elif state.get("planner_result") is not None:
+#     #     planner_result = state["planner_result"]
+
+#     match cursor.current_worker:
+
+#         case WorkerRole.PLANNER:
+#             planner_result = state.get("planner_result")
+
+#         case WorkerRole.BRAIN:
+#             brain_result = state.get("brain_result")
+
+#         case WorkerRole.TOOL_RUNTIME:
+#             tool_result = state.get("last_tool_result")
+
+#         case _:
+#             pass
+    
+    return ControllerInput(
         identity=execution_state.protocol_visible.identity,
-        cursor=execution_state.protocol_visible.cursor,
+        cursor=cursor,
         context=build_execution_context(
             legacy_state,
             role=WorkerRole.CONTROLLER,
@@ -745,6 +826,10 @@ def brain_result_to_legacy(result: BrainResult) -> dict[str, Any]:
     payload: LegacyPayload = {
         "brain_outcome": result.outcome.value,
         "brain_message": result.message,
+
+        "tool_request": None,
+        "replan_request": None,
+        "proposed_step_status": None,
     }
 
     if result.proposed_step_status is not None:
@@ -917,6 +1002,24 @@ def execution_state_to_legacy(state: ExecutionState) -> dict[str, Any]:
             legacy[key] = _json_compatible(value)
 
     return legacy
+
+def with_cursor(
+    execution_state: ExecutionState,
+    **updates,
+) -> ExecutionState:
+    """Return a copy of ExecutionState with an updated execution cursor."""
+
+    return execution_state.model_copy(
+        update={
+            "protocol_visible": execution_state.protocol_visible.model_copy(
+                update={
+                    "cursor": execution_state.protocol_visible.cursor.model_copy(
+                        update=updates,
+                    )
+                }
+            )
+        }
+    )
 
 
 __all__ = [

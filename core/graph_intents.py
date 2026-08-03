@@ -1,33 +1,27 @@
 import json
 import re
+from typing import Dict, Any, Set
+
 from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 
-from core.graph_constants import (
-    AGENT_INFO_INTENT_PATTERN,
-    CASUAL_CHAT_PATTERN,
-    CODE_DISCUSSION_PATTERN,
-    CURRENT_TIME_INTENT_PATTERN,
-    MATH_INTENT_PATTERN,
-    TOKEN_USAGE_INTENT_PATTERN,
-)
+from core.graph_constants import SYSTEM_CAPABILITIES_TEXT
 
-PLANNER_ROUTER_PROMPT_OLD = """
-    You are a strict router.
-    Return ONLY valid JSON with keys: route, domain, confidence, enforced, reason, needs_clarification.
-    Allowed routes: info, action, conversation, clarify_domain.
-    Allowed domains: general, python, sap.
-    Confidence must be 0.0..1.0.
-    If uncertain, choose conversation with low confidence.
-"""
+ALLOWED_ROUTES = {"info", "action", "conversation", "clarify_domain"}
+ALLOWED_DOMAINS = {"python", "sap", "general"}
 
-PLANNER_ROUTER_PROMPT = """
+ROUTES_SCHEMA_STR = " | ".join(f'"{r}"' for r in sorted(ALLOWED_ROUTES))
+DOMAINS_SCHEMA_STR = " | ".join(f'"{d}"' for d in sorted(ALLOWED_DOMAINS))
+
+PLANNER_ROUTER_PROMPT = f"""
 You are a fast, high-precision intent router for an AI agent system.
 
 YOUR TASK:
 Analyze the user's input and classify it into a route and domain to guide downstream planning.
+
+{SYSTEM_CAPABILITIES_TEXT}
 
 ROUTE DEFINITIONS:
 - "info": Read-only requests requiring tool lookup (reading files, searching docs/RAG, git status/log, querying SCADA state, checking SAP records).
@@ -42,14 +36,14 @@ DOMAIN DEFINITIONS:
 
 OUTPUT REQUIREMENTS:
 Return ONLY a valid JSON object matching this exact schema:
-{
-  "route": "info" | "action" | "conversation" | "clarify_domain",
-  "domain": "python" | "sap" | "general",
+{{
+  "route": {ROUTES_SCHEMA_STR},
+  "domain": {DOMAINS_SCHEMA_STR},
   "confidence": float (0.0 to 1.0),
   "enforced": boolean (true if safety rules or explicit user instruction force this route),
   "needs_clarification": boolean,
   "reason": "Short 1-sentence justification for this route and domain decision"
-}
+}}
 """
 
 
@@ -63,153 +57,10 @@ class RoutingDecision:
     needs_clarification: bool
     source: str = "hard_rule"
     
-ALLOWED_ROUTES = {
-    "info",
-    "action",
-    "casual",
-    "coding_discussion",
-    "conversation",
-    "clarify_domain",
-}
-
-
-EXPLICIT_SAP_PATTERN = re.compile(r"\[(?:domain\s*:\s*)?sap\]|\bdomain\s*:\s*sap\b", re.IGNORECASE)
-EXPLICIT_PYTHON_PATTERN = re.compile(r"\[(?:domain\s*:\s*)?python\]|\bdomain\s*:\s*python\b", re.IGNORECASE)
-STRONG_SAP_PATTERN = re.compile(
-    r"\b(sap|abap|tcode|se38|se11|se16|ekko|ekpo|mara|marc|makt|vbak|vbap|bkpf|bseg|lifnr|matnr|werks|ebeln|ebelp)\b",
-    re.IGNORECASE,
-)
-STRONG_PYTHON_PATTERN = re.compile(
-    r"\b(python|py|pandas|numpy|pip|venv|pytest|fastapi|flask|django|script|module|package|traceback|import|def|class|json|csv|parse|parsing)\b",
-    re.IGNORECASE,
-)
-
-LIST_WORKSPACE_INTENT_PATTERN = re.compile(
-    r"^\s*(list|show|display|ls|dir)\s+(all\s+)?(workspace\s+)?(files|folders|directories)\s*$",
-    re.IGNORECASE,
-)
-
-
-def _domain_decision(user_text: str) -> tuple[str, float, bool, bool, str]:
-    text = (user_text or "").strip()
-    if not text:
-        return "general", 0.0, False, False, "empty input"
-
-    if EXPLICIT_SAP_PATTERN.search(text):
-        return "sap", 1.0, True, False, "explicit sap domain override"
-
-    if EXPLICIT_PYTHON_PATTERN.search(text):
-        return "python", 1.0, True, False, "explicit python domain override"
-
-    sap_strong_hits = len(STRONG_SAP_PATTERN.findall(text))
-    python_hits = len(STRONG_PYTHON_PATTERN.findall(text))
-
-    sap_score = sap_strong_hits * 0.45
-    python_score = python_hits * 0.35
-
-    if sap_score <= 0 and python_score <= 0:
-        return "general", 0.35, False, False, "no domain indicators"
-
-    if abs(sap_score - python_score) <= 0.2 and sap_score > 0 and python_score > 0:
-        confidence = min(0.74, 0.45 + max(sap_score, python_score) * 0.1)
-        return "general", confidence, False, True, "mixed sap and python signals"
-
-    if sap_score > python_score:
-        confidence = min(0.95, 0.55 + sap_score * 0.1)
-        return "sap", confidence, False, False, "sap indicators dominate"
-
-    confidence = min(0.95, 0.55 + python_score * 0.1)
-    return "python", confidence, False, False, "python indicators dominate"
-
-def preferred_info_tool(user_text: str) -> str | None:
-    text = (user_text or "").strip()
-    if not text:
-        return None
-    if TOKEN_USAGE_INTENT_PATTERN.search(text):
-        return "token_usage"
-    if CURRENT_TIME_INTENT_PATTERN.search(text):
-        return "current_time"
-    if MATH_INTENT_PATTERN.search(text):
-        return "solve_math"
-    if AGENT_INFO_INTENT_PATTERN.search(text):
-        return "agent_info"
-    return None
-
-
-def preferred_file_tool(user_text: str) -> str | None:
-    text = (user_text or "").strip()
-    if not text:
-        return None
-    if LIST_WORKSPACE_INTENT_PATTERN.search(text):
-        return "list_files"
-    return None
-
-
-def _is_casual_chat(user_text: str) -> bool:
-    """Return True for social/identity chat that should skip planning/tool routing."""
-    text = (user_text or "").strip()
-    if not text:
-        return False
-    if preferred_info_tool(text):
-        return False
-    if CODE_DISCUSSION_PATTERN.search(text):
-        return False
-    if CASUAL_CHAT_PATTERN.search(text):
-        return True
-
-    word_count = len(text.split())
-    if word_count <= 6 and text.endswith("?"):
-        return True
-    return False
-
-def _workspace_intent(user_text: str) -> str | None:
-    text = (user_text or "").lower()
-
-    intent_scores = {
-        "LIST": 0,
-        "READ": 0,
-        "ANALYZE": 0,
-        "GENERATE": 0,
-    }
-
-    # LIST
-    if any(k in text for k in [
-        "list workspace", "list files", "show workspace", "directory structure", "ls"
-    ]):
-        intent_scores["LIST"] += 3
-
-    # READ
-    if any(k in text for k in [
-        "read workspace", "open file", "show file content", "inspect files", "read files"
-    ]):
-        intent_scores["READ"] += 3
-
-    # ANALYZE
-    if any(k in text for k in [
-        "analyze", "count characters", "summarize", "explain project", "what is inside"
-    ]):
-        intent_scores["ANALYZE"] += 3
-
-    # GENERATE
-    if any(k in text for k in [
-        "generate", "create project", "write script", "build project", "implement", "execute code", "run code"
-    ]):
-        intent_scores["GENERATE"] += 3
-
-    # soft signals (important improvement)
-    if "workspace" in text:
-        intent_scores["LIST"] += 1
-        intent_scores["READ"] += 1
-        intent_scores["ANALYZE"] += 1
-
-    best = max(intent_scores, key=intent_scores.get)
-
-    return best if intent_scores[best] > 0 else None
 
 def _llm_route_decision(   
     user_text: str,
     llm,
-    tool_name_set: set[str],
 ) -> RoutingDecision | None:
 
     try:
@@ -285,7 +136,6 @@ def _arbiter_route(
 def planner_routing_decision(
     user_text: str,
     router_llm: ChatOllama | None = None,
-    tool_name_set: set[str] | None = None,
 ) -> RoutingDecision:
 
     text = (user_text or "").strip()
@@ -351,7 +201,6 @@ def planner_routing_decision(
         llm_decision = _llm_route_decision(
             user_text=text,
             llm=router_llm,
-            tool_name_set=tool_name_set or set(),
         )
 
     return _arbiter_route(
