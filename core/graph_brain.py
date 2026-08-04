@@ -377,14 +377,47 @@ def create_brain_node(
             *guidance,
         ])
         return [SystemMessage(content=combined)]
-    
-    def _build_pre_messages(
+
+    def _build_final_answer_messages(
+        *,
+        system_prompt: str,
+        brain_input: BrainInput,
+    ) -> list[BaseMessage]:
+        """Build the message list used only for FINAL ANSWER generation."""
+
+        messages: list[BaseMessage] = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=brain_input.context.user_request),
+        ]
+
+        if brain_input.active_plan is not None:
+            messages.append(
+                SystemMessage(
+                    content=(
+                        "Execution plan:\n"
+                        f"{brain_input.active_plan.objective}"
+                    )
+                )
+            )
+
+        if brain_input.last_tool_result is not None:
+            messages.append(
+                SystemMessage(
+                    content=(
+                        "Latest tool result:\n"
+                        f"{brain_input.last_tool_result.message}"
+                    )
+                )
+            )
+
+        return messages
+
+    def _build_execution_messages(
         *,
         system_prompt: str,
         state: AgentState,
         brain_input,
         execution_policy: BrainExecutionDecision,
-
     ) -> list[BaseMessage]:
         
         history = state.get("messages", [])
@@ -398,7 +431,6 @@ def create_brain_node(
         last_tool_signature = _resolved_tool_signature(state=state, brain_input=brain_input)
 
         # Route guard: think to add something
-
 
         pre_messages = _build_context_messages(
             system_prompt=system_prompt,
@@ -418,6 +450,27 @@ def create_brain_node(
         )
 
         return pre_messages
+
+    def _build_brain_messages(
+        *,
+        system_prompt: str,
+        state: AgentState,
+        brain_input,
+        execution_policy: BrainExecutionDecision,
+    ) -> list[BaseMessage]:
+        
+        if execution_policy.final_answer:
+            return _build_final_answer_messages(
+                system_prompt=system_prompt,
+                brain_input=brain_input,
+            )
+        
+        return _build_execution_messages(
+            system_prompt=system_prompt,
+            state=state,
+            brain_input=brain_input,
+            execution_policy=execution_policy,
+        )
 
     def _resolved_tool_output_payload(*, state: AgentState, brain_input) -> object:
         last_tool_result = getattr(brain_input, "last_tool_result", None)
@@ -465,19 +518,6 @@ def create_brain_node(
             brain_input=brain_input,
         )
         return response
-    
-    def _resolve_brain_response(
-        brain_input,
-        response: AIMessage,
-    ) -> BrainResult:
-                
-        if getattr(response, "tool_calls", None):
-            return _tool_request_result(
-                brain_input=brain_input,
-                response=response,
-            )
-
-        return _final_answer_result(response)
     
     def _resolve_execution_context(
         *, 
@@ -661,7 +701,7 @@ def create_brain_node(
         This function owns prompt construction and model invocation only.
         """
 
-        pre_messages = _build_pre_messages(
+        pre_messages = _build_brain_messages(
             system_prompt=system_prompt,
             state=state,
             brain_input=brain_input,
@@ -713,6 +753,8 @@ def create_brain_node(
             ),
         )
 
+    
+
 
     def _generate_final_answer(
         *,
@@ -734,18 +776,16 @@ def create_brain_node(
 
         return response, _final_answer_result(response)
 
-    def _handle_completed_tool(
-        brain_input: BrainInput,
-    ) -> BrainResult:
-        return BrainResult(
-            outcome=BrainOutcome.STEP_COMPLETED,
-            message="Step completed successfully.",
-            proposed_step_status=StepStatus.COMPLETED,
-        )
 
     def brain_node(state: AgentState):
 
         brain_input = build_brain_input(state)
+
+        print("=== BRAIN ENTRY ===")
+        print("last_tool_result:", state.get("last_tool_result"))
+        print("brain_result:", state.get("brain_result"))
+        print("current_worker:", brain_input.cursor.current_worker)
+        print("active_step:", brain_input.active_step)
 
         llm, system_prompt, execution_policy = _resolve_execution_context(
             brain_input=brain_input,

@@ -44,13 +44,13 @@ class CortexController:
 
         worker = controller_input.cursor.current_worker
 
-        if worker == WorkerRole.PLANNER:
+        if controller_input.planner_result is not None:
             return self._decide_from_planner(controller_input)
         
-        if worker == WorkerRole.BRAIN:
+        if controller_input.brain_result is not None:
             return self._decide_from_brain(controller_input)
 
-        if worker == WorkerRole.TOOL_RUNTIME:
+        if controller_input.tool_result is not None:
             return self._decide_from_tool(controller_input)
 
         return self._decide_initial(controller_input)
@@ -362,7 +362,7 @@ class CortexController:
                     reason="Generate final answer.",
                     next_step_id=None,
                     clear_active_step=True,
-                    clear_last_tool_result=True,
+                    clear_last_tool_result=False,
                 )
             
             next_step = plan.steps[index + 1]

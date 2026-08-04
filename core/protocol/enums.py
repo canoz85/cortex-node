@@ -56,7 +56,6 @@ class PlannerOutcome(StrEnum):
     CLARIFICATION_REQUIRED = "clarification_required"
     FAILED = "failed"
 
-
 class BrainOutcome(StrEnum):
     """Step-scoped outcomes produced by BrainResult."""
 

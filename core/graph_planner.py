@@ -355,29 +355,18 @@ def create_planner_node(
             plan_text=plan_text,
         )
 
-        # TODO(CEP-006):
-        # Remove legacy bridge after Controller consumes PlannerResult directly.
-        legacy = planner_result_to_legacy(planner_result)
+        # # TODO(CEP-006):
+        # # Remove legacy bridge after Controller consumes PlannerResult directly.
+        # legacy = planner_result_to_legacy(planner_result)
 
-        execution_state = build_execution_state(state)
+        # legacy.update({
+        #     "planner_result": planner_result,
+        #     "retrieval_messages": retrieval_messages,
+        # })
 
-        legacy["execution_state"] = with_cursor(
-            execution_state,
-            current_worker=WorkerRole.PLANNER,
-        )
-
-        legacy.update({
+        return {
             "planner_result": planner_result,
             "retrieval_messages": retrieval_messages,
-
-             # Legacy runtime fields
-            "steps": 0, 
-            "last_tool_rendered": "",
-            "last_tool_success": None,
-            "repeat_fail_count": 0,
-            "tool_text_retry_used": False,
-        })
-
-        return legacy
+        }
 
     return planner_node

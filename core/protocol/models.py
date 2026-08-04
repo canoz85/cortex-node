@@ -208,7 +208,6 @@ class BrainInput(ImmutableProtocolModel):
     context: "ExecutionContext"
     active_plan: ExecutionPlan | None = None
     active_step: ExecutionStep | None = None
-    #planner_result: PlannerResult | None = None
     last_tool_result: ToolResult | None = None
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
 

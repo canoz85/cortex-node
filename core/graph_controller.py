@@ -58,12 +58,18 @@ def create_controller_node(
                 }
             )
 
-        brain_result = state.get("brain_result")
+        brain_result = controller_input.brain_result
         if (
             brain_result is not None
             and brain_result.outcome == BrainOutcome.FINAL_ANSWER
         ):
             update["final_answer"] = brain_result.final_answer
+
+        if controller_input.brain_result is not None:
+            update["brain_result"] = None
+
+        if controller_input.planner_result is not None:
+            update["planner_result"] = None
 
 
         # print("\n====CONTROLLER====:")
