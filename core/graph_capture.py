@@ -1,9 +1,11 @@
+
 import uuid
+from dataclasses import dataclass
+
 from langchain_core.messages import ToolMessage
 
-from core.protocol.bridge import build_execution_state, tool_result_to_legacy, with_cursor, WorkerRole
+from core.protocol.bridge import build_execution_state, with_cursor, WorkerRole
 from core.protocol.models import ToolResult
-
 from core.graph_messages import normalize_message_content
 from core.graph_response_formatters import format_tool_result_response
 from core.graph_tool_events import extract_tool_signature
@@ -11,118 +13,143 @@ from core.state import AgentState
 from core.tool_output import parse_tool_result, unwrap_tool_output
 
 
-def create_capture_tool_output_node():
-    def _render_tool_output(unwrapped: object, raw_content: str) -> str:
-        if isinstance(unwrapped, dict):
-            rendered = format_tool_result_response(unwrapped).strip()
-            return rendered or str(unwrapped)
-        if isinstance(unwrapped, list):
-            return str(unwrapped)
-        if isinstance(unwrapped, str):
-            return unwrapped
-        return str(raw_content or "")
-    
-    def _build_tool_result(
-        *,
-        request_id: str,
-        success: bool,
-        message: str,
-        data,
-        error_code: str | None = None,
-    ) -> ToolResult:
-        return ToolResult(
-            request_id=request_id,
+@dataclass(frozen=True, slots=True)
+class NormalizedToolPayload:
+    success: bool
+    message: str
+    data: object | None
+    rendered_output: str
+    error_code: str | None
+
+
+def _normalize_transport_payload(raw_content: str) -> NormalizedToolPayload:
+    parsed = parse_tool_result(raw_content)
+    unwrapped = unwrap_tool_output(raw_content)
+
+    success = (
+        parsed.success
+        if parsed is not None
+        else bool(isinstance(unwrapped, dict) and unwrapped.get("success") is True)
+    )
+
+    if isinstance(unwrapped, dict):
+        rendered_output = format_tool_result_response(unwrapped).strip() or str(unwrapped)
+        return NormalizedToolPayload(
             success=success,
-            message=message,
-            data=data,
-            error_code=error_code,
+            message=str(unwrapped.get("message", "")),
+            data=unwrapped.get("data"),
+            rendered_output=rendered_output,
+            error_code=unwrapped.get("error_code"),
         )
 
+    if isinstance(unwrapped, list):
+        text = str(unwrapped)
+        return NormalizedToolPayload(
+            success=success,
+            message=text,
+            data=unwrapped,
+            rendered_output=text,
+            error_code=None,
+        )
+
+    if isinstance(unwrapped, str):
+        return NormalizedToolPayload(
+            success=success,
+            message=unwrapped,
+            data=None,
+            rendered_output=unwrapped,
+            error_code=None,
+        )
+
+    return NormalizedToolPayload(
+        success=success,
+        message=raw_content,
+        data=None,
+        rendered_output=str(raw_content or ""),
+        error_code=None,
+    )
+
+
+def _build_tool_result(
+    *,
+    raw_content: str,
+    tool_call_id: str | None,
+    signature: str,
+) -> ToolResult:
+    payload = _normalize_transport_payload(raw_content)
+
+    # TODO(protocol):
+    # request_id should originate from ToolRequest.
+    # Remove UUID fallback after protocol migration is complete.
+    request_id = tool_call_id or signature or uuid.uuid4().hex
+
+    return ToolResult(
+        request_id=request_id,
+        signature=signature,
+        success=payload.success,
+        message=payload.message,
+        data=payload.data,
+        rendered_output=payload.rendered_output,
+        error_code=payload.error_code,
+    )
+
+
+def _compute_repeat_fail_count(
+    *,
+    previous: ToolResult | None,
+    current: ToolResult,
+    previous_repeat_count: int,
+) -> int:
+    if (
+        not current.success
+        and current.signature
+        and previous is not None
+        and previous.signature == current.signature
+        and previous.success is False
+    ):
+        return previous_repeat_count + 1
+
+    if not current.success and current.signature:
+        return 1
+
+    return 0
+
+
+def create_capture_tool_output_node():
     def capture_tool_output_node(state: AgentState):
         history = state.get("messages", [])
         if not history:
-            return {
-                "last_tool_output": "",
-                "last_tool_rendered": "",
-                "last_tool_signature": "",
-                "last_tool_success": None,
-                "repeat_fail_count": 0,
-            }
+            return {"repeat_fail_count": 0}
 
         last_message = history[-1]
-
-        # Ignore non-tool messages.
         if not isinstance(last_message, ToolMessage):
             return {}
-        
+
+        tool_call_id = getattr(last_message, "tool_call_id", None)
+        signature = extract_tool_signature(history[:-1], tool_call_id)
         raw_content = normalize_message_content(last_message)
-        parsed = parse_tool_result(raw_content)
-        unwrapped = unwrap_tool_output(raw_content)
-        
-        success = parsed.success if parsed is not None else bool(isinstance(unwrapped, dict) and unwrapped.get("success") is True)
-        current_signature = extract_tool_signature(history[:-1], getattr(last_message, "tool_call_id", None))
-
-        previous_signature = state.get("last_tool_signature", "")
-        previous_success = state.get("last_tool_success", None)
-        previous_repeat_count = state.get("repeat_fail_count", 0)
-        
-        if not success and current_signature and previous_signature == current_signature and previous_success is False:
-            repeat_fail_count = previous_repeat_count + 1
-        elif not success and current_signature:
-            repeat_fail_count = 1
-        else:
-            repeat_fail_count = 0
-
-        rendered_output = _render_tool_output(unwrapped, raw_content)
-
-        if isinstance(unwrapped, dict):
-            data = unwrapped.get("data")
-            message = str(unwrapped.get("message", ""))
-            error_code = unwrapped.get("error_code")
-        elif isinstance(unwrapped, list):
-            data = unwrapped
-            message = str(unwrapped)
-            error_code = None
-        elif isinstance(unwrapped, str):
-            data = None
-            message = unwrapped
-            error_code = None
-        else:
-            data = None
-            message = raw_content
-            error_code = None
 
         tool_result = _build_tool_result(
-            request_id=(
-                getattr(last_message, "tool_call_id", None)
-                or current_signature
-                or uuid.uuid4().hex
-            ),
-            success=success,
-            message=message,
-            data=data,
-            error_code=error_code,
+            raw_content=raw_content,
+            tool_call_id=tool_call_id,
+            signature=signature,
         )
-        
-        execution_state = build_execution_state(state)
+
+        repeat_fail_count = _compute_repeat_fail_count(
+            previous=state.get("last_tool_result"),
+            current=tool_result,
+            previous_repeat_count=state.get("repeat_fail_count", 0),
+        )
+
         updated_execution_state = with_cursor(
-            execution_state,
-            current_worker=WorkerRole.TOOL_RUNTIME, 
+            build_execution_state(state),
+            current_worker=WorkerRole.TOOL_RUNTIME,
         )
 
         return {
+            "last_tool_result": tool_result,
             "execution_state": updated_execution_state,
-            "last_tool_result": tool_result,    # protocol
-            "brain_result": None,               # Brain request has now been consumed.
-
-            # Legacy compatibility
-            "last_tool_output": tool_result.model_dump(),
-            **tool_result_to_legacy(tool_result),
-
-            # Diagnostics
-            "last_tool_rendered": rendered_output,
-            "last_tool_signature": current_signature,
-            "last_tool_success": tool_result.success,
+            "brain_result": None,
             "repeat_fail_count": repeat_fail_count,
         }
 

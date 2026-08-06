@@ -25,7 +25,6 @@ DEFAULT_SETTINGS = {
     "session_file": ".cortex_session.json"
 }
 
-
 def _load_config_file(path: str) -> dict:
     config_path = Path(path).resolve()
     if not config_path.exists() or not config_path.is_file():

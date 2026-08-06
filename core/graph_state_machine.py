@@ -107,6 +107,15 @@ def apply_controller_decision_to_state(
         else protocol_visible.active_plan
     )
 
+    if decision.clear_pending_tool_request:
+        pending_tool_request = None
+    else:
+        pending_tool_request = (
+            decision.pending_tool_request
+            if decision.pending_tool_request is not None
+            else protocol_visible.pending_tool_request
+        )
+
     #
     # Active step
     #
@@ -157,6 +166,7 @@ def apply_controller_decision_to_state(
                     "cursor": cursor,
                     "active_plan": active_plan,
                     "active_step": active_step,
+                    "pending_tool_request": pending_tool_request,
                 }
             ),
             "working": working,

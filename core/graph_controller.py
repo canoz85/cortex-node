@@ -51,10 +51,6 @@ def create_controller_node(
             update.update(
                 {
                     "last_tool_result": None,
-                    "last_tool_output": "",
-                    "last_tool_success": None,
-                    "last_tool_signature": "",
-                    "last_tool_rendered": "",
                 }
             )
 

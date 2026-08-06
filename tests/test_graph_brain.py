@@ -41,8 +41,6 @@ def test_brain_node_constructs_brain_input_once(monkeypatch):
         "retrieval_messages": [],
         "rolling_summary": "",
         "last_tool_output": "",
-        "last_tool_success": None,
-        "last_tool_rendered": "",
         "last_tool_signature": "",
     }
 

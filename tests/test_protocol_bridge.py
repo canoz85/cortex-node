@@ -32,7 +32,6 @@ def test_build_controller_input_maps_protocol_outputs_from_legacy_state():
             "message": "Wrote file",
             "data": {"path": "workspace/a.py"},
         },
-        "last_tool_success": True,
     }
 
     controller_input = build_controller_input(state)

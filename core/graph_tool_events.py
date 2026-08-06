@@ -15,26 +15,6 @@ def _tool_signature(name: str, args: object) -> str:
     return f"{name}:{args_json}"
 
 
-def message_repeats_signature(message: AIMessage, signature: str) -> bool:
-    if not signature:
-        return False
-    for call in getattr(message, "tool_calls", None) or []:
-        if _tool_signature(call.get("name", "unknown"), call.get("args", {})) == signature:
-            return True
-    return False
-
-
-def parse_tool_signature(signature: str) -> tuple[str, dict] | None:
-    if not signature or ":" not in signature:
-        return None
-    name, raw_args = signature.split(":", 1)
-    try:
-        parsed_args = json.loads(raw_args)
-    except Exception:
-        return None
-    if not isinstance(parsed_args, dict):
-        return None
-    return name, parsed_args
 
 
 def extract_tool_signature(history: list, tool_call_id: str | None) -> str:
@@ -113,32 +93,3 @@ def current_turn_tool_events(history: list) -> list[dict]:
             }
         )
     return events
-
-
-def info_tool_already_called(history: list, tool_name: str) -> bool:
-    """Check if the preferred info tool was already called during the current turn."""
-    if not history or not tool_name:
-        return False
-
-    current_turn = current_turn_messages(history)
-    if not current_turn:
-        return False
-
-    for message in reversed(current_turn):
-        if isinstance(message, ToolMessage):
-            tool_call_id = getattr(message, "tool_call_id", None)
-            if tool_call_id:
-                for msg in reversed(current_turn):
-                    if isinstance(msg, AIMessage):
-                        tool_calls = getattr(msg, "tool_calls", None) or []
-                        for call in tool_calls:
-                            if call.get("id") == tool_call_id and call.get("name") == tool_name:
-                                return True
-        if isinstance(message, AIMessage) and getattr(message, "tool_calls", None):
-            tool_calls = message.tool_calls
-            if any(call.get("name") == tool_name for call in tool_calls):
-                for msg_after in current_turn[current_turn.index(message) + 1 :]:
-                    if isinstance(msg_after, ToolMessage):
-                        return True
-    return False
-

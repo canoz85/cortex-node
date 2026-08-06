@@ -355,15 +355,6 @@ def create_planner_node(
             plan_text=plan_text,
         )
 
-        # # TODO(CEP-006):
-        # # Remove legacy bridge after Controller consumes PlannerResult directly.
-        # legacy = planner_result_to_legacy(planner_result)
-
-        # legacy.update({
-        #     "planner_result": planner_result,
-        #     "retrieval_messages": retrieval_messages,
-        # })
-
         return {
             "planner_result": planner_result,
             "retrieval_messages": retrieval_messages,

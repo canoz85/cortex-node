@@ -176,6 +176,7 @@ class CortexController:
                         decision_type=ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
                         reason="tool_request",
                         next_worker=WorkerRole.TOOL_RUNTIME,
+                        pending_tool_request=brain_result.tool_request,
                         next_step_id=controller_input.active_step.step_id,
                     )
 
@@ -237,11 +238,26 @@ class CortexController:
         controller_input: ControllerInput,
     ) -> ControllerDecision:
         tool_result: ToolResult = controller_input.tool_result
+        pending_tool_request = controller_input.pending_tool_request
+
+        if (
+            pending_tool_request is not None
+            and tool_result.request_id != pending_tool_request.request_id
+        ):
+            return self._terminate("tool_result_request_id_mismatch")
 
         if tool_result.success:
-            return self._dispatch_brain(cursor=controller_input.cursor, reason="Tool completed.")
+            return self._dispatch_brain(
+                cursor=controller_input.cursor,
+                reason="Tool completed.",
+                clear_pending_tool_request=(pending_tool_request is not None),
+            )
 
-        return self._dispatch_brain(cursor=controller_input.cursor, reason="Tool failed.")
+        return self._dispatch_brain(
+            cursor=controller_input.cursor,
+            reason="Tool failed.",
+            clear_pending_tool_request=(pending_tool_request is not None),
+        )
 
     def _dispatch_planner(self, reason: str) -> ControllerDecision:
         return ControllerDecision(
@@ -256,6 +272,7 @@ class CortexController:
         cursor: ExecutionCursor,
         reason: str,
         next_step_id: str | None = None,
+        clear_pending_tool_request: bool = False,
         clear_last_tool_result: bool = False,
         clear_active_step: bool = False,
     ) -> ControllerDecision:
@@ -271,6 +288,7 @@ class CortexController:
         return ControllerDecision(
             decision_type=ControllerDecisionType.DISPATCH_BRAIN,
             next_worker=WorkerRole.BRAIN,
+            clear_pending_tool_request=clear_pending_tool_request,
             clear_last_tool_result=clear_last_tool_result,
             cursor=next_cursor,
             next_step_id=next_step_id,

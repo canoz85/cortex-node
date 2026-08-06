@@ -23,7 +23,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Mapping, Sequence, Final
 
+from langchain_core.messages import AIMessage
 from pydantic import BaseModel
+from uuid_utils import uuid4
 
 from core import protocol
 
@@ -91,9 +93,6 @@ _WORKING_STATE_CONSUMED_KEYS: Final[frozenset[str]] = frozenset({
     "messages",
     "last_tool_output",
     "last_tool_result",
-    "last_tool_rendered",
-    "last_tool_signature",
-    "last_tool_success",
     "repeat_fail_count",
     "tool_text_retry_used",
     "steps",
@@ -237,8 +236,6 @@ def _build_debug_metadata(state: LegacyState) -> dict[str, Any]:
 def _build_capture_state(state: LegacyState) -> dict[str, Any]:
     """Collect tool-capture helper values used by Working State translation."""
     return {
-        "last_tool_rendered": _json_compatible(state.get("last_tool_rendered")),
-        "last_tool_success": _json_compatible(state.get("last_tool_success")),
         "repeat_fail_count": _json_compatible(state.get("repeat_fail_count")),
         "tool_text_retry_used": _json_compatible(state.get("tool_text_retry_used")),
     }
@@ -598,7 +595,6 @@ def build_working_state(legacy_state: LegacyState | None = None) -> WorkingState
         routing_metadata=routing_metadata,
         planner_metadata=planner_metadata,
         debug_metadata=debug_metadata,
-        tool_signature=_to_str(state.get("last_tool_signature"), default="") or None,
         capture_state=capture_state,
         orchestration_metadata=_collect_unknown_keys(state, _WORKING_STATE_CONSUMED_KEYS),
     )
@@ -760,64 +756,11 @@ def build_controller_input(
         context=build_execution_context(state),
         active_plan=protocol.active_plan,
         active_step=protocol.active_step,
+        pending_tool_request=protocol.pending_tool_request,
         planner_result=planner_result,
         brain_result=brain_result,
         tool_result=tool_result,
     )
-
-# def build_controller_input(legacy_state: LegacyState | None = None) -> ControllerInput:
-#     """Build ControllerInput contract from legacy runtime state."""
-
-#     execution_state = build_execution_state(legacy_state)
-#     state = _state_or_empty(legacy_state)
-
-
-#     active_plan = execution_state.protocol_visible.active_plan
-#     cursor = execution_state.protocol_visible.cursor
-
-    
-#     planner_result: PlannerResult | None = None
-#     brain_result: BrainResult | None = None
-#     tool_result: ToolResult | None = None
-
-#     # if state.get("last_tool_result") is not None:
-#     #     tool_result = state["last_tool_result"]
-
-#     # elif state.get("brain_result") is not None:
-#     #     brain_result = state["brain_result"]
-
-#     # elif state.get("planner_result") is not None:
-#     #     planner_result = state["planner_result"]
-
-#     match cursor.current_worker:
-
-#         case WorkerRole.PLANNER:
-#             planner_result = state.get("planner_result")
-
-#         case WorkerRole.BRAIN:
-#             brain_result = state.get("brain_result")
-
-#         case WorkerRole.TOOL_RUNTIME:
-#             tool_result = state.get("last_tool_result")
-
-#         case _:
-#             pass
-    
-    return ControllerInput(
-        identity=execution_state.protocol_visible.identity,
-        cursor=cursor,
-        context=build_execution_context(
-            legacy_state,
-            role=WorkerRole.CONTROLLER,
-        ),
-        active_plan=active_plan,
-        active_step=execution_state.protocol_visible.active_step,
-        planner_result=planner_result,
-        brain_result=brain_result,
-        tool_result=tool_result,
-        retry=execution_state.protocol_visible.retry,
-    )
-
 
 def brain_result_to_legacy(result: BrainResult) -> dict[str, Any]:
     """Translate BrainResult into a legacy-friendly dictionary payload."""
@@ -851,34 +794,45 @@ def brain_result_to_legacy(result: BrainResult) -> dict[str, Any]:
 
     return payload
 
+def build_tool_request(
+        *,
+        brain_input: BrainInput,
+        response: AIMessage,
+    ) -> ToolRequest:
+    """Build ToolRequest contract from BrainInput and AIMessage tool call response."""
+
+    tool_call = response.tool_calls[0]
+
+    return ToolRequest(
+        request_id=f"{brain_input.identity.execution_id}:tool:{uuid4().hex}",
+        tool_name=tool_call["name"],
+        arguments=tool_call.get("args", {}),
+        requested_by=WorkerRole.BRAIN,
+    )
+
 def build_tool_input(legacy_state: LegacyState | None = None,) -> ToolInput:
     """Build ToolInput contract from legacy runtime state."""
 
     execution_state = build_execution_state(legacy_state)
 
-    tool_result = execution_state.working.last_tool_result
+    pending_tool_request = execution_state.protocol_visible.pending_tool_request
 
-    request_id = (
-        tool_result.request_id
-        if tool_result is not None
-        else _to_str(
-            _state_or_empty(legacy_state).get(
-                "last_tool_signature"
+    if pending_tool_request is not None:
+        tool_request = pending_tool_request
+    else:
+        # TODO(protocol): remove this fallback once Controller always sets
+        # protocol-visible pending_tool_request on accepted TOOL_REQUEST outcomes.
+        tool_result = execution_state.working.last_tool_result
+        tool_request = ToolRequest(
+            request_id=tool_result.request_id,
+            tool_name=_to_str(
+                _state_or_empty(legacy_state).get("tool_name"),
+                default="",
             ),
-            default="legacy-tool-request",
+            arguments=_mapping_or_empty(
+                _state_or_empty(legacy_state).get("tool_args")
+            ),
         )
-    )
-
-    tool_request = ToolRequest(
-        request_id=request_id,
-        tool_name=_to_str(
-            _state_or_empty(legacy_state).get("tool_name"),
-            default="",
-        ),
-        arguments=_mapping_or_empty(
-            _state_or_empty(legacy_state).get("tool_args")
-        ),
-    )
 
     return ToolInput(
         identity=execution_state.protocol_visible.identity,
@@ -986,10 +940,8 @@ def execution_state_to_legacy(state: ExecutionState) -> dict[str, Any]:
 
     if wk.last_tool_result is not None:
         legacy["last_tool_output"] = tool_result_to_legacy(wk.last_tool_result)
-        legacy["last_tool_success"] = wk.last_tool_result.success
     else:
         legacy["last_tool_output"] = ""
-        legacy["last_tool_success"] = None
 
     for key, value in wk.capture_state.items():
         legacy[key] = _json_compatible(value)
@@ -1030,6 +982,7 @@ __all__ = [
     "build_planner_input",
     "build_controller_input",
     "build_tool_input",
+    "build_tool_request",
     "brain_result_to_legacy",
     "tool_result_to_legacy",
     "legacy_tool_result_to_model",

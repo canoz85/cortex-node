@@ -5,6 +5,7 @@ from langchain_core.messages import (
     AIMessage, BaseMessage, 
     HumanMessage, SystemMessage, ToolMessage
 )
+from dataclasses import dataclass
 from uuid_utils import uuid4
 
 from core.protocol.enums import (
@@ -16,10 +17,10 @@ from core.protocol.enums import (
 from core.protocol.models import (
     BrainInput,
     BrainResult,
-    ToolRequest,
+    ToolResult,
 )
 
-from core.protocol.bridge import brain_result_to_legacy, build_execution_state, tool_result_to_legacy, with_cursor
+from core.protocol.bridge import build_execution_state, build_tool_request, with_cursor
 from core.graph_pseudo_tools import (
     finalize_action_response,
     is_generic_json_tool_response,
@@ -27,26 +28,35 @@ from core.graph_pseudo_tools import (
     recover_action_response,
 )
 
-from core.graph_constants import ANSI_BLUE, ANSI_GREEN, ANSI_ITALIC, ANSI_RED, ANSI_RESET, ANSI_YELLOW, FINAL_ANSWER_SYSTEM_PROMPT
-from core.graph_filegen_policy import last_tool_has_args_nameerror, last_tool_missing_required_args, last_tool_stderr
+from core.graph_constants import ANSI_BLUE, ANSI_GREEN, ANSI_ITALIC, ANSI_RED, ANSI_RESET
 from core.graph_messages import current_turn_messages, is_effectively_empty_response, latest_human_message, normalize_message_content
 
 from core.graph_node_helpers import response_with_usage
 
-from core.graph_response_formatters import format_action_completion_response, format_tool_result_response
+from core.graph_response_formatters import format_action_completion_response
 from core.graph_state_machine import (
     decide_action_recovery,
     decide_brain_execution,
-    decide_repeated_signature,
     should_fallback_after_empty_response,
     should_retry_after_empty_response,
     BrainExecutionDecision,
 )
 from core.graph_summarize import rolling_summary_message
-from core.graph_tool_events import message_repeats_signature
 from core.protocol.bridge import build_brain_input
 
 from core.state import AgentState
+
+@dataclass(slots=True)
+class _BrainConversationContext:
+    history: list[BaseMessage]
+    retrieval_messages: list[BaseMessage]
+    rolling_summary: str
+
+@dataclass(slots=True)
+class _BrainExecutionContext:
+    llm: ChatOllama
+    system_prompt: str
+    decision: BrainExecutionDecision
 
 def _print_raw_llm_request_response(color, messages: list[BaseMessage], raw_text: str) -> None:
     text = (raw_text or "").strip()
@@ -127,9 +137,8 @@ def create_brain_node(
         pre_messages: list[BaseMessage],
         response: AIMessage,
         action_required: bool,
-        state: AgentState,
-        brain_input,
-        tools_set: set[str],
+        conversation: _BrainConversationContext,
+        brain_input: BrainInput,
     ) -> AIMessage:
     
         # Always sanitize pseudo tool text on action-required turns so raw JSON/call text
@@ -151,10 +160,9 @@ def create_brain_node(
             response = _finalize_from_successful_tool_context(
                 llm=llm,
                 pre_messages=pre_messages,
-                state=state,
+                conversation=conversation,
                 brain_input=brain_input,
                 response=response,
-                tools_set=tools_set,
             )
 
  
@@ -171,100 +179,13 @@ def create_brain_node(
 
         return response
     
-    def _repeated_success_final_answer_prompt(repeated_signature: str) -> SystemMessage:
-        return SystemMessage(
-            content=(
-                "The repeated tool call already succeeded earlier in this turn and must not be emitted again. "
-                f"Repeated signature: {repeated_signature}. "
-                "Do not call any tools now. "
-                "Return a concise final answer using the tool outputs already in context."
-            )
-        )
-    
-    def _repeated_signature_correction_prompt(repeated_signature: str, repeat_reason: str) -> SystemMessage:
-        return SystemMessage(
-            content=(
-                "You repeated the exact same tool call again. "
-                f"Repeated signature: {repeated_signature}. "
-                f"That signature {repeat_reason}. "
-                "Do not emit that same tool call again. "
-                "Choose the next distinct step now, such as fixing the file, reading the error output, creating sample input, verifying with different arguments, or giving the final answer if the task is complete."
-            )
-        )
-
-    def _enforce_repeated_signature_policy(
-        *,
-        llm: ChatOllama,
-        pre_messages: list[BaseMessage],
-        response: AIMessage,
-        action_required: bool,
-        state: AgentState,
-        brain_input,
-    ) -> AIMessage:
-        last_tool_signature = _resolved_tool_signature(state=state, brain_input=brain_input)
-        has_last_signature = bool(last_tool_signature)
-        initial_repeats_signature = (
-            message_repeats_signature(response, last_tool_signature)
-            if has_last_signature
-            else False
-        )
-        repeated_signature_guard_decision = decide_repeated_signature(
-            action_required=action_required,
-            has_last_tool_signature=has_last_signature,
-            response_repeats_signature=initial_repeats_signature,
-            last_tool_success=(_resolved_tool_success(state=state, brain_input=brain_input) is True),
-            corrected_repeats_signature=False,
-        )
-        if not repeated_signature_guard_decision.apply_guard:
-            return response
-
-        corrected_response = _invoke_with_trace(
-            llm=llm,
-            messages=[*pre_messages, response, _repeated_signature_correction_prompt(last_tool_signature, repeated_signature_guard_decision.repeat_reason)],
-            show_raw_llm=show_raw_llm,
-            color=ANSI_YELLOW,
-        )
-
-        corrected_repeats_signature = message_repeats_signature(corrected_response, last_tool_signature)
-        repeated_signature_followup_decision = decide_repeated_signature(
-            action_required=action_required,
-            has_last_tool_signature=has_last_signature,
-            response_repeats_signature=initial_repeats_signature,
-            last_tool_success=(_resolved_tool_success(state=state, brain_input=brain_input) is True),
-            corrected_repeats_signature=corrected_repeats_signature,
-        )
-
-        if repeated_signature_followup_decision.request_final_answer:
-            
-            final_response = _invoke_with_trace(
-                llm=llm,
-                messages=[*pre_messages, corrected_response, _repeated_success_final_answer_prompt(last_tool_signature)],
-                show_raw_llm=show_raw_llm,
-                color=ANSI_GREEN,
-            )
-
-            if getattr(final_response, "tool_calls", None):
-                last_tool_output = _resolved_tool_output_payload(state=state, brain_input=brain_input)
-                if isinstance(last_tool_output, dict):
-                    return AIMessage(content=format_tool_result_response(last_tool_output))
-                return AIMessage(
-                    content=(
-                        "I already ran this tool call successfully and will not repeat it in this turn. "
-                        "Using the existing tool output, I can continue with a direct answer next."
-                    )
-                )
-            return final_response
-
-        return corrected_response
-    
     def _finalize_from_successful_tool_context(
         *,
         llm: ChatOllama,
         pre_messages: list[BaseMessage],
-        state: AgentState,
-        brain_input,
+        conversation: _BrainConversationContext,
+        brain_input: BrainInput,
         response: AIMessage,
-        tools_set: set[str],
     ) -> AIMessage:
         """Ask the model to decide: final answer now or distinct next tool call.
 
@@ -273,7 +194,7 @@ def create_brain_node(
         if getattr(response, "tool_calls", None):
             return response
         
-        history = state.get("messages", [])
+        history = conversation.messages
 
         completion = format_action_completion_response(history)
         if completion:
@@ -300,9 +221,10 @@ def create_brain_node(
 
         # Last-resort fallback keeps the flow deterministic when model output is unusable.
         if "Action-required run stopped" in normalize_message_content(decision):
-            last_tool_output = _resolved_tool_output_payload(state=state, brain_input=brain_input)
-            if isinstance(last_tool_output, dict):
-                rendered = format_tool_result_response(last_tool_output)
+            tool_result = brain_input.last_tool_result
+
+            if tool_result is not None:
+                rendered = tool_result.rendered_output
                 if rendered.strip():
                     return AIMessage(content=rendered)
 
@@ -337,46 +259,70 @@ def create_brain_node(
     
     def _build_runtime_guidance_messages(
         *,
-        last_tool_success: object,
-        last_tool_output: object,
-        last_tool_rendered: str,
-        last_tool_signature: str,
+        tool_result: ToolResult | None,
     ) -> list[SystemMessage]:
+
+        if tool_result is None:
+            return []
+
         guidance: list[str] = []
 
-        if last_tool_success is False:
+        if tool_result.success is False:
             guidance.append("The previous tool execution FAILED.")
 
-            if last_tool_signature:
-                guidance.append(f"Failed tool signature: {last_tool_signature}")
+            if tool_result.request_id:
+                guidance.append(f"Failed tool signature: {tool_result.request_id}")
 
-            stderr = last_tool_stderr(last_tool_output)
+            stderr = ""
+
+            if isinstance(tool_result.data, dict):
+                stderr = str(tool_result.data.get("stderr") or "").strip()
+
+            lowered = stderr.lower()
+
             if stderr:
                 guidance.append(f"Runtime error detected:\n{stderr}")
 
-            if last_tool_missing_required_args(last_tool_output):
-                guidance.append("Fix missing required tool arguments based on tool schema.")
+            if "the following arguments are required" in lowered:
+                guidance.append(
+                    "Fix missing required tool arguments based on tool schema."
+                )
 
-            if last_tool_has_args_nameerror(last_tool_output):
-                guidance.append("Fix NameError: ensure all variables/functions are defined or imported.")
+            if (
+                "nameerror" in lowered
+                and "args" in lowered
+                and "not defined" in lowered
+            ):
+                guidance.append(
+                    "Fix NameError: ensure all variables/functions are defined or imported."
+                )
 
-        has_usable_success_output = bool(last_tool_rendered.strip()) or isinstance(last_tool_output, dict)
-        if last_tool_success is True and has_usable_success_output:
+        has_usable_success_output = (
+            bool((tool_result.rendered_output or "").strip())
+            or tool_result.data is not None
+        )
+
+        if tool_result.success and has_usable_success_output:
             guidance.append(
-            "A tool has already succeeded during this user turn. "
-            "Use the tool output as the authoritative source of truth for the current state of the world. "
-            "If that successful result satisfies the request, provide the final concise answer now instead of calling more tools. "
-            "Only call another tool if a specific remaining gap still exists that can be directly addressed by one more tool call."
+                "A tool has already succeeded during this user turn. "
+                "Use the tool output as the authoritative source of truth for the current state of the world. "
+                "If that successful result satisfies the request, provide the final concise answer now instead of calling more tools. "
+                "Only call another tool if a specific remaining gap still exists that can be directly addressed by one more tool call."
             )
 
         if not guidance:
             return []
 
-        combined = "\n".join([
-            "### RUNTIME INSTRUCTIONS (HIGHEST PRIORITY):",
-            *guidance,
-        ])
-        return [SystemMessage(content=combined)]
+        return [
+            SystemMessage(
+                content="\n".join(
+                    [
+                        "### RUNTIME INSTRUCTIONS (HIGHEST PRIORITY):",
+                        *guidance,
+                    ]
+                )
+            )
+        ]
 
     def _build_final_answer_messages(
         *,
@@ -405,7 +351,7 @@ def create_brain_node(
                 SystemMessage(
                     content=(
                         "Latest tool result:\n"
-                        f"{brain_input.last_tool_result.message}"
+                        f"{brain_input.last_tool_result.rendered_output}"
                     )
                 )
             )
@@ -414,39 +360,23 @@ def create_brain_node(
 
     def _build_execution_messages(
         *,
+        conversation: _BrainConversationContext,
         system_prompt: str,
-        state: AgentState,
-        brain_input,
+        brain_input: BrainInput,
         execution_policy: BrainExecutionDecision,
     ) -> list[BaseMessage]:
-        
-        history = state.get("messages", [])
-        retrieval_messages = state.get("retrieval_messages", [])
-        rolling_summary = state.get("rolling_summary", "")
-
-        # Prefer protocol ToolResult, with legacy fallbacks for compatibility.
-        last_tool_output = _resolved_tool_output_payload(state=state, brain_input=brain_input)
-        last_tool_success = _resolved_tool_success(state=state, brain_input=brain_input)
-        last_tool_rendered = str(state.get("last_tool_rendered", "") or "")
-        last_tool_signature = _resolved_tool_signature(state=state, brain_input=brain_input)
-
-        # Route guard: think to add something
+        """Build the message list used for tool execution and action-required turns."""
 
         pre_messages = _build_context_messages(
             system_prompt=system_prompt,
             execution_policy=execution_policy,
-            retrieval_messages=retrieval_messages,
-            history=history,
-            rolling_summary=rolling_summary,
+            retrieval_messages=conversation.retrieval_messages,
+            history=conversation.history,
+            rolling_summary=conversation.rolling_summary,
         )
 
         pre_messages.extend(
-            _build_runtime_guidance_messages(
-            last_tool_success=last_tool_success,
-            last_tool_output=last_tool_output,
-            last_tool_rendered=last_tool_rendered,
-            last_tool_signature=last_tool_signature,
-            )
+            _build_runtime_guidance_messages(tool_result=brain_input.last_tool_result)
         )
 
         return pre_messages
@@ -454,8 +384,8 @@ def create_brain_node(
     def _build_brain_messages(
         *,
         system_prompt: str,
-        state: AgentState,
-        brain_input,
+        conversation: _BrainConversationContext,
+        brain_input: BrainInput,
         execution_policy: BrainExecutionDecision,
     ) -> list[BaseMessage]:
         
@@ -467,28 +397,10 @@ def create_brain_node(
         
         return _build_execution_messages(
             system_prompt=system_prompt,
-            state=state,
+            conversation=conversation,
             brain_input=brain_input,
             execution_policy=execution_policy,
         )
-
-    def _resolved_tool_output_payload(*, state: AgentState, brain_input) -> object:
-        last_tool_result = getattr(brain_input, "last_tool_result", None)
-        if last_tool_result is not None:
-            return tool_result_to_legacy(last_tool_result)
-        return state.get("last_tool_output", "")
-
-    def _resolved_tool_success(*, state: AgentState, brain_input) -> object:
-        last_tool_result = getattr(brain_input, "last_tool_result", None)
-        if last_tool_result is not None:
-            return last_tool_result.success
-        return state.get("last_tool_success")
-
-    def _resolved_tool_signature(*, state: AgentState, brain_input) -> str:
-        last_tool_result = getattr(brain_input, "last_tool_result", None)
-        if last_tool_result is not None:
-            return str(last_tool_result.request_id or "")
-        return str(state.get("last_tool_signature", "") or "")
     
     def _finalize_brain_response(
         *,
@@ -496,33 +408,33 @@ def create_brain_node(
         pre_messages: list[BaseMessage],
         response: AIMessage,
         execution_policy: BrainExecutionDecision,
-        state: AgentState,
-        brain_input,
-        tools_set: set[str],
+        conversation: _BrainConversationContext,
+        brain_input: BrainInput,
     ) -> AIMessage:
+        
         response = _recover_response_for_action_flow(
             llm=llm,
             pre_messages=pre_messages,
             response=response,
             action_required=execution_policy.action_required,
-            state=state,
-            brain_input=brain_input,
-            tools_set=tools_set,
-        )
-        response = _enforce_repeated_signature_policy(
-            llm=llm,
-            pre_messages=pre_messages,
-            response=response,
-            action_required=execution_policy.action_required,
-            state=state,
+            conversation=conversation,
             brain_input=brain_input,
         )
+        # todo: implement repeated signature policy enforcement for action-required turns
+        # response = _enforce_repeated_signature_policy(
+        #     llm=llm,
+        #     pre_messages=pre_messages,
+        #     response=response,
+        #     action_required=execution_policy.action_required,
+        #     state=state,
+        #     brain_input=brain_input,
+        # )
         return response
     
-    def _resolve_execution_context(
+    def _build_execution_context(
         *, 
-        brain_input,
-    ):
+        brain_input: BrainInput,
+    ) -> _BrainExecutionContext:
         
         execution_policy = decide_brain_execution(brain_input)
         if execution_policy.final_answer:
@@ -537,131 +449,37 @@ def create_brain_node(
             llm = brain_llm
             system_prompt = casual_system_prompt
 
-        return llm, system_prompt, execution_policy
-
-    # def brain_node(state: AgentState):
-        
-    #     brain_input = build_brain_input(state)
-
-    #     #
-    #     # Controller already has a successful tool result.
-    #     # The current step is finished.
-    #     #
-    #     if (
-    #         brain_input.last_tool_result is not None
-    #         and brain_input.last_tool_result.success
-    #     ):
-    #         brain_result = BrainResult(
-    #             outcome=BrainOutcome.STEP_COMPLETED,
-    #             message="Current execution step completed successfully.",
-    #             proposed_step_status=StepStatus.COMPLETED,
-    #         )
-
-    #     else:
-
-    #         llm, system_prompt, action_required, planner_brief = _resolve_execution_context(
-    #             brain_input=brain_input,
-    #             brain_llm=brain_llm,
-    #             tool_brain_llm=tool_brain_llm,
-    #             agent_system_prompt=agent_system_prompt,
-    #             casual_system_prompt=casual_system_prompt
-    #         )
-
-    #         response = _resolve_brain_response(
-    #             state=state,
-    #             brain_input=brain_input,
-    #             tools_set=tools_set,
-    #             llm=llm,
-    #             active_system_prompt=system_prompt,
-    #             action_required=action_required,
-    #             planner_brief=planner_brief
-    #         )
-
-    #         if getattr(response, "tool_calls", None):
-
-    #             tool_call = response.tool_calls[0]
-
-    #             brain_result = BrainResult(
-    #                 outcome=BrainOutcome.TOOL_REQUEST,
-    #                 message="Brain requested tool execution.",
-    #                 tool_request=ToolRequest(
-    #                     request_id=f"{brain_input.identity.execution_id}:tool:{uuid4().hex}",
-    #                     tool_name=tool_call["name"],
-    #                     arguments=tool_call.get("args", {}),
-    #                     requested_by=WorkerRole.BRAIN,
-    #                 ),
-    #             )
-    #         else:
-
-    #             brain_result = BrainResult(
-    #                 outcome=BrainOutcome.FINAL_ANSWER,
-    #                 message=str(response.content),
-    #                 proposed_step_status=StepStatus.COMPLETED,
-    #             )
-
-    #     legacy = brain_result_to_legacy(brain_result)
-    #     legacy["brain_result"] = brain_result
-
-    #     execution_state = build_execution_state(state)
-
-    #     legacy["execution_state"] = with_cursor(
-    #         execution_state,
-    #         current_worker=WorkerRole.BRAIN,
-    #     )
-
-    #     if "response" in locals():
-    #         legacy.update(
-    #             response_with_usage(state, response)
-    #         )
-
-    #     return legacy
+        return _BrainExecutionContext(
+            llm=llm,
+            system_prompt=system_prompt,
+            decision=execution_policy,
+        )
 
     def _handle_tool_result(
         *,
-        state: AgentState,
+        execution_context: _BrainExecutionContext,
+        conversation: _BrainConversationContext,
         brain_input: BrainInput,
-        llm: ChatOllama,
-        system_prompt: str,
-        execution_policy: BrainExecutionDecision,
     ) -> tuple[Any, BrainResult]:
 
         tool_result = brain_input.last_tool_result
         assert tool_result is not None
 
         if tool_result.success:
-            return None, _step_completed()
+            return None, _build_step_completed_result()
 
         return _execute_step(
-            state=state,
+            conversation=conversation,
             brain_input=brain_input,
-            llm=llm,
-            system_prompt=system_prompt,
-            execution_policy=execution_policy
+            execution_context=execution_context
         )
 
-    def _step_completed() -> BrainResult:
+    def _build_step_completed_result() -> BrainResult:
         return BrainResult(
             outcome=BrainOutcome.STEP_COMPLETED,
             message="Current execution step completed successfully.",
             proposed_step_status=StepStatus.COMPLETED,
         )
-
-
-    def _tool_request_result(
-        brain_input: BrainInput,
-        tool_call: dict,
-    ) -> BrainResult:
-        return BrainResult(
-            outcome=BrainOutcome.TOOL_REQUEST,
-            message="Brain requested tool execution.",
-            tool_request=ToolRequest(
-                request_id=f"{brain_input.identity.execution_id}:tool:{uuid4().hex}",
-                tool_name=tool_call["name"],
-                arguments=tool_call.get("args", {}),
-                requested_by=WorkerRole.BRAIN,
-            ),
-        )
-
 
     def _final_answer_result(response: AIMessage) -> BrainResult:
         return BrainResult(
@@ -672,28 +490,26 @@ def create_brain_node(
         )
 
 
-    def _resolve_brain_response(
+    def _build_brain_result(
         *,
         brain_input: BrainInput,
         response: AIMessage,
     ) -> BrainResult:
 
         if getattr(response, "tool_calls", None):
-            return _tool_request_result(
-                brain_input=brain_input,
-                tool_call=response.tool_calls[0],
+            return BrainResult(
+                outcome=BrainOutcome.TOOL_REQUEST,
+                message="Brain requested tool execution.",
+                tool_request=build_tool_request(brain_input=brain_input, response=response),
             )
 
         return _final_answer_result(response)
 
-    def _invoke_brain_llm(
+    def _run_brain_llm(
         *,
-        state: AgentState,
+        execution_context: _BrainExecutionContext,
+        conversation: _BrainConversationContext | None,
         brain_input: BrainInput,
-        tools_set: set[str],
-        llm: ChatOllama,
-        system_prompt: str,
-        execution_policy: BrainExecutionDecision
     ) -> AIMessage:
         """
         Build the Brain prompt, invoke the LLM and return the raw AIMessage.
@@ -702,150 +518,129 @@ def create_brain_node(
         """
 
         pre_messages = _build_brain_messages(
-            system_prompt=system_prompt,
-            state=state,
+            system_prompt=execution_context.system_prompt,
+            conversation=conversation,
             brain_input=brain_input,
-            execution_policy=execution_policy,
+            execution_policy=execution_context.decision,
         )
 
         response = _invoke_with_trace(
-            llm=llm,
+            llm=execution_context.llm,
             messages=[*pre_messages],
             show_raw_llm=show_raw_llm,
             color=ANSI_BLUE,
         )
 
         response = _finalize_brain_response(
-            llm=llm,
+            llm=execution_context.llm,
+            conversation=conversation,
             pre_messages=pre_messages,
             response=response,
-            execution_policy=execution_policy,
-            state=state,
+            execution_policy=execution_context.decision,
             brain_input=brain_input,
-            tools_set=tools_set,
         )
 
         return response
 
     def _execute_step(
         *,
-        state: AgentState,
+        execution_context: _BrainExecutionContext,
+        conversation: _BrainConversationContext,
         brain_input: BrainInput,
-        llm: ChatOllama,
-        system_prompt: str,
-        execution_policy: BrainExecutionDecision,
     ) -> tuple[AIMessage, BrainResult]:
 
-        response = _invoke_brain_llm(
-            state=state,
+        response = _run_brain_llm(
+            conversation=conversation,
             brain_input=brain_input,
-            tools_set=tools_set,
-            llm=llm,
-            system_prompt=system_prompt,
-            execution_policy=execution_policy
+            execution_context=execution_context,
         )
 
         return (
             response,
-            _resolve_brain_response(
+            _build_brain_result(
                 brain_input=brain_input,
                 response=response,
             ),
         )
 
-    
-
-
     def _generate_final_answer(
         *,
-        state: AgentState,
         brain_input: BrainInput,
-        llm: ChatOllama,
-        system_prompt: str,
-        execution_policy: BrainExecutionDecision,
+        execution_context: _BrainExecutionContext,
     ) -> tuple[AIMessage, BrainResult]:
 
-        response = _invoke_brain_llm(
-            state=state,
+        response = _run_brain_llm(
+            conversation=None,
             brain_input=brain_input,
-            tools_set=tools_set,
-            llm=llm,
-            system_prompt=system_prompt,
-            execution_policy=execution_policy,
+            execution_context=execution_context,
         )
 
         return response, _final_answer_result(response)
 
-
-    def brain_node(state: AgentState):
-
-        brain_input = build_brain_input(state)
-
-        print("=== BRAIN ENTRY ===")
-        print("last_tool_result:", state.get("last_tool_result"))
-        print("brain_result:", state.get("brain_result"))
-        print("current_worker:", brain_input.cursor.current_worker)
-        print("active_step:", brain_input.active_step)
-
-        llm, system_prompt, execution_policy = _resolve_execution_context(
-            brain_input=brain_input,
-        )
-
+    def _execute_brain(
+        *,
+        conversation: _BrainConversationContext,
+        brain_input: BrainInput,
+        execution_context: _BrainExecutionContext,
+    ):
         response = None
 
-        if brain_input.last_tool_result is not None:
-
-            response, brain_result = _handle_tool_result(
-                state=state,
-                brain_input=brain_input,
-                llm=llm,
-                system_prompt=system_prompt,
-                execution_policy=execution_policy,
-            )
-
-        elif execution_policy.final_answer:
+        if execution_context.decision.final_answer:
 
             response, brain_result = _generate_final_answer(
-                state=state,
                 brain_input=brain_input,
-                llm=llm,
-                system_prompt=system_prompt,
-                execution_policy=execution_policy,
+                execution_context=execution_context,
             )
+        elif brain_input.last_tool_result is not None:
 
+            response, brain_result = _handle_tool_result(
+                execution_context=execution_context,
+                brain_input=brain_input,
+                conversation=conversation,
+            )
         else:
 
             response, brain_result = _execute_step(
-                state=state,
+                execution_context=execution_context,
+                conversation=conversation,
                 brain_input=brain_input,
-                llm=llm,
-                system_prompt=system_prompt,
-                execution_policy=execution_policy,
             )
 
-        legacy = brain_result_to_legacy(brain_result)
-        legacy["brain_result"] = brain_result
+        return response, brain_result
 
-        execution_state = build_execution_state(state)
+    def brain_node(state: AgentState):
 
-        legacy["execution_state"] = with_cursor(
-            execution_state,
-            current_worker=WorkerRole.BRAIN,
+        conversation = _BrainConversationContext(
+            history=state.get("messages", []),
+            retrieval_messages=state.get("retrieval_messages", []),
+            rolling_summary=state.get("rolling_summary", ""),
         )
 
+        brain_input = build_brain_input(state)
+
+        execution_context = _build_execution_context(
+            brain_input=brain_input,
+        )
+
+        response, brain_result = _execute_brain(
+            conversation=conversation,
+            brain_input=brain_input,
+            execution_context=execution_context,
+        )
+
+        update = {
+            "brain_result": brain_result,
+            "execution_state": with_cursor(
+                build_execution_state(state),
+                current_worker=WorkerRole.BRAIN,
+            ),
+        }
+
         if response is not None:
-            legacy.update(
+            update.update(
                 response_with_usage(state, response)
             )
 
-        # print("\n===== BRAIN RESULT =====")
-        # print(brain_result)
-        # print("========================\n")
-        # print("\n===== BRAIN RETURN =====")
-        # print(legacy)
-        # print("========================\n")
-
-
-        return legacy
+        return update
 
     return brain_node

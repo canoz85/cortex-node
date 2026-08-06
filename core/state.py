@@ -13,7 +13,6 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     last_tool_output: dict[str, Any] | str
     last_tool_result: ToolResult
-    last_tool_rendered: str
     last_tool_signature: str
     last_tool_success: bool
     repeat_fail_count: int

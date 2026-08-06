@@ -173,8 +173,10 @@ class ToolResult(ImmutableProtocolModel):
     """
 
     request_id: str = Field(min_length=1)
+    signature: str = ""
     success: bool
     message: str
+    rendered_output: str = ""
     data: JsonValue = None
     error_code: str | None = None
 
@@ -244,6 +246,7 @@ class ControllerInput(ImmutableProtocolModel):
     context: "ExecutionContext"
     active_plan: ExecutionPlan | None = None
     active_step: ExecutionStep | None = None
+    pending_tool_request: ToolRequest | None = None
     planner_result: PlannerResult | None = None
     brain_result: BrainResult | None = None
     tool_result: ToolResult | None = None
@@ -350,6 +353,7 @@ class ProtocolVisibleState(ImmutableProtocolModel):
     cursor: ExecutionCursor
     active_plan: ExecutionPlan | None = None
     active_step: ExecutionStep | None = None
+    pending_tool_request: ToolRequest | None = None
     completed_step_ids: StepIdList = Field(default_factory=tuple)
     accepted_event_history: EventHistory = Field(default_factory=tuple)
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
@@ -373,7 +377,6 @@ class WorkingState(ImmutableProtocolModel):
     routing_metadata: dict[str, JsonValue] = Field(default_factory=dict)
     planner_metadata: dict[str, JsonValue] = Field(default_factory=dict)
     debug_metadata: dict[str, JsonValue] = Field(default_factory=dict)
-    tool_signature: str | None = None
     capture_state: dict[str, JsonValue] = Field(default_factory=dict)
     orchestration_metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
@@ -423,6 +426,8 @@ class ControllerDecision(ImmutableProtocolModel):
     next_step_id: str | None = None
     requires_checkpoint: bool = False
     requires_replan: bool = False
+    pending_tool_request: ToolRequest | None = None
+    clear_pending_tool_request: bool = False
     clear_last_tool_result: bool = False
     clear_active_step: bool = False
     terminal: bool = False
