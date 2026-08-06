@@ -273,3 +273,17 @@ Two engineers can implement independently and produce the same runtime behavior
 A replay engine can reconstruct execution from events/checkpoints only
 No section depends on class names, graph topology, or framework internals
 If you want, I can draft the exact first version template (pre-filled with your current event flow) so you can start writing immediately.
+
+
+So my recommended order is:
+
+✅ Planner (done)
+✅ Brain (structurally done; prompt tuning later)
+ToolRuntime / Capture ← start here
+Controller (simplify after ToolRuntime is stable)
+Graph / Routing
+Summary
+Bridge cleanup
+Remove remaining legacy state
+
+That order minimizes the chance of losing control of the codebase.

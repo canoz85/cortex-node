@@ -141,14 +141,14 @@ def create_capture_tool_output_node():
             previous_repeat_count=state.get("repeat_fail_count", 0),
         )
 
-        updated_execution_state = with_cursor(
-            build_execution_state(state),
-            current_worker=WorkerRole.TOOL_RUNTIME,
-        )
+        # updated_execution_state = with_cursor(
+        #     build_execution_state(state),
+        #     current_worker=WorkerRole.TOOL_RUNTIME,
+        # )
 
         return {
             "last_tool_result": tool_result,
-            "execution_state": updated_execution_state,
+            # "execution_state": updated_execution_state,
             "brain_result": None,
             "repeat_fail_count": repeat_fail_count,
         }

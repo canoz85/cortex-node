@@ -42,8 +42,6 @@ class CortexController:
         ):
             return self._terminate("max_steps")
 
-        worker = controller_input.cursor.current_worker
-
         if controller_input.planner_result is not None:
             return self._decide_from_planner(controller_input)
         
@@ -180,8 +178,6 @@ class CortexController:
                         next_step_id=controller_input.active_step.step_id,
                     )
 
-                # return self._dispatch_tool("tool_request")
-
             case BrainOutcome.REPLAN_REQUEST:
                 cursor = controller_input.cursor.model_copy(
                     update={
@@ -296,12 +292,6 @@ class CortexController:
             clear_active_step=clear_active_step,
         )
 
-    def _dispatch_tool(self, reason: str) -> ControllerDecision:
-        return ControllerDecision(
-            decision_type=ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
-            next_worker=WorkerRole.TOOL_RUNTIME,
-            reason=reason,
-        )
 
     def _dispatch_summary(self, reason: str) -> ControllerDecision:
         return ControllerDecision(

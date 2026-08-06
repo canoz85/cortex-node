@@ -129,8 +129,6 @@ def _build_tool_transport_state(state: AgentState) -> AgentState | None:
         return None
 
     tool_calls_copy = [dict(call) if isinstance(call, dict) else call for call in tool_calls]
-    if not isinstance(tool_calls_copy[0], dict):
-        return None
 
     tool_calls_copy[0]["id"] = pending_request_id
 
