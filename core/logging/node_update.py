@@ -96,9 +96,18 @@ def extract_node_update(
     if to_node == "tools":
         return None
 
+    
+    execution_state = value.get("execution_state")
+
     planner_result = value.get("planner_result")
     brain_result = value.get("brain_result")
-    tool_result = value.get("last_tool_result")
+    tool_result=None
+    
+    # ToolResult is produced by capture_tool_output only.
+    if to_node == "capture_tool_output" and execution_state is not None:
+        tool_result = execution_state.working.last_tool_result
+    else:
+        tool_result = None
 
     ai_message = None
 

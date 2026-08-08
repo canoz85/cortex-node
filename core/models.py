@@ -123,53 +123,119 @@ class ToolResult(ToolSerializableModel):
 
     @staticmethod
     def split_tool_output(raw: str) -> tuple[str | None, str]:
-        """Split summary + payload format, falling back to raw payload only."""
-        if TOOL_RESULT_MARKER in raw:
-            summary, payload = raw.split(TOOL_RESULT_MARKER, 1)
-            return summary.strip() or None, payload.strip()
-        return None, raw
+        if TOOL_RESULT_MARKER not in raw:
+            return None, raw
+
+        summary, payload = raw.split(TOOL_RESULT_MARKER, 1)
+        return summary.strip() or None, payload.strip()
 
     @classmethod
     def try_parse(cls, raw: Any) -> "ToolResult | None":
-        """Best-effort parse for tool outputs that may or may not be structured JSON."""
         if isinstance(raw, cls):
             return raw
-        if isinstance(raw, dict):
-            try:
+
+        try:
+            if isinstance(raw, dict):
                 return cls.model_validate(raw)
-            except Exception:
-                return None
-        if isinstance(raw, str):
-            _, candidate = cls.split_tool_output(raw)
-            try:
-                return cls.model_validate_json(candidate)
-            except Exception:
-                return None
+
+            if isinstance(raw, str):
+                _, payload = cls.split_tool_output(raw)
+                return cls.model_validate_json(payload)
+
+        except Exception:
+            pass
+
         return None
 
-    @staticmethod
-    def unwrap_tool_output(raw: Any) -> dict[str, Any] | list[Any] | str | None:
-        """Return a parsed Python payload from tool output when possible."""
+    @classmethod
+    def unwrap_tool_output(
+        cls,
+        raw: Any,
+    ) -> dict[str, Any] | list[Any] | str | None:
+
         if isinstance(raw, (dict, list)):
             return raw
-        if isinstance(raw, ToolResult):
-            return raw.model_dump()
-        if isinstance(raw, str):
-            summary, candidate = ToolResult.split_tool_output(raw)
-            try:
-                parsed = json.loads(candidate)
-                if isinstance(parsed, dict):
-                    return parsed
-                return {
+
+        parsed = cls.try_parse(raw)
+        if parsed is not None:
+            return parsed.model_dump()
+
+        if not isinstance(raw, str):
+            return None
+
+        summary, payload = cls.split_tool_output(raw)
+
+        try:
+            value = json.loads(payload)
+        except Exception:
+            return (
+                {
                     "success": True,
-                    "message": summary or "Tool output",
-                    "data": parsed,
+                    "message": summary,
+                    "data": None,
                 }
-            except Exception:
-                if summary:
-                    return {"success": True, "message": summary, "data": None}
-                return raw
-        return None
+                if summary
+                else raw
+            )
+
+        if isinstance(value, dict):
+            return value
+
+        return {
+            "success": True,
+            "message": summary or "Tool output",
+            "data": value,
+        }
+
+    # @staticmethod
+    # def split_tool_output(raw: str) -> tuple[str | None, str]:
+    #     """Split summary + payload format, falling back to raw payload only."""
+    #     if TOOL_RESULT_MARKER in raw:
+    #         summary, payload = raw.split(TOOL_RESULT_MARKER, 1)
+    #         return summary.strip() or None, payload.strip()
+    #     return None, raw
+
+    # @classmethod
+    # def try_parse(cls, raw: Any) -> "ToolResult | None":
+    #     """Best-effort parse for tool outputs that may or may not be structured JSON."""
+    #     if isinstance(raw, cls):
+    #         return raw
+    #     if isinstance(raw, dict):
+    #         try:
+    #             return cls.model_validate(raw)
+    #         except Exception:
+    #             return None
+    #     if isinstance(raw, str):
+    #         _, candidate = cls.split_tool_output(raw)
+    #         try:
+    #             return cls.model_validate_json(candidate)
+    #         except Exception:
+    #             return None
+    #     return None
+
+    # @staticmethod
+    # def unwrap_tool_output(raw: Any) -> dict[str, Any] | list[Any] | str | None:
+    #     """Return a parsed Python payload from tool output when possible."""
+    #     if isinstance(raw, (dict, list)):
+    #         return raw
+    #     if isinstance(raw, ToolResult):
+    #         return raw.model_dump()
+    #     if isinstance(raw, str):
+    #         summary, candidate = ToolResult.split_tool_output(raw)
+    #         try:
+    #             parsed = json.loads(candidate)
+    #             if isinstance(parsed, dict):
+    #                 return parsed
+    #             return {
+    #                 "success": True,
+    #                 "message": summary or "Tool output",
+    #                 "data": parsed,
+    #             }
+    #         except Exception:
+    #             if summary:
+    #                 return {"success": True, "message": summary, "data": None}
+    #             return raw
+    #     return None
 
     def to_pretty_text(self) -> str:
         """Human-readable rendering for console output."""

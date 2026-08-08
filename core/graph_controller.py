@@ -47,13 +47,6 @@ def create_controller_node(
             "controller_decision": decision,
         }
 
-        if decision.clear_last_tool_result:
-            update.update(
-                {
-                    "last_tool_result": None,
-                }
-            )
-
         brain_result = controller_input.brain_result
         if (
             brain_result is not None

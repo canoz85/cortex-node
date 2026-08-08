@@ -115,3 +115,28 @@ def recent_human_turn_messages(history: list[BaseMessage], *, max_turns: int = 3
     # fact extraction input: only human text in last N turns
     sliced = recent_turn_slice(history, max_turns=max_turns, include_ai=False)
     return [m for m in sliced if isinstance(m, HumanMessage)]
+
+def tool_message_content(message: ToolMessage) -> str:
+    content = message.content
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(
+                    str(
+                        item.get("text")
+                        or item.get("content")
+                        or item.get("value")
+                        or ""
+                    )
+                )
+            else:
+                parts.append(str(item))
+
+        return "\n".join(filter(None, parts))
+
+    return str(content)

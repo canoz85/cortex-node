@@ -374,6 +374,7 @@ class WorkingState(ImmutableProtocolModel):
 
     retrieval_context: RetrievalContext = Field(default_factory=tuple)
     last_tool_result: ToolResult | None = None
+    repeat_fail_count: int = 0
     routing_metadata: dict[str, JsonValue] = Field(default_factory=dict)
     planner_metadata: dict[str, JsonValue] = Field(default_factory=dict)
     debug_metadata: dict[str, JsonValue] = Field(default_factory=dict)

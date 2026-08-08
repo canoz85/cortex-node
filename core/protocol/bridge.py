@@ -569,7 +569,7 @@ def build_protocol_visible_state(
         cursor=resolved_cursor,
         active_plan=active_plan,
         active_step=active_step,
-        completed_step_ids=completed_step_ids,
+         completed_step_ids=completed_step_ids,
         accepted_event_history=accepted_event_history,
         retry=retry,
         summary=summary,
@@ -601,7 +601,7 @@ def build_working_state(legacy_state: LegacyState | None = None) -> WorkingState
 
 
 def build_execution_state(
-    legacy_state: LegacyState | None = None,
+   legacy_state: LegacyState | None = None,
     *,
     identity: ExecutionIdentity | None = None,
     cursor: ExecutionCursor | None = None,
@@ -613,6 +613,7 @@ def build_execution_state(
 
     if isinstance(existing, ExecutionState):
         protocol_visible = existing.protocol_visible
+        working = existing.working
 
         if identity is not None:
             protocol_visible = protocol_visible.model_copy(
@@ -630,7 +631,7 @@ def build_execution_state(
 
         return ExecutionState(
             protocol_visible=protocol_visible,
-            working=build_working_state(state),
+            working=working,
         )
 
     resolved_identity = identity or build_execution_identity(state)
@@ -733,6 +734,8 @@ def build_controller_input(
     state = _state_or_empty(legacy_state)
 
     protocol = execution_state.protocol_visible
+    working = execution_state.working
+
 
     planner_result: PlannerResult | None = None
     brain_result: BrainResult | None = None
@@ -744,8 +747,8 @@ def build_controller_input(
     if state.get("brain_result") is not None:
         brain_result = state["brain_result"]
     
-    elif state.get("last_tool_result") is not None:
-        tool_result = state["last_tool_result"]
+    elif working.last_tool_result is not None:
+        tool_result = working.last_tool_result
 
     elif state.get("planner_result") is not None:
         planner_result = state["planner_result"]

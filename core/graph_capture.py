@@ -4,11 +4,10 @@ from dataclasses import dataclass
 
 from langchain_core.messages import ToolMessage
 
-from core.protocol.bridge import build_execution_state, with_cursor, WorkerRole
-from core.protocol.models import ToolResult
-from core.graph_messages import normalize_message_content
+from core.graph_node_helpers import build_tool_signature
+from core.protocol.models import ToolRequest, ToolResult
+from core.graph_messages import normalize_message_content, tool_message_content
 from core.graph_response_formatters import format_tool_result_response
-from core.graph_tool_events import extract_tool_signature
 from core.state import AgentState
 from core.tool_output import parse_tool_result, unwrap_tool_output
 
@@ -73,18 +72,15 @@ def _normalize_transport_payload(raw_content: str) -> NormalizedToolPayload:
 def _build_tool_result(
     *,
     raw_content: str,
-    tool_call_id: str | None,
-    signature: str,
+    request: ToolRequest,
 ) -> ToolResult:
     payload = _normalize_transport_payload(raw_content)
 
-    # TODO(protocol):
-    # request_id should originate from ToolRequest.
-    # Remove UUID fallback after protocol migration is complete.
-    request_id = tool_call_id or signature or uuid.uuid4().hex
+    signature = build_tool_signature(request)
+
 
     return ToolResult(
-        request_id=request_id,
+        request_id=request.request_id,
         signature=signature,
         success=payload.success,
         message=payload.message,
@@ -97,8 +93,8 @@ def _build_tool_result(
 def _compute_repeat_fail_count(
     *,
     previous: ToolResult | None,
-    current: ToolResult,
     previous_repeat_count: int,
+    current: ToolResult,
 ) -> int:
     if (
         not current.success
@@ -117,7 +113,11 @@ def _compute_repeat_fail_count(
 
 def create_capture_tool_output_node():
     def capture_tool_output_node(state: AgentState):
+
+        execution_state = state["execution_state"]
+        decision = state.get("controller_decision")
         history = state.get("messages", [])
+
         if not history:
             return {"repeat_fail_count": 0}
 
@@ -125,32 +125,43 @@ def create_capture_tool_output_node():
         if not isinstance(last_message, ToolMessage):
             return {}
 
-        tool_call_id = getattr(last_message, "tool_call_id", None)
-        signature = extract_tool_signature(history[:-1], tool_call_id)
-        raw_content = normalize_message_content(last_message)
+        if decision is None or decision.pending_tool_request is None:
+            raise RuntimeError(
+                "Capture executed without pending_tool_request."
+            )
+
+        raw_content = tool_message_content(last_message)
 
         tool_result = _build_tool_result(
             raw_content=raw_content,
-            tool_call_id=tool_call_id,
-            signature=signature,
+            request=decision.pending_tool_request,
         )
+
+        working = execution_state.working
 
         repeat_fail_count = _compute_repeat_fail_count(
-            previous=state.get("last_tool_result"),
+            previous=working.last_tool_result,
+            previous_repeat_count=working.repeat_fail_count,
             current=tool_result,
-            previous_repeat_count=state.get("repeat_fail_count", 0),
         )
 
-        # updated_execution_state = with_cursor(
-        #     build_execution_state(state),
-        #     current_worker=WorkerRole.TOOL_RUNTIME,
-        # )
+        working = working.model_copy(
+            update={
+                "last_tool_result": tool_result,
+                "repeat_fail_count": repeat_fail_count,
+            }
+        )
+
+        updated_execution_state = execution_state.model_copy(
+            update={
+                "working": working,
+            }
+        )
+
 
         return {
-            "last_tool_result": tool_result,
-            # "execution_state": updated_execution_state,
+            "execution_state": updated_execution_state,
             "brain_result": None,
-            "repeat_fail_count": repeat_fail_count,
         }
 
     return capture_tool_output_node
