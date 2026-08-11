@@ -737,21 +737,9 @@ def build_controller_input(
     working = execution_state.working
 
 
-    planner_result: PlannerResult | None = None
-    brain_result: BrainResult | None = None
-    tool_result: ToolResult | None = None
-
-    #
-    # Consume newest event first.
-    #
-    if state.get("brain_result") is not None:
-        brain_result = state["brain_result"]
-    
-    elif working.last_tool_result is not None:
-        tool_result = working.last_tool_result
-
-    elif state.get("planner_result") is not None:
-        planner_result = state["planner_result"]
+    brain_result = state.get("brain_result")
+    tool_result = working.last_tool_result
+    planner_result = state.get("planner_result")
 
     return ControllerInput(
         identity=protocol.identity,

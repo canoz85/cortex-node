@@ -87,7 +87,6 @@ def apply_controller_decision_to_state(
     """
 
     protocol_visible = execution_state.protocol_visible
-    working = execution_state.working
 
     #
     # Cursor
@@ -107,6 +106,21 @@ def apply_controller_decision_to_state(
         else protocol_visible.active_plan
     )
 
+    #
+    # Completed steps
+    #
+    completed_step_ids = protocol_visible.completed_step_ids
+
+    if decision.completed_step_id is not None:
+        if decision.completed_step_id not in completed_step_ids:
+            completed_step_ids = (
+                *completed_step_ids,
+                decision.completed_step_id,
+            )
+
+    #
+    # Pending tool request
+    #
     if decision.clear_pending_tool_request:
         pending_tool_request = None
     else:
@@ -147,16 +161,6 @@ def apply_controller_decision_to_state(
             )
 
     #
-    # Working state
-    #
-    if decision.clear_last_tool_result:
-        working = working.model_copy(
-            update={
-                "last_tool_result": None,
-            }
-        )
-
-    #
     # Return updated immutable state
     #
     return execution_state.model_copy(
@@ -167,9 +171,9 @@ def apply_controller_decision_to_state(
                     "active_plan": active_plan,
                     "active_step": active_step,
                     "pending_tool_request": pending_tool_request,
+                    "completed_step_ids": completed_step_ids,
                 }
             ),
-            "working": working,
         }
     )
 

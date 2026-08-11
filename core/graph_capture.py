@@ -161,7 +161,6 @@ def create_capture_tool_output_node():
 
         return {
             "execution_state": updated_execution_state,
-            "brain_result": None,
         }
 
     return capture_tool_output_node

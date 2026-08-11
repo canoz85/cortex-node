@@ -28,19 +28,25 @@ def create_controller_node(
 
         controller_input = build_controller_input(state)
 
-        # print("\n===== CONTROLLER INPUT =====")
-        # print("worker :", controller_input.cursor.current_worker)
-        # print("planner:", controller_input.planner_result)
-        # print("brain  :", controller_input.brain_result)
-        # print("tool   :", controller_input.tool_result)
-        # print("============================")
-
         decision = controller.decide(controller_input)
+
+        print("\n=== CONTROLLER DECISION ===")
+        print("decision:", decision)
+        print("before:", state["execution_state"].protocol_visible)
 
         execution_state = apply_controller_decision_to_state(
             state["execution_state"],
             decision,
         )
+
+        print("\n=== AFTER APPLY ===")
+        print("cursor:", execution_state.protocol_visible.cursor)
+        print("active_step:", execution_state.protocol_visible.active_step)
+        print(
+            "completed:",
+            execution_state.protocol_visible.completed_step_ids,
+        )
+        print("========================\n")
 
         update = {
             "execution_state": execution_state,

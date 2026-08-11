@@ -346,15 +346,29 @@ def create_brain_node(
                 )
             )
 
-        if brain_input.last_tool_result is not None:
+        if brain_input.context.recent_history:
             messages.append(
                 SystemMessage(
                     content=(
-                        "Latest tool result:\n"
-                        f"{brain_input.last_tool_result.rendered_output}"
+                        "Execution results:\n"
+                        + "\n".join(
+                            result
+                            for result in brain_input.context.recent_history
+                            if result
+                        )
                     )
                 )
             )
+
+        # if brain_input.last_tool_result is not None:
+        #     messages.append(
+        #         SystemMessage(
+        #             content=(
+        #                 "Latest tool result:\n"
+        #                 f"{brain_input.last_tool_result.rendered_output}"
+        #             )
+        #         )
+        #     )
 
         return messages
 
@@ -618,6 +632,13 @@ def create_brain_node(
 
         brain_input = build_brain_input(state)
 
+        print("=== BRAIN INPUT ===")
+        print("cursor:", brain_input.cursor)
+        print("active_step:", brain_input.active_step)
+        print("last_tool_result:", brain_input.last_tool_result)
+        print("plan:", brain_input.active_plan)
+        print("===================")
+
         execution_context = _build_execution_context(
             brain_input=brain_input,
         )
@@ -628,12 +649,26 @@ def create_brain_node(
             execution_context=execution_context,
         )
 
+        execution_state = with_cursor(
+            build_execution_state(state),
+            current_worker=WorkerRole.BRAIN,
+        )
+
+        # ToolResult has been consumed by Brain.
+        if brain_input.last_tool_result is not None:
+            execution_state = execution_state.model_copy(
+                update={
+                    "working": execution_state.working.model_copy(
+                        update={
+                            "last_tool_result": None,
+                        }
+                    )
+                }
+            )
+
         update = {
             "brain_result": brain_result,
-            "execution_state": with_cursor(
-                build_execution_state(state),
-                current_worker=WorkerRole.BRAIN,
-            ),
+            "execution_state": execution_state,
         }
 
         if response is not None:

@@ -4780,6 +4780,39 @@
                     "total_tokens": 317
                 }
             }
+        },
+        {
+            "type": "human",
+            "data": {
+                "content": "Create a directory named test_workspace, write a file inside it called config.txt with debug=true, and then verify its existence by reading the file contents back.",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "human",
+                "name": null,
+                "id": "85085156-0ed8-44d1-8470-92ab9f57affa"
+            }
+        },
+        {
+            "type": "human",
+            "data": {
+                "content": "Create a directory named cortex_test. Create config.txt inside it with debug=true. Read the file and verify its contents. Then overwrite the same file with debug=false. Read it again and verify that the old value is gone and the new value is present. Finally, create result.txt containing a short summary of the final verified state, and read result.txt back",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "human",
+                "name": null,
+                "id": "090d517d-5262-445c-b30f-d42c09b42206"
+            }
+        },
+        {
+            "type": "human",
+            "data": {
+                "content": "Create a directory named cortex_test. Create config.txt inside it with debug=true. Read the file and verify its contents. Then overwrite the same file with debug=false. Read it again and verify that the old value is gone and the new value is present. Finally, create result.txt containing a short summary of the final verified state, and read result.txt back.",
+                "additional_kwargs": {},
+                "response_metadata": {},
+                "type": "human",
+                "name": null,
+                "id": "9a0331a8-83e8-47a8-ae07-73ee73c290e3"
+            }
         }
     ]
 }

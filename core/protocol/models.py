@@ -207,7 +207,7 @@ class BrainInput(ImmutableProtocolModel):
 
     identity: ExecutionIdentity
     cursor: ExecutionCursor
-    context: "ExecutionContext"
+    context: ExecutionContext
     active_plan: ExecutionPlan | None = None
     active_step: ExecutionStep | None = None
     last_tool_result: ToolResult | None = None
@@ -422,13 +422,19 @@ class ControllerDecision(ImmutableProtocolModel):
     accepted_plan: ExecutionPlan | None = None
     decision_type: ControllerDecisionType
     reason: str = ""
+
     next_worker: WorkerRole | None = None
     cursor: ExecutionCursor | None = None
+
+    # Step transition
+    completed_step_id: str | None = None
     next_step_id: str | None = None
+    clear_active_step: bool = False
+
     requires_checkpoint: bool = False
     requires_replan: bool = False
+
     pending_tool_request: ToolRequest | None = None
     clear_pending_tool_request: bool = False
-    clear_last_tool_result: bool = False
-    clear_active_step: bool = False
+
     terminal: bool = False

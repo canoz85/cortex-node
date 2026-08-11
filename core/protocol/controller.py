@@ -214,7 +214,6 @@ class CortexController:
                     next_worker=WorkerRole.SUMMARY,
                     cursor=cursor,
                     terminal=True,
-                    clear_last_tool_result=True,
                 )
                 #return self._dispatch_summary("final_answer")
 
@@ -267,9 +266,9 @@ class CortexController:
         self,
         cursor: ExecutionCursor,
         reason: str,
+        completed_step_id: str | None = None,
         next_step_id: str | None = None,
         clear_pending_tool_request: bool = False,
-        clear_last_tool_result: bool = False,
         clear_active_step: bool = False,
     ) -> ControllerDecision:
 
@@ -285,8 +284,8 @@ class CortexController:
             decision_type=ControllerDecisionType.DISPATCH_BRAIN,
             next_worker=WorkerRole.BRAIN,
             clear_pending_tool_request=clear_pending_tool_request,
-            clear_last_tool_result=clear_last_tool_result,
             cursor=next_cursor,
+            completed_step_id=completed_step_id,
             next_step_id=next_step_id,
             reason=reason,
             clear_active_step=clear_active_step,
@@ -368,9 +367,9 @@ class CortexController:
                 return self._dispatch_brain(
                     cursor=controller_input.cursor,
                     reason="Generate final answer.",
+                    completed_step_id=current.step_id,
                     next_step_id=None,
                     clear_active_step=True,
-                    clear_last_tool_result=False,
                 )
             
             next_step = plan.steps[index + 1]
@@ -378,6 +377,10 @@ class CortexController:
         return self._dispatch_brain(
             cursor=controller_input.cursor,
             reason="Advance to next step.",
+            completed_step_id=(
+                current.step_id 
+                if current is not None 
+                else None
+            ),
             next_step_id=next_step.step_id,
-            clear_last_tool_result=True,
         )

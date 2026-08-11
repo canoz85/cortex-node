@@ -227,8 +227,6 @@ def build_app(
     workflow.add_edge("planner", "controller")
     workflow.add_conditional_edges("controller", route_after_controller)
 
-    # workflow.add_conditional_edges("planner", route_after_planner)
-    # workflow.add_conditional_edges("brain", route_after_brain)
     workflow.add_edge("tools", "capture_tool_output")
     workflow.add_edge("capture_tool_output", "controller")
     workflow.add_edge("brain", "controller")

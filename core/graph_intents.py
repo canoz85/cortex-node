@@ -1,11 +1,12 @@
-import json
 import re
 from typing import Dict, Any, Set
 
 from dataclasses import dataclass
+from typing_extensions import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
+from pydantic import BaseModel, ConfigDict
 
 from core.graph_constants import SYSTEM_CAPABILITIES_TEXT
 
@@ -23,16 +24,31 @@ Analyze the user's input and classify it into a route and domain to guide downst
 
 {SYSTEM_CAPABILITIES_TEXT}
 
+CRITICAL DECISION PRECEDENCE — EXPLICIT TOOL/ENVIRONMENT INTENT:
+- If the user explicitly asks to use, run, execute, query, read, write, or operate a specific tool, runtime, environment, or external system, prefer the corresponding "action" or "info" route over "conversation".
+- Otherwise, decide the route from the user's actual intent using the route and domain definitions below.
+- Do not infer tool execution solely from generic verbs such as "calculate", "find", "check", or "get".
+
 ROUTE DEFINITIONS:
-- "info": Read-only requests requiring tool lookup (reading files, searching docs/RAG, git status/log, querying SCADA state, checking SAP records).
-- "action": State-changing operations requiring execution tools (creating/modifying files, running python scripts, git commit/push, executing SCADA actions or SAP updates).
-- "conversation": General Q&A, explanations, chit-chat, or reasoning that requires NO tool execution.
+- "action": State-changing operations, calculations explicitly requested to run via tools, code execution, or explicit instructions to use a specific execution environment or capability.
+- "info": Read-only requests requiring tool lookup, including reading files, searching documents/RAG, checking git state/history, querying SCADA state, or querying SAP records.
+- "conversation": General Q&A, explanations, chit-chat, or reasoning where the user is not asking to execute code, invoke a tool, inspect external state, or perform an external lookup.
 - "clarify_domain": Ambiguous requests where the domain or intent cannot be safely determined without user input.
 
 DOMAIN DEFINITIONS:
-- "python": Code generation, debugging, file system operations, execution, or git management.
+- "python": Code generation, debugging, file system operations, Python execution, or git management.
 - "sap": Anything related to SAP systems, BAPIs, enterprise data, or SAP tool execution.
 - "general": General queries, SCADA/hardware control, vision tasks, or cross-domain requests.
+
+IMPORTANT CLASSIFICATION RULES:
+
+- A task that could be answered directly is still "action" if the user explicitly requires execution.
+- A tool request is not automatically "action"; determine whether the requested operation is read-only ("info") or state-changing/executing ("action").
+- Mentioning a tool or technology as the subject of a question does not by itself mean execution is requested.
+- If the user says to use, run, execute, invoke, or otherwise explicitly perform something with a tool or execution environment, treat that as an execution instruction.
+- If the requested execution is incomplete or underspecified, keep the execution route and set "needs_clarification": true.
+- Use "clarify_domain" when the system cannot safely determine what domain or operation the user intends.
+- Do not invent a tool request merely because a tool could be useful.
 
 OUTPUT REQUIREMENTS:
 Return ONLY a valid JSON object matching this exact schema:
@@ -56,6 +72,17 @@ class RoutingDecision:
     reason: str
     needs_clarification: bool
     source: str = "hard_rule"
+
+
+class RouterDecisionSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    route: str
+    domain: str
+    confidence: float
+    enforced: bool
+    needs_clarification: bool
+    reason: str
     
 
 def _llm_route_decision(   
@@ -64,22 +91,23 @@ def _llm_route_decision(
 ) -> RoutingDecision | None:
 
     try:
-        resp = llm.invoke(
+        structured_router = llm.with_structured_output(
+            RouterDecisionSchema,
+            method="json_schema",
+        )
+        payload = structured_router.invoke(
             [
                 SystemMessage(content=PLANNER_ROUTER_PROMPT),
                 HumanMessage(content=user_text),
             ]
         )
 
-        raw = str(getattr(resp, "content", "") or "").strip()
-        payload = json.loads(raw)
-
-        route = str(payload.get("route", "")).strip()
-        domain = str(payload.get("domain", "general")).strip().lower()
-        confidence = float(payload.get("confidence", 0.0))
-        enforced = bool(payload.get("enforced", False))
-        reason = str(payload.get("reason", "llm_router")).strip()
-        needs_clarification = bool(payload.get("needs_clarification", False))
+        route = str(payload.route).strip()
+        domain = str(payload.domain).strip().lower()
+        confidence = float(payload.confidence)
+        enforced = bool(payload.enforced)
+        reason = str(payload.reason).strip()
+        needs_clarification = bool(payload.needs_clarification)
 
         if route not in ALLOWED_ROUTES:
             return None
