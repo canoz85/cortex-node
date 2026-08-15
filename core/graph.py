@@ -9,7 +9,7 @@ from langgraph.graph import StateGraph
 from langgraph.graph.state import END, CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 
-from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, FINAL_ANSWER_SYSTEM_PROMPT, MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE
+from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, FINAL_ANSWER_SYSTEM_PROMPT, MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE, TOOL_COMPLETED_SYSTEM_PROMPT
 from core.graph_nodes import create_graph_nodes
 from core.graph_routing import  route_after_controller
 from core.graph_runner import run_prompt
@@ -193,6 +193,7 @@ def build_app(
 
     casual_system_prompt = CASUAL_SYSTEM_PROMPT_TEMPLATE
 
+    tool_completed_system_prompt = TOOL_COMPLETED_SYSTEM_PROMPT
     final_answer_system_prompt = FINAL_ANSWER_SYSTEM_PROMPT
 
     planner_llm = chat_model_factory(model_planner, 0)
@@ -206,6 +207,7 @@ def build_app(
         rag_service=rag_service,
         rag_top_k=rag_top_k,
         agent_system_prompt=agent_system_prompt,
+        tool_completed_system_prompt=tool_completed_system_prompt,
         final_answer_system_prompt=final_answer_system_prompt,
         casual_system_prompt=casual_system_prompt,
         sap_system_prompt=sap_system_prompt,

@@ -63,6 +63,7 @@ from .models import (
     ReplanRequest,
     RetryMetadata,
     ToolInput,
+    ToolExecutionRecord,
     ToolRequest,
     ToolResult,
     WorkingState,
@@ -93,6 +94,7 @@ _WORKING_STATE_CONSUMED_KEYS: Final[frozenset[str]] = frozenset({
     "messages",
     "last_tool_output",
     "last_tool_result",
+    "tool_execution_history",
     "repeat_fail_count",
     "tool_text_retry_used",
     "steps",
@@ -348,6 +350,28 @@ def _build_event_history(legacy_state: LegacyState | None) -> tuple[EventRecord,
     return tuple(records)
 
 
+def _build_tool_execution_history(legacy_state: LegacyState | None) -> tuple[ToolExecutionRecord, ...]:
+    state = _state_or_empty(legacy_state)
+    raw_history = state.get("tool_execution_history")
+    if not isinstance(raw_history, Sequence):
+        return tuple()
+
+    records: list[ToolExecutionRecord] = []
+    for raw in raw_history:
+        if isinstance(raw, ToolExecutionRecord):
+            records.append(raw)
+            continue
+        if not isinstance(raw, Mapping):
+            continue
+
+        try:
+            records.append(ToolExecutionRecord.model_validate(raw))
+        except Exception:
+            continue
+
+    return tuple(records)
+
+
 def legacy_tool_result_to_model(legacy_state: LegacyState | None) -> ToolResult | None:
     state = _state_or_empty(legacy_state)
     existing = state.get("last_tool_result")
@@ -588,10 +612,12 @@ def build_working_state(legacy_state: LegacyState | None = None) -> WorkingState
     planner_metadata = _build_planner_metadata(state)
     debug_metadata = _build_debug_metadata(state)
     capture_state = _build_capture_state(state)
+    tool_execution_history = _build_tool_execution_history(state)
 
     return WorkingState(
         retrieval_context=retrieval_context,
         last_tool_result=last_tool_result,
+        tool_execution_history=tool_execution_history,
         routing_metadata=routing_metadata,
         planner_metadata=planner_metadata,
         debug_metadata=debug_metadata,
@@ -721,6 +747,7 @@ def build_brain_input(legacy_state: LegacyState | None = None) -> BrainInput:
         active_plan=execution_state.protocol_visible.active_plan,
         active_step=execution_state.protocol_visible.active_step,
         last_tool_result=execution_state.working.last_tool_result,
+        tool_execution_history=execution_state.working.tool_execution_history,
         retry=execution_state.protocol_visible.retry,
     )
 
@@ -744,7 +771,7 @@ def build_controller_input(
     return ControllerInput(
         identity=protocol.identity,
         cursor=protocol.cursor,
-        context=build_execution_context(state),
+        context=build_execution_context(state, role=WorkerRole.CONTROLLER),
         active_plan=protocol.active_plan,
         active_step=protocol.active_step,
         pending_tool_request=protocol.pending_tool_request,
@@ -928,6 +955,10 @@ def execution_state_to_legacy(state: ExecutionState) -> dict[str, Any]:
     legacy["planner_metadata"] = dict(wk.planner_metadata)
     legacy["debug_metadata"] = dict(wk.debug_metadata)
     legacy["last_tool_signature"] = wk.tool_signature or ""
+    legacy["tool_execution_history"] = [
+        record.model_dump(mode="json")
+        for record in wk.tool_execution_history
+    ]
 
     if wk.last_tool_result is not None:
         legacy["last_tool_output"] = tool_result_to_legacy(wk.last_tool_result)

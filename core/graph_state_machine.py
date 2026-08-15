@@ -22,6 +22,7 @@ class BrainExecutionDecision:
     reason: str
     planner_brief: str = ""  # Added default value for planner_brief
     final_answer: bool = False
+    tool_completed: bool = False
 
 @dataclass(frozen=True)
 class ActionRecoveryDecision:
@@ -89,7 +90,7 @@ def apply_controller_decision_to_state(
     protocol_visible = execution_state.protocol_visible
 
     #
-    # Cursor
+    # Cursor base (final synchronization happens after plan/step updates)
     #
     cursor = (
         decision.cursor
@@ -121,7 +122,12 @@ def apply_controller_decision_to_state(
     #
     # Pending tool request
     #
-    if decision.clear_pending_tool_request:
+    is_terminating = (
+        decision.decision_type == ControllerDecisionType.TERMINATE
+        or decision.terminal
+    )
+
+    if decision.clear_pending_tool_request or is_terminating:
         pending_tool_request = None
     else:
         pending_tool_request = (
@@ -135,7 +141,9 @@ def apply_controller_decision_to_state(
     #
     active_step = None
 
-    if decision.clear_active_step:
+    should_clear_active_step = decision.clear_active_step or is_terminating
+
+    if should_clear_active_step:
         active_step = None
     else:
         step_id = (
@@ -160,6 +168,39 @@ def apply_controller_decision_to_state(
                 None,
             )
 
+    synchronized_phase = cursor.phase
+    if is_terminating:
+        synchronized_phase = ExecutionPhase.TERMINATING
+    elif decision.decision_type in {
+        ControllerDecisionType.DISPATCH_BRAIN,
+        ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
+    }:
+        synchronized_phase = ExecutionPhase.EXECUTING
+
+    synchronized_step_id = None
+    if active_step is not None:
+        synchronized_step_id = active_step.step_id
+    elif not should_clear_active_step and decision.next_step_id is not None:
+        synchronized_step_id = decision.next_step_id
+
+    synchronized_cursor = cursor.model_copy(
+        update={
+            "phase": synchronized_phase,
+            "current_worker": decision.next_worker or cursor.current_worker,
+            "step_id": synchronized_step_id,
+            "plan_revision": (
+                active_plan.revision
+                if active_plan is not None
+                else cursor.plan_revision
+            ),
+            "step_attempt": (
+                active_step.attempt
+                if active_step is not None
+                else None
+            ),
+        }
+    )
+
     #
     # Return updated immutable state
     #
@@ -167,7 +208,7 @@ def apply_controller_decision_to_state(
         update={
             "protocol_visible": protocol_visible.model_copy(
                 update={
-                    "cursor": cursor,
+                    "cursor": synchronized_cursor,
                     "active_plan": active_plan,
                     "active_step": active_step,
                     "pending_tool_request": pending_tool_request,
@@ -234,6 +275,15 @@ def decide_brain_execution(
             include_retrieval=False,
             final_answer=True,
             reason="final_answer",
+            planner_brief="",
+        )
+
+    if brain_input.last_tool_result is not None:
+        return BrainExecutionDecision(
+            action_required=True,
+            include_retrieval=False,
+            tool_completed=True,
+            reason="tool_result",
             planner_brief="",
         )
 

@@ -1,3 +1,4 @@
+import json
 from typing import Any, Set
 
 from langchain_ollama import ChatOllama
@@ -99,6 +100,7 @@ def create_brain_node(
     tool_brain_llm: ChatOllama,
     agent_system_prompt: str,
     final_answer_system_prompt: str,
+    tool_completed_system_prompt: str,
     casual_system_prompt: str,
     tools_set: Set[str],
     show_raw_llm: bool,
@@ -230,6 +232,35 @@ def create_brain_node(
 
         return decision
     
+    def _build_execution_context(
+        *, 
+        brain_input: BrainInput,
+    ) -> _BrainExecutionContext:
+        
+        execution_policy = decide_brain_execution(brain_input)
+        if execution_policy.final_answer:
+            llm = brain_llm
+            system_prompt = final_answer_system_prompt
+
+        elif execution_policy.tool_completed:
+            llm = brain_llm
+            system_prompt = tool_completed_system_prompt
+
+        elif execution_policy.action_required:
+            llm = tool_brain_llm
+            system_prompt = agent_system_prompt
+
+        else:
+            llm = brain_llm
+            system_prompt = casual_system_prompt
+
+        return _BrainExecutionContext(
+            llm=llm,
+            system_prompt=system_prompt,
+            decision=execution_policy,
+
+        )
+    
     def _build_context_messages(
         *,
         system_prompt: str,
@@ -245,15 +276,12 @@ def create_brain_node(
             *rolling_summary_message(rolling_summary),
         ]
 
-        if execution_policy.action_required:
-            if execution_policy.planner_brief:
-                context_messages.append(SystemMessage(content=execution_policy.planner_brief))
+        if execution_policy.action_required and execution_policy.planner_brief:
+            context_messages.append(SystemMessage(content=execution_policy.planner_brief))
 
-            context_messages.extend(current_turn_messages(history))
-        else:
-            latest = latest_human_message(history)
-            if latest is not None:
-                context_messages.append(latest)
+        latest = latest_human_message(history)
+        if latest is not None:
+            context_messages.append(latest)
 
         return context_messages
     
@@ -278,37 +306,46 @@ def create_brain_node(
             if isinstance(tool_result.data, dict):
                 stderr = str(tool_result.data.get("stderr") or "").strip()
 
-            lowered = stderr.lower()
 
             if stderr:
                 guidance.append(f"Runtime error detected:\n{stderr}")
 
-            if "the following arguments are required" in lowered:
-                guidance.append(
-                    "Fix missing required tool arguments based on tool schema."
-                )
+                lowered = stderr.lower()
 
-            if (
-                "nameerror" in lowered
-                and "args" in lowered
-                and "not defined" in lowered
-            ):
-                guidance.append(
-                    "Fix NameError: ensure all variables/functions are defined or imported."
-                )
+                if "the following arguments are required" in lowered:
+                    guidance.append(
+                        "Correct the missing required tool arguments "
+                        "using the available tool schema."
+                    )
 
-        has_usable_success_output = (
-            bool((tool_result.rendered_output or "").strip())
-            or tool_result.data is not None
-        )
+                if (
+                    "nameerror" in lowered
+                    and "args" in lowered
+                    and "not defined" in lowered
+                ):
+                    guidance.append(
+                        "Correct the NameError by ensuring required "
+                        "variables or functions are defined or imported."
+                    )
+        elif tool_result.success:
 
-        if tool_result.success and has_usable_success_output:
-            guidance.append(
-                "A tool has already succeeded during this user turn. "
-                "Use the tool output as the authoritative source of truth for the current state of the world. "
-                "If that successful result satisfies the request, provide the final concise answer now instead of calling more tools. "
-                "Only call another tool if a specific remaining gap still exists that can be directly addressed by one more tool call."
+            has_output = (
+                bool((tool_result.rendered_output or "").strip())
+                or tool_result.data is not None
             )
+
+            if has_output:
+                guidance.append(
+                    "The previous tool execution SUCCEEDED."
+                )
+                guidance.append(
+                    "Treat its output as authoritative evidence for the "
+                    "current execution state."
+                )
+                guidance.append(
+                    "Inspect the result against the current active step "
+                    "and continue that step only if required work remains."
+                )
 
         if not guidance:
             return []
@@ -317,7 +354,7 @@ def create_brain_node(
             SystemMessage(
                 content="\n".join(
                     [
-                        "### RUNTIME INSTRUCTIONS (HIGHEST PRIORITY):",
+                        "### RUNTIME GUIDANCE:",
                         *guidance,
                     ]
                 )
@@ -360,17 +397,104 @@ def create_brain_node(
                 )
             )
 
-        # if brain_input.last_tool_result is not None:
-        #     messages.append(
-        #         SystemMessage(
-        #             content=(
-        #                 "Latest tool result:\n"
-        #                 f"{brain_input.last_tool_result.rendered_output}"
-        #             )
-        #         )
-        #     )
+        return messages
+
+    def _build_tool_completed_messages(
+        *,
+        system_prompt: str,
+        brain_input: BrainInput,
+    ) -> list[BaseMessage]:
+
+        messages: list[BaseMessage] = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=brain_input.context.user_request),
+        ]
+
+        if brain_input.active_plan is not None:
+            messages.append(
+                SystemMessage(
+                    content=(
+                        "Execution plan:\n"
+                        f"{brain_input.active_plan.objective}"
+                    )
+                )
+            )
+
+        if brain_input.active_step is not None:
+            messages.append(
+                SystemMessage(
+                    content=(
+                        "Current execution step:\n"
+                        f"Title: {brain_input.active_step.title}\n"
+                        f"Description: {brain_input.active_step.description}"
+                    )
+                )
+            )
+
+        if brain_input.last_tool_result is not None:
+            messages.append(
+                SystemMessage(
+                    content=(
+                        "Tool result:\n"
+                        f"{brain_input.last_tool_result}"
+                    )
+                )
+            )
+
+        messages.extend(
+            _build_tool_progress_messages(
+                brain_input=brain_input,
+            )
+        )
 
         return messages
+
+    def _build_tool_progress_messages(
+        *,
+        brain_input: BrainInput,
+    ) -> list[SystemMessage]:
+        history = brain_input.tool_execution_history
+        if not history:
+            return []
+
+        active_step_id = brain_input.active_step.step_id if brain_input.active_step is not None else ""
+
+        current_step_records: list[dict[str, Any]] = []
+        previous_successful_records: list[dict[str, Any]] = []
+
+        for record in history:
+            normalized = {
+                "request_id": record.result.request_id,
+                "step_id": record.step_id,
+                "tool_name": record.tool_name,
+                "arguments": record.arguments,
+                "signature": record.result.signature,
+                "success": record.result.success,
+                "message": record.result.message,
+                "rendered_output": record.result.rendered_output,
+                "data": record.result.data,
+                "error_code": record.result.error_code,
+            }
+
+            if record.step_id == active_step_id:
+                current_step_records.append(normalized)
+            elif record.result.success:
+                previous_successful_records.append(normalized)
+
+        payload = {
+            "active_step_id": active_step_id,
+            "current_step_tool_records": current_step_records,
+            "previous_successful_tool_records": previous_successful_records,
+        }
+
+        return [
+            SystemMessage(
+                content=(
+                    "Tool execution progress (structured):\n"
+                    f"{json.dumps(payload, ensure_ascii=True)}"
+                )
+            )
+        ]
 
     def _build_execution_messages(
         *,
@@ -393,6 +517,12 @@ def create_brain_node(
             _build_runtime_guidance_messages(tool_result=brain_input.last_tool_result)
         )
 
+        pre_messages.extend(
+            _build_tool_progress_messages(
+                brain_input=brain_input,
+            )
+        )
+
         return pre_messages
 
     def _build_brain_messages(
@@ -408,6 +538,12 @@ def create_brain_node(
                 system_prompt=system_prompt,
                 brain_input=brain_input,
             )
+
+        if execution_policy.tool_completed:
+            return _build_tool_completed_messages(
+                system_prompt=system_prompt,
+                brain_input=brain_input,
+            )
         
         return _build_execution_messages(
             system_prompt=system_prompt,
@@ -415,94 +551,35 @@ def create_brain_node(
             brain_input=brain_input,
             execution_policy=execution_policy,
         )
-    
-    def _finalize_brain_response(
+
+    def _build_tool_completed_result(
         *,
-        llm: ChatOllama,
-        pre_messages: list[BaseMessage],
+        brain_input: BrainInput,
         response: AIMessage,
-        execution_policy: BrainExecutionDecision,
-        conversation: _BrainConversationContext,
-        brain_input: BrainInput,
-    ) -> AIMessage:
-        
-        response = _recover_response_for_action_flow(
-            llm=llm,
-            pre_messages=pre_messages,
-            response=response,
-            action_required=execution_policy.action_required,
-            conversation=conversation,
-            brain_input=brain_input,
-        )
-        # todo: implement repeated signature policy enforcement for action-required turns
-        # response = _enforce_repeated_signature_policy(
-        #     llm=llm,
-        #     pre_messages=pre_messages,
-        #     response=response,
-        #     action_required=execution_policy.action_required,
-        #     state=state,
-        #     brain_input=brain_input,
-        # )
-        return response
-    
-    def _build_execution_context(
-        *, 
-        brain_input: BrainInput,
-    ) -> _BrainExecutionContext:
-        
-        execution_policy = decide_brain_execution(brain_input)
-        if execution_policy.final_answer:
-            llm = brain_llm
-            system_prompt = final_answer_system_prompt
+    ) -> BrainResult:
 
-        elif execution_policy.action_required:
-            llm = tool_brain_llm
-            system_prompt = agent_system_prompt
+        answer = response.content.strip().upper()
 
-        else:
-            llm = brain_llm
-            system_prompt = casual_system_prompt
+        if answer == "YES":
+            return BrainResult(
+                outcome=BrainOutcome.STEP_COMPLETED,
+                message=response.content,
+                proposed_step_status=StepStatus.COMPLETED,
+            )
 
-        return _BrainExecutionContext(
-            llm=llm,
-            system_prompt=system_prompt,
-            decision=execution_policy,
-        )
-
-    def _handle_tool_result(
-        *,
-        execution_context: _BrainExecutionContext,
-        conversation: _BrainConversationContext,
-        brain_input: BrainInput,
-    ) -> tuple[Any, BrainResult]:
-
-        tool_result = brain_input.last_tool_result
-        assert tool_result is not None
-
-        if tool_result.success:
-            return None, _build_step_completed_result()
-
-        return _execute_step(
-            conversation=conversation,
-            brain_input=brain_input,
-            execution_context=execution_context
-        )
-
-    def _build_step_completed_result() -> BrainResult:
         return BrainResult(
-            outcome=BrainOutcome.STEP_COMPLETED,
-            message="Current execution step completed successfully.",
-            proposed_step_status=StepStatus.COMPLETED,
+            outcome=BrainOutcome.CONTINUE,
+            message="Execution continues after tool completion.",
         )
+        
 
-    def _final_answer_result(response: AIMessage) -> BrainResult:
+    def _build_answer_result(response: AIMessage) -> BrainResult:
         return BrainResult(
             outcome=BrainOutcome.FINAL_ANSWER,
             message="Execution completed successfully.",
             final_answer=str(response.content),
             proposed_step_status=StepStatus.COMPLETED,
         )
-
 
     def _build_brain_result(
         *,
@@ -517,7 +594,61 @@ def create_brain_node(
                 tool_request=build_tool_request(brain_input=brain_input, response=response),
             )
 
-        return _final_answer_result(response)
+        return _build_answer_result(response)
+
+    def _execute_tool_completed(
+        *,
+        execution_context: _BrainExecutionContext,
+        brain_input: BrainInput,
+    ) -> tuple[Any, BrainResult]:
+
+        assert brain_input.last_tool_result is not None
+
+        response = _run_brain_llm(
+                conversation=None,
+                brain_input=brain_input,
+                execution_context=execution_context,
+            )
+
+        return response, _build_tool_completed_result(
+            brain_input=brain_input,
+            response=response,
+        )
+
+    def _execute_step(
+        *,
+        execution_context: _BrainExecutionContext,
+        conversation: _BrainConversationContext,
+        brain_input: BrainInput,
+    ) -> tuple[AIMessage, BrainResult]:
+
+        response = _run_brain_llm(
+            conversation=conversation,
+            brain_input=brain_input,
+            execution_context=execution_context,
+        )
+
+        return (
+            response,
+            _build_brain_result(
+                brain_input=brain_input,
+                response=response,
+            ),
+        )
+
+    def _execute_final_answer(
+        *,
+        brain_input: BrainInput,
+        execution_context: _BrainExecutionContext,
+    ) -> tuple[AIMessage, BrainResult]:
+
+        response = _run_brain_llm(
+            conversation=None,
+            brain_input=brain_input,
+            execution_context=execution_context,
+        )
+
+        return response, _build_answer_result(response)
 
     def _run_brain_llm(
         *,
@@ -556,41 +687,7 @@ def create_brain_node(
 
         return response
 
-    def _execute_step(
-        *,
-        execution_context: _BrainExecutionContext,
-        conversation: _BrainConversationContext,
-        brain_input: BrainInput,
-    ) -> tuple[AIMessage, BrainResult]:
-
-        response = _run_brain_llm(
-            conversation=conversation,
-            brain_input=brain_input,
-            execution_context=execution_context,
-        )
-
-        return (
-            response,
-            _build_brain_result(
-                brain_input=brain_input,
-                response=response,
-            ),
-        )
-
-    def _generate_final_answer(
-        *,
-        brain_input: BrainInput,
-        execution_context: _BrainExecutionContext,
-    ) -> tuple[AIMessage, BrainResult]:
-
-        response = _run_brain_llm(
-            conversation=None,
-            brain_input=brain_input,
-            execution_context=execution_context,
-        )
-
-        return response, _final_answer_result(response)
-
+    
     def _execute_brain(
         *,
         conversation: _BrainConversationContext,
@@ -598,22 +695,21 @@ def create_brain_node(
         execution_context: _BrainExecutionContext,
     ):
         response = None
+        brain_result = None
 
         if execution_context.decision.final_answer:
 
-            response, brain_result = _generate_final_answer(
+            response, brain_result = _execute_final_answer(
                 brain_input=brain_input,
                 execution_context=execution_context,
             )
-        elif brain_input.last_tool_result is not None:
+        elif execution_context.decision.tool_completed:
 
-            response, brain_result = _handle_tool_result(
+            response, brain_result = _execute_tool_completed(
                 execution_context=execution_context,
                 brain_input=brain_input,
-                conversation=conversation,
             )
         else:
-
             response, brain_result = _execute_step(
                 execution_context=execution_context,
                 conversation=conversation,
@@ -621,6 +717,36 @@ def create_brain_node(
             )
 
         return response, brain_result
+
+    def _finalize_brain_response(
+            *,
+            llm: ChatOllama,
+            pre_messages: list[BaseMessage],
+            response: AIMessage,
+            execution_policy: BrainExecutionDecision,
+            conversation: _BrainConversationContext,
+            brain_input: BrainInput,
+        ) -> AIMessage:
+            
+            response = _recover_response_for_action_flow(
+                llm=llm,
+                pre_messages=pre_messages,
+                response=response,
+                action_required=execution_policy.action_required,
+                conversation=conversation,
+                brain_input=brain_input,
+            )
+            # todo: implement repeated signature policy enforcement for action-required turns
+            # response = _enforce_repeated_signature_policy(
+            #     llm=llm,
+            #     pre_messages=pre_messages,
+            #     response=response,
+            #     action_required=execution_policy.action_required,
+            #     state=state,
+            #     brain_input=brain_input,
+            # )
+            return response
+        
 
     def brain_node(state: AgentState):
 
@@ -632,12 +758,12 @@ def create_brain_node(
 
         brain_input = build_brain_input(state)
 
-        print("=== BRAIN INPUT ===")
-        print("cursor:", brain_input.cursor)
-        print("active_step:", brain_input.active_step)
-        print("last_tool_result:", brain_input.last_tool_result)
-        print("plan:", brain_input.active_plan)
-        print("===================")
+        # print("=== BRAIN INPUT ===")
+        # print("cursor:", brain_input.cursor)
+        # print("active_step:", brain_input.active_step)
+        # print("last_tool_result:", brain_input.last_tool_result)
+        # print("plan:", brain_input.active_plan)
+        # print("===================")
 
         execution_context = _build_execution_context(
             brain_input=brain_input,

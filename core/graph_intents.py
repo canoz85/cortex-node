@@ -41,12 +41,13 @@ DOMAIN DEFINITIONS:
 - "general": General queries, SCADA/hardware control, vision tasks, or cross-domain requests.
 
 IMPORTANT CLASSIFICATION RULES:
-
 - A task that could be answered directly is still "action" if the user explicitly requires execution.
 - A tool request is not automatically "action"; determine whether the requested operation is read-only ("info") or state-changing/executing ("action").
 - Mentioning a tool or technology as the subject of a question does not by itself mean execution is requested.
 - If the user says to use, run, execute, invoke, or otherwise explicitly perform something with a tool or execution environment, treat that as an execution instruction.
-- If the requested execution is incomplete or underspecified, keep the execution route and set "needs_clarification": true.
+- Set "needs_clarification": true only when essential information required to determine or safely perform the requested task is genuinely missing.
+- Do not set "needs_clarification": true merely because the task contains multiple steps, requires inspecting files, or requires determining the relevant files from the workspace.
+- If the user's requested operation and domain are clear, set "needs_clarification": false and allow downstream planning to determine the required steps.
 - Use "clarify_domain" when the system cannot safely determine what domain or operation the user intends.
 - Do not invent a tool request merely because a tool could be useful.
 

@@ -1,7 +1,21 @@
 from langchain_core.messages import AIMessage, HumanMessage
 
-from core.protocol.bridge import build_controller_input
-from core.protocol.enums import BrainOutcome, WorkerRole
+from core.protocol.bridge import build_brain_input, build_controller_input
+from core.protocol.enums import BrainOutcome, ExecutionPhase, WorkerRole
+from core.protocol.models import (
+    BrainResult,
+    ExecutionCursor,
+    ExecutionIdentity,
+    ExecutionPlan,
+    ExecutionState,
+    ExecutionStep,
+    PlannerResult,
+    ProtocolVisibleState,
+    ToolExecutionRecord,
+    ToolResult,
+    ToolRequest,
+    WorkingState,
+)
 
 
 def test_build_controller_input_maps_protocol_outputs_from_legacy_state():
@@ -17,15 +31,25 @@ def test_build_controller_input_maps_protocol_outputs_from_legacy_state():
         "plan": "1. write file\n2. run",
         "plan_id": "p-1",
         "plan_revision": 3,
-        "planner_message": "Plan generated successfully.",
-        "brain_outcome": "tool_request",
-        "brain_message": "Brain requested tool execution.",
-        "tool_request": {
-            "request_id": "req-1",
-            "tool_name": "write_file",
-            "arguments": {"path": "workspace/a.py", "content": "print('x')"},
-            "requested_by": "brain",
-        },
+        "planner_result": PlannerResult(
+            outcome="execution_plan",
+            message="Plan generated successfully.",
+            proposed_plan=ExecutionPlan(
+                plan_id="p-1",
+                revision=3,
+                objective="1. write file\n2. run",
+                steps=(ExecutionStep(step_id="s1", title="write"),),
+            ),
+        ),
+        "brain_result": BrainResult(
+            outcome=BrainOutcome.TOOL_REQUEST,
+            message="Brain requested tool execution.",
+            tool_request=ToolRequest(
+                request_id="req-1",
+                tool_name="write_file",
+                arguments={"path": "workspace/a.py", "content": "print('x')"},
+            ),
+        ),
         "last_tool_signature": "write_file:{\"path\":\"workspace/a.py\"}",
         "last_tool_output": {
             "success": True,
@@ -67,3 +91,48 @@ def test_build_controller_input_leaves_optional_worker_outputs_none_when_missing
     assert controller_input.planner_result is None
     assert controller_input.brain_result is None
     assert controller_input.tool_result is None
+
+
+def test_build_brain_input_transfers_tool_execution_history_from_working_state():
+    execution_state = ExecutionState(
+        protocol_visible=ProtocolVisibleState(
+            identity=ExecutionIdentity(
+                execution_id="run-1",
+                protocol_version="1.0",
+            ),
+            cursor=ExecutionCursor(
+                phase=ExecutionPhase.EXECUTING,
+                step_id="s1",
+            ),
+        ),
+        working=WorkingState(
+            tool_execution_history=(
+                ToolExecutionRecord(
+                    step_id="s1",
+                    tool_name="list_files",
+                    arguments={"path": "."},
+                    result=ToolResult(
+                        request_id="req-1",
+                        signature='list_files:{"path": "."}',
+                        success=True,
+                        message="Listing for .",
+                        rendered_output="Files under .:\n- a.py",
+                        data={"entries": ["a.py"]},
+                    ),
+                ),
+            )
+        ),
+    )
+
+    state = {
+        "messages": [HumanMessage(content="list files")],
+        "execution_state": execution_state,
+    }
+
+    brain_input = build_brain_input(state)
+
+    assert len(brain_input.tool_execution_history) == 1
+    record = brain_input.tool_execution_history[0]
+    assert record.result.request_id == "req-1"
+    assert record.step_id == "s1"
+    assert record.tool_name == "list_files"

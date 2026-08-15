@@ -36,6 +36,14 @@ class CortexController:
     ) -> ControllerDecision:
         self._validate(controller_input)
 
+        print("=== CONTROLLER INPUT ===")
+        print("planner_result:", controller_input.planner_result)
+        print("brain_result:", controller_input.brain_result)
+        print("tool_result:", controller_input.tool_result)
+        print("active_step:", controller_input.active_step.step_id if controller_input.active_step else None)
+        print("cursor.step_id:", controller_input.cursor.step_id)
+        print("========================")
+
         if (
             controller_input.cursor.controller_iteration is not None
             and controller_input.cursor.controller_iteration >= self._max_reasoning_steps
@@ -73,8 +81,7 @@ class CortexController:
         if controller_input.active_plan is None:
             return self._dispatch_planner("No active plan.")
 
-        next_step = self._find_next_pending_step(controller_input)
-
+        next_step = self._find_next_executable_step(controller_input.active_plan)
         if next_step is None:
             return self._dispatch_summary("Plan completed.")
 
@@ -164,7 +171,6 @@ class CortexController:
         )
 
         match brain_result.outcome:
-
             case BrainOutcome.TOOL_REQUEST:
                 return ControllerDecision(
                         accepted_plan=self._update_active_step_status(
@@ -195,7 +201,6 @@ class CortexController:
                 )
 
             case BrainOutcome.FINAL_ANSWER:
-
                 cursor = controller_input.cursor.model_copy(
                     update={
                         "phase": ExecutionPhase.TERMINATING,
@@ -204,7 +209,6 @@ class CortexController:
                 )
 
                 return ControllerDecision(
-
                     accepted_plan=self._update_active_step_status(
                         controller_input,
                         StepStatus.COMPLETED,
@@ -215,7 +219,6 @@ class CortexController:
                     cursor=cursor,
                     terminal=True,
                 )
-                #return self._dispatch_summary("final_answer")
 
             case BrainOutcome.STEP_COMPLETED:
                 return self._advance_to_next_step(controller_input)
@@ -307,6 +310,30 @@ class CortexController:
             terminal=True,
         )
 
+    def _find_next_executable_step(
+        self,
+        plan: ExecutionPlan,
+    ) -> ExecutionStep | None:
+        """Return the first pending step whose dependencies are completed."""
+
+        completed_step_ids = {
+            step.step_id
+            for step in plan.steps
+            if step.status == StepStatus.COMPLETED
+        }
+
+        for step in plan.steps:
+            if step.status != StepStatus.PENDING:
+                continue
+
+            if all(
+                dependency_id in completed_step_ids
+                for dependency_id in step.depends_on_step_ids
+            ):
+                return step
+
+        return None
+    
     def _find_next_pending_step(
         self,
         controller_input: ControllerInput,
@@ -338,49 +365,41 @@ class CortexController:
         self,
         controller_input: ControllerInput,
     ) -> ControllerDecision:
-        """Advance execution to the next pending step."""
 
         plan = controller_input.active_plan
-
         if plan is None:
             return self._dispatch_summary("No active plan.")
 
         current = controller_input.active_step
 
-        if current is None:
-            if not plan.steps:
-                return self._dispatch_summary("Plan completed.")
+        updated_plan = self._update_active_step_status(
+            controller_input,
+            StepStatus.COMPLETED,
+        )
 
-            next_step = plan.steps[0]
+        if updated_plan is None:
+            return self._terminate("Cannot complete active step.")
 
-        else:
-            try:
-                index = next(
-                    i
-                    for i, step in enumerate(plan.steps)
-                    if step.step_id == current.step_id
-                )
-            except StopIteration:
-                return self._terminate("Active step not found in plan.")
+        next_step = self._find_next_executable_step(updated_plan)
 
-            if index + 1 >= len(plan.steps):
-                return self._dispatch_brain(
-                    cursor=controller_input.cursor,
-                    reason="Generate final answer.",
-                    completed_step_id=current.step_id,
-                    next_step_id=None,
-                    clear_active_step=True,
-                )
-            
-            next_step = plan.steps[index + 1]
+        if next_step is None:
+            return ControllerDecision(
+                accepted_plan=updated_plan,
+                decision_type=ControllerDecisionType.DISPATCH_BRAIN,
+                next_worker=WorkerRole.BRAIN,
+                reason="Generate final answer.",
+                cursor=controller_input.cursor,
+                completed_step_id=current.step_id if current else None,
+                next_step_id=None,
+                clear_active_step=True,
+            )
 
-        return self._dispatch_brain(
+        return ControllerDecision(
+            accepted_plan=updated_plan,
+            decision_type=ControllerDecisionType.DISPATCH_BRAIN,
+            next_worker=WorkerRole.BRAIN,
+            reason="Advance to next executable step.",
             cursor=controller_input.cursor,
-            reason="Advance to next step.",
-            completed_step_id=(
-                current.step_id 
-                if current is not None 
-                else None
-            ),
+            completed_step_id=current.step_id if current else None,
             next_step_id=next_step.step_id,
         )

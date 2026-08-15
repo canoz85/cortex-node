@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from langchain_core.messages import ToolMessage
 
 from core.graph_node_helpers import build_tool_signature
-from core.protocol.models import ToolRequest, ToolResult
+from core.protocol.models import ToolExecutionRecord, ToolRequest, ToolResult
 from core.graph_messages import normalize_message_content, tool_message_content
 from core.graph_response_formatters import format_tool_result_response
 from core.state import AgentState
@@ -138,6 +138,7 @@ def create_capture_tool_output_node():
         )
 
         working = execution_state.working
+        active_step = execution_state.protocol_visible.active_step
 
         repeat_fail_count = _compute_repeat_fail_count(
             previous=working.last_tool_result,
@@ -145,9 +146,22 @@ def create_capture_tool_output_node():
             current=tool_result,
         )
 
+        tool_execution_record = ToolExecutionRecord(
+            step_id=active_step.step_id if active_step is not None else "",
+            tool_name=decision.pending_tool_request.tool_name,
+            arguments=decision.pending_tool_request.arguments,
+            result=tool_result,
+        )
+
+        updated_history = (
+            *working.tool_execution_history,
+            tool_execution_record,
+        )
+
         working = working.model_copy(
             update={
                 "last_tool_result": tool_result,
+                "tool_execution_history": updated_history,
                 "repeat_fail_count": repeat_fail_count,
             }
         )

@@ -181,6 +181,14 @@ class ToolResult(ImmutableProtocolModel):
     error_code: str | None = None
 
 
+class ToolExecutionRecord(ImmutableProtocolModel):
+    step_id: str
+
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    result: ToolResult
+
+
 class ReplanRequest(ImmutableProtocolModel):
     """Typed replan request generated when plan continuation is insufficient.
 
@@ -211,6 +219,7 @@ class BrainInput(ImmutableProtocolModel):
     active_plan: ExecutionPlan | None = None
     active_step: ExecutionStep | None = None
     last_tool_result: ToolResult | None = None
+    tool_execution_history: tuple[ToolExecutionRecord, ...] = Field(default_factory=tuple)
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
 
 
@@ -374,6 +383,7 @@ class WorkingState(ImmutableProtocolModel):
 
     retrieval_context: RetrievalContext = Field(default_factory=tuple)
     last_tool_result: ToolResult | None = None
+    tool_execution_history: tuple[ToolExecutionRecord, ...] = Field(default_factory=tuple)
     repeat_fail_count: int = 0
     routing_metadata: dict[str, JsonValue] = Field(default_factory=dict)
     planner_metadata: dict[str, JsonValue] = Field(default_factory=dict)
