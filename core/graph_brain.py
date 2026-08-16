@@ -36,6 +36,7 @@ from core.graph_node_helpers import response_with_usage
 
 from core.graph_response_formatters import format_action_completion_response
 from core.graph_state_machine import (
+    _build_brain_execution_brief,
     decide_action_recovery,
     decide_brain_execution,
     should_fallback_after_empty_response,
@@ -56,7 +57,7 @@ class _BrainConversationContext:
 @dataclass(slots=True)
 class _BrainExecutionContext:
     llm: ChatOllama
-    system_prompt: str
+    messages: list[BaseMessage]
     decision: BrainExecutionDecision
 
 def _print_raw_llm_request_response(color, messages: list[BaseMessage], raw_text: str) -> None:
@@ -139,7 +140,6 @@ def create_brain_node(
         pre_messages: list[BaseMessage],
         response: AIMessage,
         action_required: bool,
-        conversation: _BrainConversationContext,
         brain_input: BrainInput,
     ) -> AIMessage:
     
@@ -162,7 +162,6 @@ def create_brain_node(
             response = _finalize_from_successful_tool_context(
                 llm=llm,
                 pre_messages=pre_messages,
-                conversation=conversation,
                 brain_input=brain_input,
                 response=response,
             )
@@ -185,7 +184,6 @@ def create_brain_node(
         *,
         llm: ChatOllama,
         pre_messages: list[BaseMessage],
-        conversation: _BrainConversationContext,
         brain_input: BrainInput,
         response: AIMessage,
     ) -> AIMessage:
@@ -196,7 +194,7 @@ def create_brain_node(
         if getattr(response, "tool_calls", None):
             return response
         
-        history = conversation.messages
+        history = brain_input.context.recent_history
 
         completion = format_action_completion_response(history)
         if completion:
@@ -241,22 +239,47 @@ def create_brain_node(
         if execution_policy.final_answer:
             llm = brain_llm
             system_prompt = final_answer_system_prompt
+            messages = _build_final_answer_messages(
+                system_prompt=system_prompt,
+                brain_input=brain_input,
+            )
 
         elif execution_policy.tool_completed:
             llm = brain_llm
             system_prompt = tool_completed_system_prompt
-
-        elif execution_policy.action_required:
-            llm = tool_brain_llm
-            system_prompt = agent_system_prompt
-
+            messages = _build_tool_completed_messages(
+                system_prompt=system_prompt,
+                brain_input=brain_input,
+            )
         else:
-            llm = brain_llm
-            system_prompt = casual_system_prompt
+            execution_brief = ""
+            if execution_policy.action_required:
+                llm = tool_brain_llm
+                system_prompt = agent_system_prompt
+
+                if execution_policy.execution_brief:
+                    execution_brief = execution_policy.execution_brief
+            else:
+                llm = brain_llm
+                system_prompt = casual_system_prompt    
+
+            retrieval_messages = (
+                brain_input.context.retrieval_messages
+                if execution_policy.include_retrieval
+                else ()
+            )
+            
+            messages = _build_execution_messages(
+                system_prompt=system_prompt,
+                brain_input=brain_input,
+                retrieval_messages=retrieval_messages,
+                execution_brief=execution_brief,
+                recent_history=brain_input.context.recent_history,
+            )
 
         return _BrainExecutionContext(
             llm=llm,
-            system_prompt=system_prompt,
+            messages=messages,
             decision=execution_policy,
 
         )
@@ -264,20 +287,19 @@ def create_brain_node(
     def _build_context_messages(
         *,
         system_prompt: str,
-        execution_policy: BrainExecutionDecision,
+        execution_brief: str | None,
         retrieval_messages: list[SystemMessage],
         history: list,
-        rolling_summary: str,
     ) -> list[BaseMessage]:
     
         context_messages: list[BaseMessage] = [
             SystemMessage(content=system_prompt),
-            *(retrieval_messages if execution_policy.include_retrieval else []),
-            *rolling_summary_message(rolling_summary),
+            *retrieval_messages,
+            # *rolling_summary_message(rolling_summary),
         ]
 
-        if execution_policy.action_required and execution_policy.planner_brief:
-            context_messages.append(SystemMessage(content=execution_policy.planner_brief))
+        if execution_brief:
+            context_messages.append(SystemMessage(content=execution_brief))
 
         latest = latest_human_message(history)
         if latest is not None:
@@ -373,7 +395,7 @@ def create_brain_node(
             HumanMessage(content=brain_input.context.user_request),
         ]
 
-        if brain_input.active_plan is not None:
+        if brain_input.active_plan is not None and brain_input.active_step is None:
             messages.append(
                 SystemMessage(
                     content=(
@@ -383,19 +405,31 @@ def create_brain_node(
                 )
             )
 
-        if brain_input.context.recent_history:
-            messages.append(
-                SystemMessage(
-                    content=(
-                        "Execution results:\n"
-                        + "\n".join(
-                            result
-                            for result in brain_input.context.recent_history
-                            if result
+            execution_records = [
+                {
+                    "request_id": record.result.request_id,
+                    "step_id": record.step_id,
+                    "tool_name": record.tool_name,
+                    "arguments": record.arguments,
+                    "signature": record.result.signature,
+                    "success": record.result.success,
+                    "message": record.result.message,
+                    "rendered_output": record.result.rendered_output,
+                    "data": record.result.data,
+                    "error_code": record.result.error_code,
+                }
+                for record in brain_input.tool_execution_history
+            ]
+
+            if execution_records:
+                messages.append(
+                    SystemMessage(
+                        content=(
+                            "Execution evidence (structured):\n"
+                            f"{json.dumps(execution_records, ensure_ascii=True)}"
                         )
                     )
                 )
-            )
 
         return messages
 
@@ -410,36 +444,9 @@ def create_brain_node(
             HumanMessage(content=brain_input.context.user_request),
         ]
 
-        if brain_input.active_plan is not None:
-            messages.append(
-                SystemMessage(
-                    content=(
-                        "Execution plan:\n"
-                        f"{brain_input.active_plan.objective}"
-                    )
-                )
-            )
-
-        if brain_input.active_step is not None:
-            messages.append(
-                SystemMessage(
-                    content=(
-                        "Current execution step:\n"
-                        f"Title: {brain_input.active_step.title}\n"
-                        f"Description: {brain_input.active_step.description}"
-                    )
-                )
-            )
-
-        if brain_input.last_tool_result is not None:
-            messages.append(
-                SystemMessage(
-                    content=(
-                        "Tool result:\n"
-                        f"{brain_input.last_tool_result}"
-                    )
-                )
-            )
+        execution_brief = _build_brain_execution_brief(brain_input)
+        if execution_brief:
+            messages.append(SystemMessage(content=execution_brief))
 
         messages.extend(
             _build_tool_progress_messages(
@@ -498,19 +505,20 @@ def create_brain_node(
 
     def _build_execution_messages(
         *,
-        conversation: _BrainConversationContext,
         system_prompt: str,
         brain_input: BrainInput,
-        execution_policy: BrainExecutionDecision,
+        retrieval_messages: list[SystemMessage],
+        execution_brief: str | None,
+        recent_history: list[str],
+
     ) -> list[BaseMessage]:
         """Build the message list used for tool execution and action-required turns."""
 
         pre_messages = _build_context_messages(
             system_prompt=system_prompt,
-            execution_policy=execution_policy,
-            retrieval_messages=conversation.retrieval_messages,
-            history=conversation.history,
-            rolling_summary=conversation.rolling_summary,
+            execution_brief=execution_brief,
+            retrieval_messages=retrieval_messages,
+            history=recent_history,
         )
 
         pre_messages.extend(
@@ -525,36 +533,35 @@ def create_brain_node(
 
         return pre_messages
 
-    def _build_brain_messages(
-        *,
-        system_prompt: str,
-        conversation: _BrainConversationContext,
-        brain_input: BrainInput,
-        execution_policy: BrainExecutionDecision,
-    ) -> list[BaseMessage]:
+    # def _build_brain_messages(
+    #     *,
+    #     system_prompt: str,
+    #     conversation: _BrainConversationContext,
+    #     brain_input: BrainInput,
+    #     execution_policy: BrainExecutionDecision,
+    # ) -> list[BaseMessage]:
         
-        if execution_policy.final_answer:
-            return _build_final_answer_messages(
-                system_prompt=system_prompt,
-                brain_input=brain_input,
-            )
+    #     if execution_policy.final_answer:
+    #         return _build_final_answer_messages(
+    #             system_prompt=system_prompt,
+    #             brain_input=brain_input,
+    #         )
 
-        if execution_policy.tool_completed:
-            return _build_tool_completed_messages(
-                system_prompt=system_prompt,
-                brain_input=brain_input,
-            )
+    #     if execution_policy.tool_completed:
+    #         return _build_tool_completed_messages(
+    #             system_prompt=system_prompt,
+    #             brain_input=brain_input,
+    #         )
         
-        return _build_execution_messages(
-            system_prompt=system_prompt,
-            conversation=conversation,
-            brain_input=brain_input,
-            execution_policy=execution_policy,
-        )
+    #     return _build_execution_messages(
+    #         system_prompt=system_prompt,
+    #         conversation=conversation,
+    #         brain_input=brain_input,
+    #         execution_policy=execution_policy,
+    #     )
 
     def _build_tool_completed_result(
         *,
-        brain_input: BrainInput,
         response: AIMessage,
     ) -> BrainResult:
 
@@ -611,7 +618,6 @@ def create_brain_node(
             )
 
         return response, _build_tool_completed_result(
-            brain_input=brain_input,
             response=response,
         )
 
@@ -653,7 +659,6 @@ def create_brain_node(
     def _run_brain_llm(
         *,
         execution_context: _BrainExecutionContext,
-        conversation: _BrainConversationContext | None,
         brain_input: BrainInput,
     ) -> AIMessage:
         """
@@ -662,24 +667,25 @@ def create_brain_node(
         This function owns prompt construction and model invocation only.
         """
 
-        pre_messages = _build_brain_messages(
-            system_prompt=execution_context.system_prompt,
-            conversation=conversation,
-            brain_input=brain_input,
-            execution_policy=execution_context.decision,
-        )
+        # pre_messages = _build_brain_messages(
+        #     system_prompt=execution_context.system_prompt,
+        #     conversation=conversation,
+        #     brain_input=brain_input,
+        #     execution_policy=execution_context.decision,
+        # )
+
+        messages = execution_context.messages
 
         response = _invoke_with_trace(
             llm=execution_context.llm,
-            messages=[*pre_messages],
+            messages=[*messages],
             show_raw_llm=show_raw_llm,
             color=ANSI_BLUE,
         )
 
         response = _finalize_brain_response(
             llm=execution_context.llm,
-            conversation=conversation,
-            pre_messages=pre_messages,
+            pre_messages=messages,
             response=response,
             execution_policy=execution_context.decision,
             brain_input=brain_input,
@@ -690,31 +696,37 @@ def create_brain_node(
     
     def _execute_brain(
         *,
-        conversation: _BrainConversationContext,
         brain_input: BrainInput,
         execution_context: _BrainExecutionContext,
     ):
-        response = None
         brain_result = None
 
+        response = _run_brain_llm(
+            brain_input=brain_input,
+            execution_context=execution_context,
+        )
+
         if execution_context.decision.final_answer:
+            brain_result = _build_answer_result(response)
 
-            response, brain_result = _execute_final_answer(
-                brain_input=brain_input,
-                execution_context=execution_context,
-            )
         elif execution_context.decision.tool_completed:
+            brain_result = _build_tool_completed_result(response=response)
 
-            response, brain_result = _execute_tool_completed(
-                execution_context=execution_context,
-                brain_input=brain_input,
-            )
+            # response, brain_result = _execute_tool_completed(
+            #     execution_context=execution_context,
+            #     brain_input=brain_input,
+            # )
         else:
-            response, brain_result = _execute_step(
-                execution_context=execution_context,
-                conversation=conversation,
+            brain_result = _build_brain_result(
                 brain_input=brain_input,
+                response=response
             )
+
+            # response, brain_result = _execute_step(
+            #     execution_context=execution_context,
+            #     conversation=conversation,
+            #     brain_input=brain_input,
+            # )
 
         return response, brain_result
 
@@ -724,7 +736,6 @@ def create_brain_node(
             pre_messages: list[BaseMessage],
             response: AIMessage,
             execution_policy: BrainExecutionDecision,
-            conversation: _BrainConversationContext,
             brain_input: BrainInput,
         ) -> AIMessage:
             
@@ -733,7 +744,6 @@ def create_brain_node(
                 pre_messages=pre_messages,
                 response=response,
                 action_required=execution_policy.action_required,
-                conversation=conversation,
                 brain_input=brain_input,
             )
             # todo: implement repeated signature policy enforcement for action-required turns
@@ -750,11 +760,11 @@ def create_brain_node(
 
     def brain_node(state: AgentState):
 
-        conversation = _BrainConversationContext(
-            history=state.get("messages", []),
-            retrieval_messages=state.get("retrieval_messages", []),
-            rolling_summary=state.get("rolling_summary", ""),
-        )
+        # conversation = _BrainConversationContext(
+        #     history=state.get("messages", []),
+        #     retrieval_messages=state.get("retrieval_messages", []),
+        #     rolling_summary=state.get("rolling_summary", ""),
+        # )
 
         brain_input = build_brain_input(state)
 
@@ -770,7 +780,6 @@ def create_brain_node(
         )
 
         response, brain_result = _execute_brain(
-            conversation=conversation,
             brain_input=brain_input,
             execution_context=execution_context,
         )

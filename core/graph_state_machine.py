@@ -20,7 +20,7 @@ class BrainExecutionDecision:
     action_required: bool
     include_retrieval: bool
     reason: str
-    planner_brief: str = ""  # Added default value for planner_brief
+    execution_brief: str = ""  
     final_answer: bool = False
     tool_completed: bool = False
 
@@ -265,7 +265,7 @@ def decide_brain_execution(
             action_required=False,
             include_retrieval=False,
             reason="direct_response",
-            planner_brief="",
+            execution_brief="",
             final_answer=False
         )
 
@@ -275,7 +275,7 @@ def decide_brain_execution(
             include_retrieval=False,
             final_answer=True,
             reason="final_answer",
-            planner_brief="",
+            execution_brief="",
         )
 
     if brain_input.last_tool_result is not None:
@@ -284,14 +284,14 @@ def decide_brain_execution(
             include_retrieval=False,
             tool_completed=True,
             reason="tool_result",
-            planner_brief="",
+            execution_brief="",
         )
 
     return BrainExecutionDecision(
         action_required=True,
         include_retrieval=False,
         reason="execution_plan",
-        planner_brief=_build_brain_execution_brief(brain_input),
+        execution_brief=_build_brain_execution_brief(brain_input),
     )
 
 
@@ -322,21 +322,6 @@ def _build_brain_execution_brief(
         lines.append(
             f"{marker} {index}. {step.title} – {step.description}"
         )
-
-    lines.extend(
-        [
-            "",
-            "Execution rules:",
-            "- Execute ONLY the current highlighted step.",
-            "- Never skip steps.",
-            "- Never reorder steps.",
-            "- Never invent additional steps.",
-            "- Never call tools not implied by the current step.",
-            "- After completing the current step:",
-            "  * request the required tool, or",
-            "  * if this was the final step, provide the final answer.",
-        ]
-    )
 
     rendered = "\n".join(lines)
 

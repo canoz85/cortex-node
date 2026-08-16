@@ -30,9 +30,9 @@ def create_controller_node(
 
         decision = controller.decide(controller_input)
 
-        print("\n=== CONTROLLER DECISION ===")
-        print("decision:", decision)
-        print("before:", state["execution_state"].protocol_visible)
+        # print("\n=== CONTROLLER DECISION ===")
+        # print("decision:", decision)
+        #print("before:", state["execution_state"].protocol_visible)
 
         execution_state = apply_controller_decision_to_state(
             state["execution_state"],
@@ -40,7 +40,7 @@ def create_controller_node(
         )
 
         print("\n=== AFTER APPLY ===")
-        print("cursor:", execution_state.protocol_visible.cursor)
+        # print("cursor:", execution_state.protocol_visible.cursor)
         print("active_step:", execution_state.protocol_visible.active_step)
         print(
             "completed:",

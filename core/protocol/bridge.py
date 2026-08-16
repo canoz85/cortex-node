@@ -527,7 +527,7 @@ def build_execution_context(
 
     resolved_user_request = (user_request or _latest_user_request(messages)).strip() or _DEFAULT_USER_REQUEST
     retrieval_messages = tuple(_message_text(item) for item in retrieval)
-    recent_history = tuple(_message_text(item) for item in messages[-8:])
+    recent_history = tuple(_message_text(item) for item in messages[-32:])
 
     return ExecutionContext(
         user_request=resolved_user_request,

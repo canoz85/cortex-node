@@ -36,13 +36,13 @@ class CortexController:
     ) -> ControllerDecision:
         self._validate(controller_input)
 
-        print("=== CONTROLLER INPUT ===")
-        print("planner_result:", controller_input.planner_result)
-        print("brain_result:", controller_input.brain_result)
-        print("tool_result:", controller_input.tool_result)
-        print("active_step:", controller_input.active_step.step_id if controller_input.active_step else None)
-        print("cursor.step_id:", controller_input.cursor.step_id)
-        print("========================")
+        # print("=== CONTROLLER INPUT ===")
+        # print("planner_result:", controller_input.planner_result)
+        # print("brain_result:", controller_input.brain_result)
+        # print("tool_result:", controller_input.tool_result)
+        # print("active_step:", controller_input.active_step.step_id if controller_input.active_step else None)
+        # print("cursor.step_id:", controller_input.cursor.step_id)
+        # print("========================")
 
         if (
             controller_input.cursor.controller_iteration is not None
