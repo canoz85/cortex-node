@@ -17,7 +17,7 @@ ANSI_RESET = "\033[0m"
 MAX_PSEUDO_RETRIES = 10
 
 SYSTEM_CAPABILITIES_TEXT = """SYSTEM CAPABILITIES & AVAILABLE TOOLS:
-- Time & Environment: `current_time` (real-time clock/date), `agent_info`, `token_usage`, `solve_math` (arithmetic)
+- Time & Environment: `current_time` (real-time clock/date), `agent_info`, `token_usage`
 - File System: `list_files`, `read_file`, `write_file`, `make_directory`
 - Code Execution: `run_python`, `install_package`
 - Git Operations: `git_status`, `git_log`, `git_show`, `git_diff`
@@ -179,7 +179,7 @@ DOMAIN_TOOL_MAP: Dict[str, Set[str]] = {
     "python": {
         "run_python", "install_package", "list_files", "read_file", 
         "write_file", "make_directory", "git_status", "git_log", 
-        "git_show", "git_diff", "solve_math"
+        "git_show", "git_diff"
     },
     "sap": {
         "lookup_material", "query_abap_table", "execute_abap_report", 
@@ -197,11 +197,11 @@ MUTATING_TOOLS: Set[str] = {
 }
 
 PSEUDO_TOOL_CALL_PATTERN = re.compile(
-    r"\b(?:list_files|read_file|write_file|make_directory|run_python|git_status|git_diff|git_log|git_show|agent_info|token_usage|current_time|solve_math|scada_status|rag_search|rag_refresh_index|query_abap_table|execute_abap_report|lookup_material|get_report_data)\s*\(",
+    r"\b(?:list_files|read_file|write_file|make_directory|run_python|git_status|git_diff|git_log|git_show|agent_info|token_usage|current_time|scada_status|rag_search|rag_refresh_index|query_abap_table|execute_abap_report|lookup_material|get_report_data)\s*\(",
     re.IGNORECASE,
 )
 
 PSEUDO_JSON_TOOL_CALL_PATTERN = re.compile(
-    r'\{\s*"name"\s*:\s*"(?:list_files|read_file|write_file|make_directory|run_python|git_status|git_diff|git_log|git_show|agent_info|token_usage|current_time|solve_math|scada_status|rag_search|rag_refresh_index|query_abap_table|execute_abap_report|lookup_material|get_report_data)"\s*,\s*"arguments"\s*:',
+    r'\{\s*"name"\s*:\s*"(?:list_files|read_file|write_file|make_directory|run_python|git_status|git_diff|git_log|git_show|agent_info|token_usage|current_time|scada_status|rag_search|rag_refresh_index|query_abap_table|execute_abap_report|lookup_material|get_report_data)"\s*,\s*"arguments"\s*:',
     re.IGNORECASE,
 )

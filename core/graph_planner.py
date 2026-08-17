@@ -231,6 +231,7 @@ def create_planner_node(
             latest_user_prompt, 
             router_llm=router_llm
         )
+
         planner_route = routing_decision.route
         retrieval_messages = []
 
@@ -347,6 +348,8 @@ def create_planner_node(
             rag_service=rag_service,
             rag_top_k=rag_top_k,
         )
+
+        print(f"\n=== PLANNER DECISION ===\n{routing_decision}\n=== END PLANNER DECISION ===\n")
 
         planner_result = _build_planner_result(
             planner_input=planner_input,

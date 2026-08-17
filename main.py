@@ -193,8 +193,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     output_group.add_argument(
-        "--no-resume",
-        dest="no_resume",
+        "--resume",
+        dest="resume",
         action="store_true",
         help="Disable resuming from the session file.",
     )
@@ -222,26 +222,43 @@ def load_session(session_path: str) -> tuple[str, list]:
             print(f"[Warning] Failed to load session file: {e}", file=sys.stderr)
     return "", []
 
-def save_session(session_path: str, rolling_summary: str, history: list):
-    """Saves rolling_summary and message history to the session file."""
-    # Ensure workspace directory exists before saving
-    #os.makedirs(workspace_dir, exist_ok=True)
-    session_path = Path(session_path)
-    
-    try:
+def save_session(
+    session_path: str,
+    rolling_summary: str,
+    history: list,
+    debug: dict | None = None,
+):
+    """Save conversation state and optional runtime debug information."""
 
-        # Convert HumanMessage/AIMessage objects into serializable JSON dicts
-        serialized_history = messages_to_dict(history)
+    session_path = Path(session_path)
+
+    try:
+        session_path.parent.mkdir(parents=True, exist_ok=True)
 
         session_data = {
             "rolling_summary": rolling_summary,
-            "history": serialized_history,
+            "history": messages_to_dict(history),
         }
+
+        if debug is not None:
+            session_data["debug"] = debug
+
         with open(session_path, "w", encoding="utf-8") as f:
-            json.dump(session_data, f, indent=4, ensure_ascii=False)
+            json.dump(
+                session_data,
+                f,
+                indent=4,
+                ensure_ascii=False,
+                default=str,
+            )
+
         print(f"\n[Info] Session state saved to {session_path}")
+
     except Exception as e:
-        print(f"\n[Warning] Failed to save session state: {e}", file=sys.stderr)
+        print(
+            f"\n[Warning] Failed to save session state: {e}",
+            file=sys.stderr,
+        )
 
 def main():
     args = parse_args()
@@ -280,7 +297,7 @@ def main():
     history = []
     rolling_summary = ""
 
-    if not args.no_resume:
+    if args.resume:
         rolling_summary, history = load_session(settings["session_file"])
 
     try:

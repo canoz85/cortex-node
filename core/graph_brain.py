@@ -274,7 +274,6 @@ def create_brain_node(
                 brain_input=brain_input,
                 retrieval_messages=retrieval_messages,
                 execution_brief=execution_brief,
-                recent_history=brain_input.context.recent_history,
             )
 
         return _BrainExecutionContext(
@@ -289,7 +288,7 @@ def create_brain_node(
         system_prompt: str,
         execution_brief: str | None,
         retrieval_messages: list[SystemMessage],
-        history: list,
+        user_request: str,
     ) -> list[BaseMessage]:
     
         context_messages: list[BaseMessage] = [
@@ -301,9 +300,10 @@ def create_brain_node(
         if execution_brief:
             context_messages.append(SystemMessage(content=execution_brief))
 
-        latest = latest_human_message(history)
-        if latest is not None:
-            context_messages.append(latest)
+        if user_request:
+            context_messages.append(
+                HumanMessage(content=user_request)
+            )
 
         return context_messages
     
@@ -509,7 +509,6 @@ def create_brain_node(
         brain_input: BrainInput,
         retrieval_messages: list[SystemMessage],
         execution_brief: str | None,
-        recent_history: list[str],
 
     ) -> list[BaseMessage]:
         """Build the message list used for tool execution and action-required turns."""
@@ -518,7 +517,7 @@ def create_brain_node(
             system_prompt=system_prompt,
             execution_brief=execution_brief,
             retrieval_messages=retrieval_messages,
-            history=recent_history,
+            user_request=brain_input.context.user_request,
         )
 
         pre_messages.extend(
@@ -711,6 +710,7 @@ def create_brain_node(
 
         elif execution_context.decision.tool_completed:
             brain_result = _build_tool_completed_result(response=response)
+            response = None
 
             # response, brain_result = _execute_tool_completed(
             #     execution_context=execution_context,

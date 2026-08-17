@@ -119,9 +119,7 @@ def run_prompt(
 
     final_messages = list(initial_state["messages"])
     metrics = RunMetrics()
-    seq = 0
     from_node = ""
-    last_text = ""
 
     events = app.stream(initial_state)
 
@@ -130,7 +128,9 @@ def run_prompt(
             if not isinstance(value, dict):
                 continue
 
-            # seq += 1
+            node_messages = value.get("messages")
+            if node_messages:
+                final_messages.extend(node_messages)
 
             node_update  = extract_node_update(
                 from_node=from_node,
