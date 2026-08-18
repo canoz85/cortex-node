@@ -101,7 +101,7 @@ def create_brain_node(
     tool_brain_llm: ChatOllama,
     agent_system_prompt: str,
     final_answer_system_prompt: str,
-    tool_completed_system_prompt: str,
+    step_completed_system_prompt: str,
     casual_system_prompt: str,
     tools_set: Set[str],
     show_raw_llm: bool,
@@ -236,7 +236,7 @@ def create_brain_node(
     ) -> _BrainExecutionContext:
         
         execution_policy = decide_brain_execution(brain_input)
-        if execution_policy.final_answer:
+        if execution_policy.is_final_answer:
             llm = brain_llm
             system_prompt = final_answer_system_prompt
             messages = _build_final_answer_messages(
@@ -244,28 +244,28 @@ def create_brain_node(
                 brain_input=brain_input,
             )
 
-        elif execution_policy.tool_completed:
+        elif execution_policy.is_step_completed:
             llm = brain_llm
-            system_prompt = tool_completed_system_prompt
-            messages = _build_tool_completed_messages(
+            system_prompt = step_completed_system_prompt
+            messages = _build_step_completed_messages(
                 system_prompt=system_prompt,
                 brain_input=brain_input,
             )
         else:
-            execution_brief = ""
-            if execution_policy.action_required:
+            instruction_brief = ""
+            if execution_policy.has_action:
                 llm = tool_brain_llm
                 system_prompt = agent_system_prompt
 
-                if execution_policy.execution_brief:
-                    execution_brief = execution_policy.execution_brief
+                if execution_policy.instruction_brief:
+                    instruction_brief = execution_policy.instruction_brief
             else:
                 llm = brain_llm
                 system_prompt = casual_system_prompt    
 
             retrieval_messages = (
                 brain_input.context.retrieval_messages
-                if execution_policy.include_retrieval
+                if execution_policy.needs_retrieval
                 else ()
             )
             
@@ -273,7 +273,7 @@ def create_brain_node(
                 system_prompt=system_prompt,
                 brain_input=brain_input,
                 retrieval_messages=retrieval_messages,
-                execution_brief=execution_brief,
+                instruction_brief=instruction_brief,
             )
 
         return _BrainExecutionContext(
@@ -286,7 +286,7 @@ def create_brain_node(
     def _build_context_messages(
         *,
         system_prompt: str,
-        execution_brief: str | None,
+        instruction_brief: str | None,
         retrieval_messages: list[SystemMessage],
         user_request: str,
     ) -> list[BaseMessage]:
@@ -297,8 +297,8 @@ def create_brain_node(
             # *rolling_summary_message(rolling_summary),
         ]
 
-        if execution_brief:
-            context_messages.append(SystemMessage(content=execution_brief))
+        if instruction_brief:
+            context_messages.append(SystemMessage(content=instruction_brief))
 
         if user_request:
             context_messages.append(
@@ -433,7 +433,7 @@ def create_brain_node(
 
         return messages
 
-    def _build_tool_completed_messages(
+    def _build_step_completed_messages(
         *,
         system_prompt: str,
         brain_input: BrainInput,
@@ -449,14 +449,62 @@ def create_brain_node(
             messages.append(SystemMessage(content=execution_brief))
 
         messages.extend(
-            _build_tool_progress_messages(
+            _build_step_progress_messages(
                 brain_input=brain_input,
             )
         )
 
         return messages
 
-    def _build_tool_progress_messages(
+    # def _build_tool_progress_messages(
+    #     *,
+    #     brain_input: BrainInput,
+    # ) -> list[SystemMessage]:
+    #     history = brain_input.tool_execution_history
+    #     if not history:
+    #         return []
+
+    #     active_step_id = brain_input.active_step.step_id if brain_input.active_step is not None else ""
+
+    #     current_step_records: list[dict[str, Any]] = []
+    #     previous_successful_records: list[dict[str, Any]] = []
+
+    #     for record in history:
+    #         normalized = {
+    #             "request_id": record.result.request_id,
+    #             "step_id": record.step_id,
+    #             "tool_name": record.tool_name,
+    #             "arguments": record.arguments,
+    #             "signature": record.result.signature,
+    #             "success": record.result.success,
+    #             "message": record.result.message,
+    #             "rendered_output": record.result.rendered_output,
+    #             "data": record.result.data,
+    #             "error_code": record.result.error_code,
+    #         }
+
+    #         if record.step_id == active_step_id:
+    #             current_step_records.append(normalized)
+    #         elif record.result.success:
+    #             previous_successful_records.append(normalized)
+
+    #     payload = {
+    #         "active_step_id": active_step_id,
+    #         "current_step_tool_records": current_step_records,
+    #         "previous_successful_tool_records": previous_successful_records,
+    #     }
+
+    #     return [
+    #         SystemMessage(
+    #             content=(
+    #                 "Tool execution progress (structured):\n"
+    #                 f"{json.dumps(payload, ensure_ascii=True)}"
+    #             )
+    #         )
+    #     ]
+
+
+    def _build_step_progress_messages(
         *,
         brain_input: BrainInput,
     ) -> list[SystemMessage]:
@@ -464,41 +512,197 @@ def create_brain_node(
         if not history:
             return []
 
-        active_step_id = brain_input.active_step.step_id if brain_input.active_step is not None else ""
+        max_current_records = 8
+        max_prior_records = 12
+        max_text_chars = 4000
+        max_list_items = 100
 
-        current_step_records: list[dict[str, Any]] = []
-        previous_successful_records: list[dict[str, Any]] = []
+        active_step = brain_input.active_step
+        active_step_id = active_step.step_id if active_step is not None else None
 
-        for record in history:
-            normalized = {
-                "request_id": record.result.request_id,
-                "step_id": record.step_id,
-                "tool_name": record.tool_name,
-                "arguments": record.arguments,
-                "signature": record.result.signature,
-                "success": record.result.success,
-                "message": record.result.message,
-                "rendered_output": record.result.rendered_output,
-                "data": record.result.data,
-                "error_code": record.result.error_code,
+        def truncate_text(value: str) -> tuple[str, bool]:
+            text = value.strip()
+            if len(text) <= max_text_chars:
+                return text, False
+
+            return (
+                f"{text[:max_text_chars]}\n...[truncated]",
+                True,
+            )
+
+        def sanitize_stderr(value: str) -> str:
+            lines = value.splitlines()
+            useful_lines: list[str] = []
+
+            for line in lines:
+                lowered = line.lower()
+
+                if (
+                    "debugpy" in lowered
+                    or "pydevd" in lowered
+                    or "debugpy._vendored" in lowered
+                    or "pydevd_frame_evaluator" in lowered
+                ):
+                    continue
+
+                useful_lines.append(line)
+
+            sanitized = "\n".join(useful_lines).strip()
+            truncated, _ = truncate_text(sanitized)
+            return truncated
+
+        def bounded_value(
+            value: Any,
+            *,
+            field_name: str | None = None,
+        ) -> Any:
+            if isinstance(value, str):
+                text, was_truncated = truncate_text(value)
+
+                if field_name == "content" and was_truncated:
+                    return {
+                        "value": text,
+                        "content_chars": len(value),
+                        "content_truncated": True,
+                    }
+
+                return text
+
+            if isinstance(value, dict):
+                bounded: dict[str, Any] = {}
+
+                for key, item in value.items():
+                    key_text = str(key)
+
+                    if key_text == "stderr" and isinstance(item, str):
+                        bounded[key_text] = sanitize_stderr(item)
+                    else:
+                        bounded[key_text] = bounded_value(
+                            item,
+                            field_name=key_text,
+                        )
+
+                return bounded
+
+            if isinstance(value, (list, tuple)):
+                bounded_items = [
+                    bounded_value(item)
+                    for item in value[:max_list_items]
+                ]
+
+                if len(value) > max_list_items:
+                    bounded_items.append(
+                        f"... {len(value) - max_list_items} additional items omitted"
+                    )
+
+                return bounded_items
+
+            return value
+
+        def evidence_for(record: Any) -> Any:
+            result = record.result
+
+            # Prefer structured data. Fall back to rendered output only when
+            # the tool did not produce structured data.
+            if result.data is not None:
+                return bounded_value(result.data)
+
+            rendered_output = (result.rendered_output or "").strip()
+            if rendered_output:
+                return bounded_value(rendered_output)
+
+            return None
+
+        def success_record(record: Any) -> dict[str, Any]:
+            payload: dict[str, Any] = {
+                "tool": record.tool_name,
+                "args": bounded_value(record.arguments),
             }
 
+            evidence = evidence_for(record)
+            if evidence is not None:
+                payload["evidence"] = evidence
+
+            return payload
+
+        def failure_record(record: Any) -> dict[str, Any]:
+            result = record.result
+            error: dict[str, Any] = {}
+
+            if result.error_code:
+                error["code"] = result.error_code
+
+            if result.message:
+                message, _ = truncate_text(result.message)
+                error["message"] = message
+
+            if isinstance(result.data, dict):
+                stderr = result.data.get("stderr")
+                if isinstance(stderr, str) and stderr.strip():
+                    error["stderr"] = sanitize_stderr(stderr)
+
+                details = {
+                    key: value
+                    for key, value in result.data.items()
+                    if key not in {"stderr", "stdout", "traceback"}
+                }
+
+                if details:
+                    error["details"] = bounded_value(details)
+
+            payload: dict[str, Any] = {
+                "step": record.step_id,
+                "tool": record.tool_name,
+                "args": bounded_value(record.arguments),
+                "error": error,
+            }
+
+            return payload
+
+        current_attempts: list[dict[str, Any]] = []
+        prior_facts: list[dict[str, Any]] = []
+        prior_failures: list[dict[str, Any]] = []
+
+        for record in history:
+            result = record.result
+
             if record.step_id == active_step_id:
-                current_step_records.append(normalized)
-            elif record.result.success:
-                previous_successful_records.append(normalized)
+                if result.success:
+                    current_attempts.append(success_record(record))
+                else:
+                    current_attempts.append(failure_record(record))
+                continue
+
+            if result.success:
+                prior_facts.append(
+                    {
+                        "step": record.step_id,
+                        **success_record(record),
+                    }
+                )
+            else:
+                prior_failures.append(failure_record(record))
 
         payload = {
-            "active_step_id": active_step_id,
-            "current_step_tool_records": current_step_records,
-            "previous_successful_tool_records": previous_successful_records,
+            "schema": 1,
+            "active_step": (
+                {
+                    "id": active_step.step_id,
+                    "title": active_step.title,
+                }
+                if active_step is not None
+                else None
+            ),
+            "current_attempts": current_attempts[-max_current_records:],
+            "prior_facts": prior_facts[-max_prior_records:],
+            "prior_failures": prior_failures[-max_prior_records:],
         }
 
         return [
             SystemMessage(
                 content=(
-                    "Tool execution progress (structured):\n"
-                    f"{json.dumps(payload, ensure_ascii=True)}"
+                    "Execution evidence v1:\n"
+                    f"{json.dumps(payload, ensure_ascii=True, separators=(',', ':'))}"
                 )
             )
         ]
@@ -508,14 +712,14 @@ def create_brain_node(
         system_prompt: str,
         brain_input: BrainInput,
         retrieval_messages: list[SystemMessage],
-        execution_brief: str | None,
+        instruction_brief: str | None,
 
     ) -> list[BaseMessage]:
         """Build the message list used for tool execution and action-required turns."""
 
         pre_messages = _build_context_messages(
             system_prompt=system_prompt,
-            execution_brief=execution_brief,
+            instruction_brief=instruction_brief,
             retrieval_messages=retrieval_messages,
             user_request=brain_input.context.user_request,
         )
@@ -525,7 +729,7 @@ def create_brain_node(
         )
 
         pre_messages.extend(
-            _build_tool_progress_messages(
+            _build_step_progress_messages(
                 brain_input=brain_input,
             )
         )
@@ -559,7 +763,7 @@ def create_brain_node(
     #         execution_policy=execution_policy,
     #     )
 
-    def _build_tool_completed_result(
+    def _build_step_completed_result(
         *,
         response: AIMessage,
     ) -> BrainResult:
@@ -602,7 +806,7 @@ def create_brain_node(
 
         return _build_answer_result(response)
 
-    def _execute_tool_completed(
+    def _execute_step_completed(
         *,
         execution_context: _BrainExecutionContext,
         brain_input: BrainInput,
@@ -616,7 +820,7 @@ def create_brain_node(
                 execution_context=execution_context,
             )
 
-        return response, _build_tool_completed_result(
+        return response, _build_step_completed_result(
             response=response,
         )
 
@@ -705,17 +909,13 @@ def create_brain_node(
             execution_context=execution_context,
         )
 
-        if execution_context.decision.final_answer:
+        if execution_context.decision.is_final_answer:
             brain_result = _build_answer_result(response)
 
-        elif execution_context.decision.tool_completed:
-            brain_result = _build_tool_completed_result(response=response)
+        elif execution_context.decision.is_step_completed:
+            brain_result = _build_step_completed_result(response=response)
             response = None
 
-            # response, brain_result = _execute_tool_completed(
-            #     execution_context=execution_context,
-            #     brain_input=brain_input,
-            # )
         else:
             brain_result = _build_brain_result(
                 brain_input=brain_input,
@@ -743,7 +943,7 @@ def create_brain_node(
                 llm=llm,
                 pre_messages=pre_messages,
                 response=response,
-                action_required=execution_policy.action_required,
+                action_required=execution_policy.has_action,
                 brain_input=brain_input,
             )
             # todo: implement repeated signature policy enforcement for action-required turns
@@ -751,7 +951,7 @@ def create_brain_node(
             #     llm=llm,
             #     pre_messages=pre_messages,
             #     response=response,
-            #     action_required=execution_policy.action_required,
+            #     action_required=execution_policy.has_action,
             #     state=state,
             #     brain_input=brain_input,
             # )

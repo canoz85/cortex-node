@@ -1,358 +1,173 @@
 # CortexNode
 
-Local-first AI software agent built with LangGraph + Ollama.
+Local-first AI agent built with LangGraph + Ollama. The current implementation is a controller-driven execution system: the planner proposes work, the controller decides what happens next, and the brain only executes the currently active step.
 
-CortexNode runs a bounded reasoning loop that can call sandboxed tools for file operations, Python execution, git inspection, runtime info, and future SCADA integration.
+## Current execution model
 
-## Features
+The live graph is centered on the protocol and controller, not a loose brain-led loop.
 
-- Local LLM orchestration with `ChatOllama`
-- Tool-calling workflow with `LangGraph` (`planner -> brain -> tools -> capture_tool_output -> brain`)
-- Sandboxed file tools: `list_files`, `read_file`, `write_file`, `make_directory`
-- Sandboxed Python execution tool: `run_python`
-- Git read tools: `git_status`, `git_diff`, `git_log`, `git_show`
-- Runtime info tools: `agent_info`, `token_usage`, `current_time`
-- Simple local RAG over `.md` and `.json` files in `knowledge/`
-- Retrieval tools: `rag_search`, `rag_refresh_index`
-- SCADA stub tool for planned MQTT/OPC-UA integrations
-- Interactive CLI mode and one-shot prompt mode
+- `planner`: creates an `ExecutionPlan` and concrete `ExecutionStep` objects.
+- `controller`: evaluates the latest protocol state and decides the next legal action: dispatch planner, dispatch brain, run tools, summarize, or terminate.
+- `brain`: executes the single currently active step. It does not own planning, ordering, retries, or final user response.
+- `tools`: invokes the actual tool calls requested by the brain.
+- `capture_tool_output`: normalizes the tool result into structured protocol payloads.
+- `summarize_memory`: terminal summary path after execution ends.
 
-## Requirements
+The effective loop is:
 
-- Python 3.10+
-- Ollama installed and running locally
-- An available Ollama model (default: `qwen2.5-coder:14b`)
+```text
+planner -> controller -> brain -> tools -> capture_tool_output -> controller -> ...
+```
+
+`controller` decides when to continue, retry, advance to the next step, or stop. The controller is the authority for execution decisions, step transitions, and termination conditions.
+
+## What the current code does
+
+### Planner / Controller / Brain split
+
+The ownership boundaries are explicit in the active prompts and protocol contracts:
+
+- Planner owns the execution plan and step definitions.
+- Controller owns execution order, iterations, retries, stopping conditions, and final user-visible completion logic.
+- Brain owns only the current active step and returns structured outcomes for the controller to consume.
+
+This is enforced in the runtime prompts and in `core/protocol/controller.py`, which validates exactly one worker result at a time and chooses the next legal transition.
+
+### Active-step execution model
+
+The brain operates in a strict active-step mode:
+
+- It only works on the current `active_step`.
+- It may request a tool call or return a step-level outcome.
+- It is not allowed to re-order the plan or decide the final answer on its own.
+
+The execution brief passed to the brain includes the full plan and highlights the active step. This keeps the model focused on the current objective instead of broad plan improvisation.
+
+### Step Completion Checker
+
+The project includes a dedicated completion check path driven by `STEP_COMPLETED_SYSTEM_PROMPT` in `core/graph_constants.py`.
+
+Its job is to answer one question only: is the current active step complete or unreachable?
+
+The checker is instructed to:
+
+- evaluate the accumulated evidence across the active step, not only the newest result;
+- treat prior successful tool results as valid unless later evidence directly contradicts them;
+- return `YES` if the intent is satisfied or if it is demonstrably unreachable;
+- return `NO` if the step is still incomplete or requires additional verification.
+
+The check is intentionally narrow: it does not decide plan strategy or final messaging. The controller interprets that answer and advances or terminates execution.
+
+### Evidence semantics
+
+The brain assembles cumulative execution evidence from `tool_execution_history`, including prior successful facts and prior failures. Important semantics in the current code:
+
+- a later failed tool call does not invalidate an earlier successful result;
+- evidence is cumulative across the active step;
+- successful prior execution remains relevant unless newer evidence explicitly disproves it;
+- a step is not considered complete simply because the last tool call failed or because only the latest output is examined.
+
+This is reflected in the `Execution evidence v1` block built in `core/graph_brain.py` and in the completion-checker prompt text.
+
+### Completion vs. unreachability
+
+The completion checker distinguishes two ways a step can be treated as terminal:
+
+- `completed`: the original step intent has been satisfied;
+- `unreachable`: the intent cannot be achieved under the current constraints and no meaningful allowed action remains.
+
+Both are considered terminal states for the active step, but they are not the same outcome. A failed tool alone is not enough to mark a step as satisfied or unreachable.
+
+## Controller ownership
+
+The controller is the execution owner in the current implementation:
+
+- it enforces max reasoning limits;
+- it decides when to request a planner rework;
+- it turns brain `TOOL_REQUEST` into tool execution;
+- it processes tool success/failure and routes back to the brain;
+- it advances to the next step when a step is complete;
+- it terminates on max-step or failure conditions.
+
+The controller is also the location where tool result mismatches and invalid continuations are rejected. This is the authoritative state transition layer.
+
+## Protocol / data contracts
+
+The project has an explicit protocol layer under `core/protocol/`.
+
+Core types include:
+
+- `ExecutionPlan` and `ExecutionStep`
+- `ExecutionCursor`
+- `ToolRequest` and `ToolResult`
+- `BrainInput` and `BrainResult`
+- `ControllerInput` and `ControllerDecision`
+- `ExecutionState` with `protocol_visible` and `working` sections
+
+The key design choice is that `ExecutionState.protocol_visible` is the authoritative accepted state, while `working` holds runtime orchestration metadata. The controller writes the accepted-state transitions; the workers consume typed input contracts rather than ad hoc state dictionaries.
 
 ## Setup
 
-### 1) Create and activate virtual environment
+### Requirements
 
-Windows PowerShell:
+- Python 3.10+
+- Ollama running locally
+- A model available in Ollama (default examples in the project use `qwen2.5-coder:14b` or `gpt-oss:20b` depending on settings)
 
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-```
-
-### 2) Install dependencies
+### Install
 
 ```bash
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-### 3) Ensure Ollama model is available
+### Run
 
-```bash
-ollama pull qwen2.5-coder:14b
-```
-
-## Run
-
-### Interactive mode
+Interactive mode:
 
 ```bash
 python main.py
 ```
 
-### Single prompt mode
+Single prompt:
 
 ```bash
 python main.py --prompt "Create hello.py in the workspace and run it"
 ```
 
-### Custom model and workspace
+Optional config is still supported through the CLI and environment variables. See `main.py` and the project config handling for the current defaults.
 
-```bash
-python main.py --model qwen2.5-coder:14b --workspace workspace
-```
+## Tools and capabilities
 
-### Custom knowledge folder
+CortexNode currently exposes a sandboxed tool set including:
 
-```bash
-python main.py --knowledge-dir knowledge
-```
+- file system: `list_files`, `read_file`, `write_file`, `make_directory`
+- Python execution: `run_python`, `install_package`
+- git: `git_status`, `git_log`, `git_show`, `git_diff`
+- runtime: `agent_info`, `token_usage`, `current_time`
+- knowledge: `rag_search`, `rag_refresh_index`
+- SAP / SCADA / vision tools depending on the active tool bundle
 
-### Optional config file (JSON)
+## Quality checks
 
-```bash
-python main.py --config config.json
-```
-
-Config merge order is: `defaults -> environment -> config file -> CLI`.
-
-Example `config.json`:
-
-```json
-{
-    "workspace": "workspace",
-    "knowledge_dir": "knowledge",
-    "model": "qwen2.5-coder:14b",
-    "embedding_model": "nomic-embed-text",
-    "rag_top_k": 4,
-    "raw_llm": false,
-    "show_summary": false,
-    "log_level": "INFO",
-    "json_logs": false
-}
-```
-
-## CLI Arguments
-
-- `--workspace`: Sandbox directory used by tools (default: `workspace`)
-- `--knowledge-dir`: Folder used as the RAG knowledge base (default: `knowledge`)
-- `--model`: Ollama model name (default: `qwen2.5-coder:14b`)
-- `--embedding-model`: Ollama embedding model for retrieval (default: `nomic-embed-text`)
-- `--rag-top-k`: Number of retrieved knowledge chunks per query (default: `4`)
-- `--raw-llm` / `--no-raw-llm`: Enable or disable raw LLM debug output (default: disabled)
-- `--show-summary` / `--no-show-summary`: Enable or disable rolling summary output
-- `--log-level`: Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
-- `--json-logs` / `--no-json-logs`: Enable or disable JSON log output
-- `--config`: Optional JSON config file
-- `--prompt`: Run one prompt and exit (if omitted, interactive mode starts)
-
-### Environment variables
-
-- `CORTEX_WORKSPACE`
-- `CORTEX_KNOWLEDGE_DIR`
-- `CORTEX_MODEL`
-- `CORTEX_EMBEDDING_MODEL`
-- `CORTEX_RAG_TOP_K`
-- `CORTEX_RAW_LLM`
-- `CORTEX_SHOW_SUMMARY`
-- `CORTEX_LOG_LEVEL`
-- `CORTEX_JSON_LOGS`
-
-## Tests
-
-Run unit tests:
+Run the local test suite:
 
 ```bash
 python -m pytest
 ```
 
-Coverage is enforced via `pytest.ini` with:
-
-- `--cov=core --cov=tools`
-- `--cov-report=term-missing`
-- `--cov-fail-under=71` (baseline gate, intended to be raised over time)
-
-Ratcheting policy is configured in `.github/coverage-policy.json`.
-Run policy check manually:
-
-```bash
-python scripts/coverage_ratchet.py --coverage-json coverage.json --policy .github/coverage-policy.json
-```
-
-Run the graph-focused regression suite used during orchestration refactors:
-
-```bash
-python -m pytest tests/test_graph_nodes.py tests/test_graph_runner.py tests/test_graph_capture.py tests/test_graph_messages.py tests/test_graph_planner.py tests/test_graph_routing.py tests/test_graph_intents.py
-```
-
-## CI
-
-GitHub Actions workflow: `.github/workflows/ci.yml`
-
-CI runs:
-
-- dependency installation
-- full pytest run with coverage gate
-- benchmark skeleton smoke run (dry mode)
-- evaluation dataset validation with route/global policy checks (`.github/evaluation-policy.json`)
-
-## PR/Release Checklist
-
-Before merging a change, confirm:
-
-- Tests pass locally and in CI.
-- Coverage gate passes and ratchet status is reviewed (`benchmarks/results/coverage-ratchet.md`).
-- Benchmark smoke run passes and trend delta is checked (`benchmarks/results/trend.md`).
-- If ratchet status is ready-to-ratchet, raise `--cov-fail-under` in `pytest.ini` and update `.github/coverage-policy.json`.
-
-## Benchmark Skeleton
-
-Benchmark scenarios live in `benchmarks/scenarios.json` and are executed by `scripts/benchmark.py`.
-
-Dry-run validation (CI-safe):
-
-```bash
-python scripts/benchmark.py --cases benchmarks/scenarios.json --output benchmarks/results/local-skeleton.json
-```
-
-Live benchmark execution:
-
-```bash
-python scripts/benchmark.py --live --cases benchmarks/scenarios.json --output benchmarks/results/local-live.json
-```
-
-Generate trend markdown from benchmark result JSON files:
-
-```bash
-python scripts/benchmark_trend.py --results-dir benchmarks/results --output benchmarks/results/trend.md
-```
-
-## Evaluation Dataset And Scoring Dashboard
-
-Evaluation dataset file:
-
-- `benchmarks/evaluation_dataset.json`
-
-Run validation-only evaluation (dataset/schema check):
-
-```bash
-python scripts/run_evaluation.py --dataset benchmarks/evaluation_dataset.json
-```
-
-Run live evaluation and generate dashboard outputs:
-
-```bash
-python scripts/run_evaluation.py --live --semantic-scoring --semantic-model nomic-embed-text --dataset benchmarks/evaluation_dataset.json --policy .github/evaluation-policy.json --enforce-policy --output benchmarks/results/evaluation-latest.json --dashboard-md benchmarks/results/evaluation-dashboard.md --dashboard-json benchmarks/results/evaluation-dashboard.json
-```
-
-Use one-command local checks including evaluation:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File run-checks.ps1 -RunEvaluation -EvaluationMaxCases 3
-```
-
-## How It Works
-
-1. `main.py` parses CLI args and builds the LangGraph app.
-2. `core/graph.py` builds a small RAG index from `knowledge/` and injects retrieved context into the planner and brain prompts.
-3. The `planner` node analyzes the prompt and creates a step-by-step plan **without** taking actions.
-4. The `brain` node in `core/graph_brain.py` executes the plan by generating tool calls and delegates branching decisions to `core/graph_state_machine.py` for execution policy, action recovery, and repeated-signature enforcement.
-5. If tool calls are requested, execution routes through `ToolNode`.
-6. Tool outputs are normalized and fed back into state.
-7. Loop exits when no tool call remains or step limit is reached (max 24 steps per prompt, after planning).
-8. File-generation turns can run a verification pass and automatically repair obvious CLI argument issues before finalizing.
-
-### Brain Node Flow
-
-- Early-return fast path handles domain clarification, read-audit answers, required-first-tool enforcement, direct discussion turns, file-generation deterministic next steps, and action completion summaries.
-- Pre-message assembly builds route-aware guidance for SAP, read-only analysis, file generation, preferred tool usage, and failure recovery.
-- Response recovery normalizes pseudo-tool text, retries empty outputs, and suppresses accidental tool calls on discussion-only turns.
-- Post-response guards prevent repeated tool signatures, unsafe read-only mutations, unchanged rewrites after failed verification, fabricated workspace-analysis claims, and plain-text action loops.
-
-### Planning Phase
-
-The planner node runs first and creates a clear execution strategy. This improves:
-- **Multi-step task completion:** Complex prompts are broken into logical steps upfront
-- **Step efficiency:** Brain execution is more direct, wasting fewer steps on trial-and-error
-- **Multilingual support:** Planning clarifies non-English prompts before reasoning begins
-- **Reliability:** Reduces repetition errors and ensures all tasks are considered
-
-## Tool Output Format
-
-Tools return a human-readable summary plus structured JSON payload marker:
-
-```text
-<summary line>
-<tool_result_json>
-{ ...json payload... }
-```
-
-This format allows both readable terminal output and reliable parsing in the agent loop.
-
-## Project Structure
-
-```text
-cortex-node/
-|-- README.md
-|-- main.py
-|-- pytest.ini
-|-- requirements.txt
-|-- core/
-|   |-- __init__.py
-|   |-- error_codes.py
-|   |-- graph_capture.py
-|   |-- graph_constants.py
-|   |-- graph_context.py
-|   |-- graph_filegen_policy.py
-|   |-- graph_intents.py
-|   |-- graph_messages.py
-|   |-- graph_node_helpers.py
-|   |-- graph_nodes.py
-|   |-- graph_planner.py
-|   |-- graph_pseudo_tools.py
-|   |-- graph_response_formatters.py
-|   |-- graph_routing.py
-|   |-- graph_runner.py
-|   |-- graph_state_machine.py
-|   |-- graph_tool_events.py
-|   |-- graph.py
-|   |-- graph_brain.py
-|   |-- logging_utils.py
-|   |-- models.py
-|   |-- rag.py
-|   |-- state.py
-|   `-- tool_output.py
-|-- knowledge/
-|   |-- example_rules.md
-|   |-- examples.json
-|   |-- sap_examples.json
-|   `-- sap_rules.md
-|-- prompts/
-|   `-- systemprompts_sap.md
-|-- scripts/
-|   `-- hello.py
-|-- tests/
-|   |-- conftest.py
-|   |-- test_exec_ops.py
-|   |-- test_file_ops.py
-|   |-- test_git_ops.py
-|   |-- test_graph_capture.py
-|   |-- test_graph_intents.py
-|   |-- test_graph_messages.py
-|   |-- test_graph_node_helpers.py
-|   |-- test_graph_nodes.py
-|   |-- test_graph_planner.py
-|   |-- test_graph_routing.py
-|   |-- test_graph_runner.py
-|   |-- test_graph_tool_events.py
-|   `-- test_info_ops.py
-|-- tools/
-|   |-- __init__.py
-|   |-- exec_ops.py
-|   |-- file_ops.py
-|   |-- git_ops.py
-|   |-- info_ops.py
-|   |-- rag_ops.py
-|   |-- sap_ops.py
-|   `-- scada_ops.py
-|-- workspace/
-|   |-- sandbox files created or modified by the agent
-|   |-- is_prime.py
-|   |-- lcm_calculator.py
-|   `-- lcm_calculator_cli.py
-```
-
-### Core Module Guide
-
-- `core/graph.py`: graph wiring, model setup, and app construction.
-- `core/graph_nodes.py`: planner/brain node orchestration and execution guardrails.
-- `core/graph_brain.py`: route-aware brain execution, response recovery, and repeated-signature enforcement.
-- `core/graph_state_machine.py`: typed decision layer for routing, action recovery, retries, and signature policy.
-- `core/error_codes.py`: canonical tool error codes used for structured failures and observability.
-- `core/graph_filegen_policy.py`: deterministic file-generation verification and repair helpers.
-- `core/graph_messages.py` and `core/graph_tool_events.py`: message normalization and tool-event extraction.
-- `core/graph_response_formatters.py`: deterministic completion and info-tool response formatting.
-- `tools/`: sandboxed file, execution, git, info, RAG, SAP, and SCADA tool implementations.
-- `tests/`: focused unit and graph regression coverage for planner, brain, routing, capture, and tool behavior.
+Graph-oriented regression checks are also available in the project tests and are designed around the controller/planner/brain execution flow.
 
 ## Notes
 
+This README reflects the implementation currently in the repository, not a planned future architecture. The active behavior is controller-owned execution with explicit protocol contracts and active-step completion checks.
+
 - File and execution tools enforce sandbox boundaries relative to the selected workspace.
-- Brain execution is split across `core/graph_brain.py` (orchestration and LLM invocation) and `core/graph_state_machine.py` (pure decision functions such as `decide_brain_execution`, `decide_action_recovery`, and `decide_repeated_signature`).
-- `core/rag.py` caches search results per query and `top_k`, and `refresh()` clears that cache when the knowledge base changes.
-- `core/graph_runner.py` logs run-level observability counters on completion, including node updates, tool-call counts, tool-result counts, duration, stop reason, and `error_counts` grouped by error code.
-- Git tools execute in the selected workspace directory and return stdout/stderr/exit code.
-- `current_time` is the preferred path for time/date questions to avoid guessed values.
-- Generated files and verification artifacts are created inside the sandboxed `workspace/` directory.
-- SCADA integrations are currently placeholders and not yet connected to real PLC/telemetry endpoints.
-
-## Best Practices for Prompts
-
-- **Use English:** Simpler prompts in English work best; complex non-ASCII text may confuse tokenization.
+- The controller and protocol layer are the authoritative execution state path; the brain is intentionally scoped to the active step.
+- The runtime still includes RAG, git, file, runtime, SAP, and SCADA tool bundles depending on the active setup.
+- Current evidence handling is cumulative and explicit: failed later tool calls do not automatically invalidate earlier successful results for the same step.
+- The project may still have legacy references in some prompts or historical notes, but the current execution logic is the protocol-driven controller model described above.
 - **One task per prompt:** Bundle logically related steps, but avoid 5+ independent operations.
 - **Be explicit:** State expected output format and verification steps clearly.
 - **Break into steps:** If your prompt requires multiple independent scripts/files, consider running them separately.

@@ -17,12 +17,12 @@ class TransitionDecision:
 
 @dataclass(frozen=True)
 class BrainExecutionDecision:
-    action_required: bool
-    include_retrieval: bool
-    reason: str
-    execution_brief: str = ""  
-    final_answer: bool = False
-    tool_completed: bool = False
+    reasoning: str
+    has_action: bool = False
+    needs_retrieval: bool = False
+    is_final_answer: bool = False
+    is_step_completed: bool = False
+    instruction_brief: str = ""  
 
 @dataclass(frozen=True)
 class ActionRecoveryDecision:
@@ -262,36 +262,26 @@ def decide_brain_execution(
 
     if brain_input.active_plan is None:
         return BrainExecutionDecision(
-            action_required=False,
-            include_retrieval=False,
-            reason="direct_response",
-            execution_brief="",
-            final_answer=False
+            reasoning="direct_response",
         )
 
     if brain_input.active_step is None:
         return BrainExecutionDecision(
-            action_required=False,
-            include_retrieval=False,
-            final_answer=True,
-            reason="final_answer",
-            execution_brief="",
+            is_final_answer=True,
+            reasoning="final_answer",
         )
 
     if brain_input.last_tool_result is not None:
         return BrainExecutionDecision(
-            action_required=True,
-            include_retrieval=False,
-            tool_completed=True,
-            reason="tool_result",
-            execution_brief="",
+            has_action=True,
+            is_step_completed=True,
+            reasoning="tool_result",
         )
 
     return BrainExecutionDecision(
-        action_required=True,
-        include_retrieval=False,
-        reason="execution_plan",
-        execution_brief=_build_brain_execution_brief(brain_input),
+        has_action=True,
+        reasoning="execution_plan",
+        instruction_brief=_build_brain_execution_brief(brain_input),
     )
 
 

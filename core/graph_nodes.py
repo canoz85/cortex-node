@@ -23,7 +23,7 @@ def create_graph_nodes(
     final_answer_system_prompt: str,
     casual_system_prompt: str,
     sap_system_prompt: str | None,
-    tool_completed_system_prompt: str,
+    step_completed_system_prompt: str,
     tools_set: Set[str],
     show_raw_llm: bool,
 ):
@@ -45,7 +45,7 @@ def create_graph_nodes(
         brain_llm=brain_llm,
         tool_brain_llm=tool_brain_llm,
         agent_system_prompt=agent_system_prompt,
-        tool_completed_system_prompt=tool_completed_system_prompt,
+        step_completed_system_prompt=step_completed_system_prompt,
         final_answer_system_prompt=final_answer_system_prompt,
         casual_system_prompt=casual_system_prompt,
         tools_set=tools_set,
