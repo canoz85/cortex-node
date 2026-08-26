@@ -797,6 +797,8 @@ def build_controller_input(
         planner_result=planner_result,
         brain_result=brain_result,
         tool_result=tool_result,
+        retry=protocol.retry,
+        tool_execution_history=working.tool_execution_history,
     )
 
 def brain_result_to_legacy(result: BrainResult) -> dict[str, Any]:

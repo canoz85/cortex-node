@@ -244,16 +244,34 @@ class CortexController:
         ):
             return self._terminate("tool_result_request_id_mismatch")
 
-        if tool_result.success:
-            return self._dispatch_brain(
-                cursor=controller_input.cursor,
-                reason="Tool completed.",
-                clear_pending_tool_request=(pending_tool_request is not None),
+        # Evidence-driven check: consecutive failures for the same signature
+        if not tool_result.success and tool_result.signature:
+            consecutive_fails = controller_input.get_consecutive_failures(tool_result.signature)
+            max_allowed_fails = (
+                controller_input.retry.max_retries
+                if controller_input.retry.max_retries > 0
+                else 3
             )
+            if consecutive_fails >= max_allowed_fails:
+                cursor = controller_input.cursor.model_copy(
+                    update={
+                        "phase": ExecutionPhase.REPLANNING,
+                        "current_worker": WorkerRole.PLANNER,
+                    }
+                )
+                return ControllerDecision(
+                    decision_type=ControllerDecisionType.DISPATCH_PLANNER,
+                    reason=f"Repeated tool failure threshold ({consecutive_fails}) reached for {tool_result.signature}",
+                    next_worker=WorkerRole.PLANNER,
+                    requires_checkpoint=True,
+                    cursor=cursor,
+                    clear_pending_tool_request=(pending_tool_request is not None),
+                )
 
+        reason = "Tool completed." if tool_result.success else "Tool failed."
         return self._dispatch_brain(
             cursor=controller_input.cursor,
-            reason="Tool failed.",
+            reason=reason,
             clear_pending_tool_request=(pending_tool_request is not None),
         )
 

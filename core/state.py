@@ -8,7 +8,14 @@ from core.protocol.models import BrainResult, ControllerDecision, ExecutionState
 
 
 class AgentState(TypedDict, total=False):
-    """Shared state for the CortexNode reasoning loop."""
+    """Shared transport state container for the CortexNode reasoning loop.
+
+    State Isolation Policy (Phase 4):
+    - `execution_state` (ExecutionState) is the authoritative, immutable state container.
+    - Workers (Planner, Brain, Controller, Capture) read protocol input models assembled
+      from `execution_state` and `tool_execution_history` evidence log.
+    - Legacy keys are preserved for transport compatibility with graph runners.
+    """
 
     messages: Annotated[list[BaseMessage], add_messages]
     last_tool_output: dict[str, Any] | str

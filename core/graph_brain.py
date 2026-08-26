@@ -233,8 +233,8 @@ def create_brain_node(
         """
         if getattr(response, "tool_calls", None):
             return response
-        
-        history = brain_input.context.recent_history
+
+        history = brain_input.tool_execution_history
 
         completion = format_action_completion_response(history)
         if completion:
@@ -675,6 +675,28 @@ def create_brain_node(
                 evidence = evidence_for(record)
                 if evidence is not None:
                     payload["evidence"] = evidence
+
+            result = record.result
+            if getattr(result, "integrity", None) and result.integrity.is_truncated:
+                payload["integrity"] = {
+                    "is_truncated": True,
+                    "original_bytes": result.integrity.original_bytes,
+                    "captured_bytes": result.integrity.captured_bytes,
+                }
+
+            if getattr(result, "pagination", None) and result.pagination and result.pagination.has_more:
+                payload["pagination"] = {
+                    "has_more": True,
+                    "offset": result.pagination.offset,
+                    "limit": result.pagination.limit,
+                    "total_items": result.pagination.total_items,
+                }
+
+            if getattr(record, "artifacts", None) and record.artifacts:
+                payload["artifacts"] = [
+                    {"path": art.path, "action": art.action}
+                    for art in record.artifacts
+                ]
 
             return payload
 

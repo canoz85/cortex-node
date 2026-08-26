@@ -21,8 +21,26 @@ def _shell_preview_for_run_python(args: dict) -> str:
     return " ".join(piece for piece in pieces if piece)
 
 
-def format_action_completion_response(history: list) -> str | None:
-    events = current_turn_tool_events(history)
+def format_action_completion_response(history: Sequence[Any] | list) -> str | None:
+    if not history:
+        return None
+
+    from core.protocol.models import ToolExecutionRecord
+
+    events: list[dict] = []
+    if history and isinstance(history[0], ToolExecutionRecord):
+        for rec in history:
+            unwrapped = rec.result.data if isinstance(rec.result.data, dict) else {}
+            events.append({
+                "name": rec.tool_name,
+                "args": rec.arguments,
+                "success": rec.result.success,
+                "result": rec.result,
+                "unwrapped": unwrapped,
+            })
+    else:
+        events = current_turn_tool_events(list(history))
+
     if not events:
         return None
 

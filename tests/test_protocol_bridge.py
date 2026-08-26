@@ -161,3 +161,111 @@ def test_tool_result_content_integrity_and_artifacts():
     assert res.pagination.has_more is True
     assert res.pagination.total_items == 10000
     assert res.pagination.offset == 0
+
+
+def test_controller_input_evidence_predicates_and_consecutive_failures():
+    rec1 = ToolExecutionRecord(
+        step_id="step-1",
+        tool_name="read_file",
+        arguments={"path": "a.txt"},
+        result=ToolResult(
+            request_id="req-1",
+            signature="read_file:{\"path\":\"a.txt\"}",
+            success=False,
+            message="Error reading file",
+            error_code="FILE_READ_FAILED",
+        ),
+        artifacts=(
+            ArtifactRecord(
+                artifact_id="art-1",
+                step_id="step-1",
+                path="a.txt",
+                action="modified",
+            ),
+        ),
+    )
+    rec2 = ToolExecutionRecord(
+        step_id="step-1",
+        tool_name="read_file",
+        arguments={"path": "a.txt"},
+        result=ToolResult(
+            request_id="req-2",
+            signature="read_file:{\"path\":\"a.txt\"}",
+            success=False,
+            message="Error reading file",
+            error_code="FILE_READ_FAILED",
+        ),
+    )
+    controller_input = build_controller_input({
+        "execution_state": ExecutionState(
+            protocol_visible=ProtocolVisibleState(
+                identity=ExecutionIdentity(execution_id="ex-1", protocol_version="1.0"),
+                cursor=ExecutionCursor(),
+            ),
+            working=WorkingState(
+                tool_execution_history=(rec1, rec2),
+            ),
+        )
+    })
+
+    assert len(controller_input.get_step_records("step-1")) == 2
+    assert controller_input.get_consecutive_failures("read_file:{\"path\":\"a.txt\"}") == 2
+    assert controller_input.has_successful_artifact("a.txt") is False
+
+    from core.protocol.controller import CortexController
+    ctrl = CortexController(max_reasoning_steps=10)
+
+    # Simulating a 3rd failure for the same tool signature
+    rec3 = ToolExecutionRecord(
+        step_id="step-1",
+        tool_name="read_file",
+        arguments={"path": "a.txt"},
+        result=ToolResult(
+            request_id="req-3",
+            signature="read_file:{\"path\":\"a.txt\"}",
+            success=False,
+            message="Error reading file",
+            error_code="FILE_READ_FAILED",
+        ),
+    )
+    ci3 = build_controller_input({
+        "execution_state": ExecutionState(
+            protocol_visible=ProtocolVisibleState(
+                identity=ExecutionIdentity(execution_id="ex-1", protocol_version="1.0"),
+                cursor=ExecutionCursor(),
+                pending_tool_request=ToolRequest(request_id="req-3", tool_name="read_file"),
+            ),
+            working=WorkingState(
+                last_tool_result=rec3.result,
+                tool_execution_history=(rec1, rec2, rec3),
+            ),
+        )
+    })
+    decision = ctrl.decide(ci3)
+    assert decision.decision_type.value == "dispatch_planner"
+    assert "Repeated tool failure threshold" in decision.reason
+
+
+def test_format_action_completion_and_brain_evidence_with_records():
+    from core.graph_response_formatters import format_action_completion_response
+    rec_write = ToolExecutionRecord(
+        step_id="step-1",
+        tool_name="write_file",
+        arguments={"path": "workspace/hello.py"},
+        result=ToolResult(
+            request_id="req-w",
+            success=True,
+            message="Wrote file",
+        ),
+        artifacts=(
+            ArtifactRecord(
+                artifact_id="art-1",
+                step_id="step-1",
+                path="workspace/hello.py",
+                action="created",
+            ),
+        ),
+    )
+    completion = format_action_completion_response((rec_write,))
+    assert completion is not None
+    assert "Implemented the requested changes in workspace/hello.py" in completion

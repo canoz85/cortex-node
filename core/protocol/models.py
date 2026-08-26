@@ -302,6 +302,44 @@ class ControllerInput(ImmutableProtocolModel):
     brain_result: BrainResult | None = None
     tool_result: ToolResult | None = None
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
+    tool_execution_history: tuple[ToolExecutionRecord, ...] = Field(default_factory=tuple)
+
+    def get_step_records(self, step_id: str | None = None) -> tuple[ToolExecutionRecord, ...]:
+        target_step_id = step_id or (self.active_step.step_id if self.active_step else None)
+        if not target_step_id:
+            return self.tool_execution_history
+        return tuple(r for r in self.tool_execution_history if r.step_id == target_step_id)
+
+    def get_consecutive_failures(self, signature: str | None = None) -> int:
+        count = 0
+        for record in reversed(self.tool_execution_history):
+            if signature and record.result.signature != signature:
+                continue
+            if not record.result.success:
+                count += 1
+            else:
+                break
+        return count
+
+    def has_unresolved_truncation(self, step_id: str | None = None) -> bool:
+        records = self.get_step_records(step_id)
+        if not records:
+            return False
+        latest = records[-1]
+        if latest.result.integrity.is_truncated:
+            return True
+        if latest.result.pagination is not None and latest.result.pagination.has_more:
+            return True
+        return False
+
+    def has_successful_artifact(self, path: str) -> bool:
+        for record in self.tool_execution_history:
+            if not record.result.success:
+                continue
+            for art in record.artifacts:
+                if art.path == path:
+                    return True
+        return False
 
 
 class PlannerInput(ImmutableProtocolModel):

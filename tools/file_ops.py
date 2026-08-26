@@ -116,13 +116,7 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
 
             # Format message & content for LLM visibility
             if is_truncated:
-                remaining = total_len - (safe_offset + len(chunk))
-                formatted_content = (
-                    f"{chunk}\n\n"
-                    f"--- [TRUNCATED] ---\n"
-                    f"Showing characters {safe_offset} to {safe_offset + len(chunk)} of {total_len} total.\n"
-                    f"{remaining} characters remaining. To read more, call `read_file` with path='{request.path}' and offset={safe_offset + len(chunk)}."
-                )
+                formatted_content = f"{chunk}\n\n--- [TRUNCATED] ---"
                 msg = f"Read file {request.path} (characters {safe_offset}-{safe_offset + len(chunk)} of {total_len}). File is truncated."
             else:
                 formatted_content = chunk
