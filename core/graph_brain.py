@@ -36,11 +36,10 @@ from core.graph_node_helpers import response_with_usage
 
 from core.graph_response_formatters import format_action_completion_response
 from core.graph_state_machine import (
+    ActionRecoveryKind,
     _build_brain_execution_brief,
     decide_action_recovery,
     decide_brain_execution,
-    should_fallback_after_empty_response,
-    should_retry_after_empty_response,
     BrainExecutionDecision,
 )
 from core.graph_summarize import rolling_summary_message
@@ -134,6 +133,29 @@ def create_brain_node(
             )
         )
 
+    def _retry_empty_response(
+        *,
+        llm: ChatOllama,
+        pre_messages: list[BaseMessage],
+        action_required: bool,
+        brain_input: BrainInput,
+    ) -> AIMessage:
+        retry_response = _invoke_with_trace(
+            llm=llm,
+            messages=[*pre_messages, _empty_response_retry_prompt()],
+            show_raw_llm=show_raw_llm,
+            color=ANSI_GREEN,
+        )
+
+        return _recover_response_for_action_flow(
+            llm=llm,
+            pre_messages=pre_messages,
+            response=retry_response,
+            action_required=action_required,
+            brain_input=brain_input,
+            allow_empty_retry=False,
+        )
+
     def _recover_response_for_action_flow(
         *,
         llm: ChatOllama,
@@ -141,44 +163,62 @@ def create_brain_node(
         response: AIMessage,
         action_required: bool,
         brain_input: BrainInput,
+        allow_empty_retry: bool = True,
     ) -> AIMessage:
-    
-        # Always sanitize pseudo tool text on action-required turns so raw JSON/call text
-        # is never emitted as a final brain answer.
-        recovered_action_response = recover_action_response(response, tools_set) if action_required else None
+        recovered_action_response = (
+            recover_action_response(response, tools_set)
+            if action_required
+            else None
+        )
+        response_is_empty = is_effectively_empty_response(response)
         action_recovery_decision = decide_action_recovery(
             action_required=action_required,
-            recovered_action_response_exists=(recovered_action_response is not None),
+            recovered_action_response_exists=recovered_action_response is not None,
             pseudo_tool_response_detected=is_pseudo_tool_response(response),
             generic_json_tool_response_detected=is_generic_json_tool_response(response),
+            response_is_empty=response_is_empty,
         )
 
-        if action_recovery_decision.use_recovered_action_response and recovered_action_response is not None:
-            response = recovered_action_response
-        elif action_recovery_decision.use_pseudo_fallback:
-            response = _pseudo_tool_fallback_response()
+        if action_recovery_decision.kind is ActionRecoveryKind.RECOVERED_ACTION:
+            if recovered_action_response is not None:
+                return recovered_action_response
+            return response
 
-        if action_recovery_decision.finalize_generic_json:
-            response = _finalize_from_successful_tool_context(
+        if action_recovery_decision.kind is ActionRecoveryKind.PSEUDO_TOOL_FALLBACK:
+            return _pseudo_tool_fallback_response()
+
+        if action_recovery_decision.kind is ActionRecoveryKind.GENERIC_JSON_FINALIZATION:
+            finalized_response = _finalize_from_successful_tool_context(
                 llm=llm,
                 pre_messages=pre_messages,
                 brain_input=brain_input,
                 response=response,
             )
+            if not is_effectively_empty_response(finalized_response):
+                return finalized_response
 
- 
-        if should_retry_after_empty_response(is_effectively_empty_response(response)):
-            response = _invoke_with_trace(
+            if not allow_empty_retry:
+                return _empty_response_fallback()
+
+            return _retry_empty_response(
                 llm=llm,
-                messages=[*pre_messages, _empty_response_retry_prompt()],
-                show_raw_llm=show_raw_llm,
-                color=ANSI_GREEN,
+                pre_messages=pre_messages,
+                action_required=action_required,
+                brain_input=brain_input,
             )
 
-        if should_fallback_after_empty_response(is_effectively_empty_response(response)):
-            response = _empty_response_fallback()
+        if action_recovery_decision.kind is not ActionRecoveryKind.RETRY_EMPTY:
+            return response
 
-        return response
+        if not allow_empty_retry:
+            return _empty_response_fallback()
+
+        return _retry_empty_response(
+            llm=llm,
+            pre_messages=pre_messages,
+            action_required=action_required,
+            brain_input=brain_input,
+        )
     
     def _finalize_from_successful_tool_context(
         *,
@@ -234,7 +274,8 @@ def create_brain_node(
         *, 
         brain_input: BrainInput,
     ) -> _BrainExecutionContext:
-        
+
+        instruction_brief: str | None = None
         execution_policy = decide_brain_execution(brain_input)
         if execution_policy.is_final_answer:
             llm = brain_llm
@@ -247,12 +288,15 @@ def create_brain_node(
         elif execution_policy.is_step_completed:
             llm = brain_llm
             system_prompt = step_completed_system_prompt
+            if execution_policy.instruction_brief:
+                instruction_brief = execution_policy.instruction_brief  
+
             messages = _build_step_completed_messages(
                 system_prompt=system_prompt,
                 brain_input=brain_input,
+                instruction_brief=instruction_brief
             )
         else:
-            instruction_brief = ""
             if execution_policy.has_action:
                 llm = tool_brain_llm
                 system_prompt = agent_system_prompt
@@ -437,6 +481,7 @@ def create_brain_node(
         *,
         system_prompt: str,
         brain_input: BrainInput,
+        instruction_brief: str | None = None,
     ) -> list[BaseMessage]:
 
         messages: list[BaseMessage] = [
@@ -444,9 +489,8 @@ def create_brain_node(
             HumanMessage(content=brain_input.context.user_request),
         ]
 
-        execution_brief = _build_brain_execution_brief(brain_input)
-        if execution_brief:
-            messages.append(SystemMessage(content=execution_brief))
+        if instruction_brief:
+            messages.append(SystemMessage(content=instruction_brief))
 
         messages.extend(
             _build_step_progress_messages(
@@ -512,8 +556,8 @@ def create_brain_node(
         if not history:
             return []
 
-        max_current_records = 8
-        max_prior_records = 12
+        max_current_records = 24
+        max_prior_records = 36
         max_text_chars = 4000
         max_list_items = 100
 
@@ -619,9 +663,18 @@ def create_brain_node(
                 "args": bounded_value(record.arguments),
             }
 
-            evidence = evidence_for(record)
-            if evidence is not None:
-                payload["evidence"] = evidence
+            if record.tool_name == "read_file":
+                result = record.result
+                rendered = (result.rendered_output or "").strip()
+
+                if rendered:
+                    payload["evidence"] = rendered
+                elif result.data is not None:
+                    payload["evidence"] = result.data
+            else:
+                evidence = evidence_for(record)
+                if evidence is not None:
+                    payload["evidence"] = evidence
 
             return payload
 
@@ -736,33 +789,6 @@ def create_brain_node(
 
         return pre_messages
 
-    # def _build_brain_messages(
-    #     *,
-    #     system_prompt: str,
-    #     conversation: _BrainConversationContext,
-    #     brain_input: BrainInput,
-    #     execution_policy: BrainExecutionDecision,
-    # ) -> list[BaseMessage]:
-        
-    #     if execution_policy.final_answer:
-    #         return _build_final_answer_messages(
-    #             system_prompt=system_prompt,
-    #             brain_input=brain_input,
-    #         )
-
-    #     if execution_policy.tool_completed:
-    #         return _build_tool_completed_messages(
-    #             system_prompt=system_prompt,
-    #             brain_input=brain_input,
-    #         )
-        
-    #     return _build_execution_messages(
-    #         system_prompt=system_prompt,
-    #         conversation=conversation,
-    #         brain_input=brain_input,
-    #         execution_policy=execution_policy,
-    #     )
-
     def _build_step_completed_result(
         *,
         response: AIMessage,
@@ -770,7 +796,7 @@ def create_brain_node(
 
         answer = response.content.strip().upper()
 
-        if answer == "YES":
+        if "STEP COMPLETED" in answer:
             return BrainResult(
                 outcome=BrainOutcome.STEP_COMPLETED,
                 message=response.content,
@@ -778,8 +804,10 @@ def create_brain_node(
             )
 
         return BrainResult(
-            outcome=BrainOutcome.CONTINUE,
-            message="Execution continues after tool completion.",
+            outcome=BrainOutcome.STEP_FAILED,
+            message=response.content,
+            proposed_step_status=StepStatus.FAILED,
+
         )
         
 
@@ -804,60 +832,7 @@ def create_brain_node(
                 tool_request=build_tool_request(brain_input=brain_input, response=response),
             )
 
-        return _build_answer_result(response)
-
-    def _execute_step_completed(
-        *,
-        execution_context: _BrainExecutionContext,
-        brain_input: BrainInput,
-    ) -> tuple[Any, BrainResult]:
-
-        assert brain_input.last_tool_result is not None
-
-        response = _run_brain_llm(
-                conversation=None,
-                brain_input=brain_input,
-                execution_context=execution_context,
-            )
-
-        return response, _build_step_completed_result(
-            response=response,
-        )
-
-    def _execute_step(
-        *,
-        execution_context: _BrainExecutionContext,
-        conversation: _BrainConversationContext,
-        brain_input: BrainInput,
-    ) -> tuple[AIMessage, BrainResult]:
-
-        response = _run_brain_llm(
-            conversation=conversation,
-            brain_input=brain_input,
-            execution_context=execution_context,
-        )
-
-        return (
-            response,
-            _build_brain_result(
-                brain_input=brain_input,
-                response=response,
-            ),
-        )
-
-    def _execute_final_answer(
-        *,
-        brain_input: BrainInput,
-        execution_context: _BrainExecutionContext,
-    ) -> tuple[AIMessage, BrainResult]:
-
-        response = _run_brain_llm(
-            conversation=None,
-            brain_input=brain_input,
-            execution_context=execution_context,
-        )
-
-        return response, _build_answer_result(response)
+        return _build_step_completed_result(response=response)
 
     def _run_brain_llm(
         *,
@@ -869,13 +844,6 @@ def create_brain_node(
 
         This function owns prompt construction and model invocation only.
         """
-
-        # pre_messages = _build_brain_messages(
-        #     system_prompt=execution_context.system_prompt,
-        #     conversation=conversation,
-        #     brain_input=brain_input,
-        #     execution_policy=execution_context.decision,
-        # )
 
         messages = execution_context.messages
 
@@ -912,21 +880,15 @@ def create_brain_node(
         if execution_context.decision.is_final_answer:
             brain_result = _build_answer_result(response)
 
-        elif execution_context.decision.is_step_completed:
-            brain_result = _build_step_completed_result(response=response)
-            response = None
+        # elif execution_context.decision.is_step_completed:
+        #     brain_result = _build_step_completed_result(response=response)
+        #     response = None
 
         else:
             brain_result = _build_brain_result(
                 brain_input=brain_input,
                 response=response
             )
-
-            # response, brain_result = _execute_step(
-            #     execution_context=execution_context,
-            #     conversation=conversation,
-            #     brain_input=brain_input,
-            # )
 
         return response, brain_result
 

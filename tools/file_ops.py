@@ -86,12 +86,14 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
             )
             return result.to_tool_output()
 
-    @tool
-    def read_file(path: str) -> str:
-        """Read a UTF-8 text file from inside the sandbox workspace."""
+
+    @tool("read_file", args_schema=ReadFileRequest)
+    def read_file(path: str, offset: int = 0, limit: int = 4000) -> str:
+        """Read a UTF-8 text file from inside the sandbox workspace with offset and limit support."""
         try:
-            request = ReadFileRequest(path=path)
+            request = ReadFileRequest(path=path, offset=offset, limit=limit)
             target = resolve_safe_path(workspace_root, request.path)
+
             if not target.exists() or not target.is_file():
                 result = ReadFileResult(
                     success=False,
@@ -102,14 +104,42 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
                 )
                 return result.to_tool_output()
 
-            content = target.read_text(encoding="utf-8")
+            full_content = target.read_text(encoding="utf-8")
+            total_len = len(full_content)
+            
+            # Safe bounds calculation
+            safe_offset = max(0, request.offset)
+            safe_limit = max(1, request.limit)
+            
+            chunk = full_content[safe_offset : safe_offset + safe_limit]
+            is_truncated = (safe_offset + len(chunk)) < total_len
+
+            # Format message & content for LLM visibility
+            if is_truncated:
+                remaining = total_len - (safe_offset + len(chunk))
+                formatted_content = (
+                    f"{chunk}\n\n"
+                    f"--- [TRUNCATED] ---\n"
+                    f"Showing characters {safe_offset} to {safe_offset + len(chunk)} of {total_len} total.\n"
+                    f"{remaining} characters remaining. To read more, call `read_file` with path='{request.path}' and offset={safe_offset + len(chunk)}."
+                )
+                msg = f"Read file {request.path} (characters {safe_offset}-{safe_offset + len(chunk)} of {total_len}). File is truncated."
+            else:
+                formatted_content = chunk
+                msg = f"Read file: {request.path} ({total_len} total characters)"
+
             result = ReadFileResult(
                 success=True,
-                message=f"Read file: {request.path}",
+                message=msg,
                 path=request.path,
-                content=content,
+                content=formatted_content,
+                total_chars=total_len,
+                offset=safe_offset,
+                read_chars=len(chunk),
+                is_truncated=is_truncated,
             )
             return result.to_tool_output()
+
         except Exception as exc:
             safe_path = path if isinstance(path, str) and path else ""
             result = ReadFileResult(

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from enum import Enum
 
 from langgraph.graph import END
 
@@ -24,11 +25,17 @@ class BrainExecutionDecision:
     is_step_completed: bool = False
     instruction_brief: str = ""  
 
+class ActionRecoveryKind(Enum):
+    UNCHANGED = "unchanged"
+    RECOVERED_ACTION = "recovered_action"
+    GENERIC_JSON_FINALIZATION = "generic_json_finalization"
+    PSEUDO_TOOL_FALLBACK = "pseudo_tool_fallback"
+    RETRY_EMPTY = "retry_empty"
+
+
 @dataclass(frozen=True)
 class ActionRecoveryDecision:
-    use_recovered_action_response: bool
-    use_pseudo_fallback: bool
-    finalize_generic_json: bool
+    kind: ActionRecoveryKind
     reason: str
 
 
@@ -271,12 +278,13 @@ def decide_brain_execution(
             reasoning="final_answer",
         )
 
-    if brain_input.last_tool_result is not None:
-        return BrainExecutionDecision(
-            has_action=True,
-            is_step_completed=True,
-            reasoning="tool_result",
-        )
+    # if brain_input.last_tool_result is not None:
+    #     return BrainExecutionDecision(
+    #         has_action=True,
+    #         is_step_completed=True,
+    #         reasoning="tool_result",
+    #         instruction_brief=_build_brain_execution_brief(brain_input)
+    #     )
 
     return BrainExecutionDecision(
         has_action=True,
@@ -313,6 +321,9 @@ def _build_brain_execution_brief(
             f"{marker} {index}. {step.title} – {step.description}"
         )
 
+        if current_step and step.step_id == current_step.step_id: # means marker is ">>"
+            break
+
     rendered = "\n".join(lines)
 
     if len(rendered) > 2000:
@@ -327,29 +338,36 @@ def decide_action_recovery(
     recovered_action_response_exists: bool,
     pseudo_tool_response_detected: bool,
     generic_json_tool_response_detected: bool,
+    response_is_empty: bool,
 ) -> ActionRecoveryDecision:
-    if not action_required:
+    if action_required and recovered_action_response_exists:
         return ActionRecoveryDecision(
-            use_recovered_action_response=False,
-            use_pseudo_fallback=False,
-            finalize_generic_json=False,
-            reason="non_action_route",
+            kind=ActionRecoveryKind.RECOVERED_ACTION,
+            reason="recoverable_action_response",
+        )
+
+    if action_required and generic_json_tool_response_detected:
+        return ActionRecoveryDecision(
+            kind=ActionRecoveryKind.GENERIC_JSON_FINALIZATION,
+            reason="generic_json_tool_response",
+        )
+
+    if action_required and pseudo_tool_response_detected:
+        return ActionRecoveryDecision(
+            kind=ActionRecoveryKind.PSEUDO_TOOL_FALLBACK,
+            reason="unrecoverable_pseudo_tool_response",
+        )
+
+    if response_is_empty:
+        return ActionRecoveryDecision(
+            kind=ActionRecoveryKind.RETRY_EMPTY,
+            reason="empty_response",
         )
 
     return ActionRecoveryDecision(
-        use_recovered_action_response=recovered_action_response_exists,
-        use_pseudo_fallback=(not recovered_action_response_exists and pseudo_tool_response_detected),
-        finalize_generic_json=generic_json_tool_response_detected,
-        reason="action_route_recovery",
+        kind=ActionRecoveryKind.UNCHANGED,
+        reason="no_recovery_needed",
     )
-
-
-def should_retry_after_empty_response(is_empty: bool) -> bool:
-    return is_empty
-
-
-def should_fallback_after_empty_response(is_empty: bool) -> bool:
-    return is_empty
 
 
 def decide_repeated_signature(

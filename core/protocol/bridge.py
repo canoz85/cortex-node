@@ -47,6 +47,7 @@ from .enums import (
 from .models import (
     BrainInput,
     BrainResult,
+    ContentIntegrity,
     ControllerInput,
     PlannerInput,
     PlannerResult,
@@ -59,6 +60,7 @@ from .models import (
     ExecutionState,
     ExecutionStep,
     ExecutionSummary,
+    PaginationMetadata,
     ProtocolVisibleState,
     ReplanRequest,
     RetryMetadata,
@@ -386,12 +388,29 @@ def legacy_tool_result_to_model(legacy_state: LegacyState | None) -> ToolResult 
 
     if isinstance(raw, Mapping):
         success = bool(raw.get("success") is True)
+        integrity = ContentIntegrity(
+            is_truncated=bool(raw.get("is_truncated") or raw.get("content_truncated")),
+            original_bytes=_to_int(raw.get("total_chars") or raw.get("total_items"), default=0, minimum=0),
+            captured_bytes=_to_int(raw.get("read_chars") or raw.get("returned_items"), default=0, minimum=0),
+            stdout_truncated=bool(raw.get("is_truncated") or raw.get("content_truncated")),
+        )
+        pagination = None
+        if "offset" in raw or "limit" in raw or "has_more" in raw or "is_truncated" in raw:
+            pagination = PaginationMetadata(
+                has_more=bool(raw.get("has_more") or raw.get("is_truncated")),
+                total_items=_to_int(raw.get("total_chars") or raw.get("total_items"), default=0, minimum=0),
+                returned_items=_to_int(raw.get("read_chars") or raw.get("returned_items"), default=0, minimum=0),
+                offset=_to_int(raw.get("offset"), default=0, minimum=0),
+                limit=_to_optional_int(raw.get("limit"), minimum=1),
+            )
         return ToolResult(
             request_id=request_id,
             success=success,
             message=_to_str(raw.get("message"), default=""),
             data=_json_compatible(raw.get("data")),
             error_code=_to_str(raw.get("error_code"), default="") or None,
+            integrity=integrity,
+            pagination=pagination,
         )
 
     success = bool(state.get("last_tool_success") is True)

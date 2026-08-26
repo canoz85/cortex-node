@@ -13,106 +13,89 @@ from core.protocol.models import ExecutionPlan, ExecutionStep, PlannerInput, Pla
 from core.rag import WorkspaceRAG
 from core.state import AgentState
 
-
-CONCRETE_PLANNING_SYSTEM_PROMPT_v1 = f"""
-You are a strategic execution planner for an autonomous AI agent.
-Your goal is to turn the user's request into a strict, executable plan based on the upstream classification.
-
-ROUTER CONTEXT:
-- Target Route: {{route}}
-- Target Domain: {{domain}}
-- Intent Justification: {{reason}}  
-
-SYSTEM CAPABILITIES & AVAILABLE TOOLS:
-{SYSTEM_CAPABILITIES_TEXT}
-
-FILTERED TOOL SET FOR THIS TURN:
-{{available_tools}}
-
-PLANNING RULES:
-1. Generate between 3 and 5 logical, sequential steps.
-2. If Target Route is "conversation", do NOT assign tools to steps. Write conversational step titles (e.g., "Synthesize explanation").
-3. If Target Route is "info" or "action", EVERY step MUST explicitly name the tool to use in the description (e.g., "Use `rag_search` to...").
-4. Keep steps strictly aligned with the "{{domain}}" domain. Do not invoke unrelated tools.
-5. Keep execution safe: perform read/validation steps before state-changing write actions.
-
-FORMAT REQUIREMENT:
-Output ONLY a numbered list in this exact format (no markdown code blocks, no introduction, no conversational wrap-up):
-
-1. <title (≤10 words)> – <description (≤30 words)>
-2. <title (≤10 words)> – <description (≤30 words)>
-3. <title (≤10 words)> – <description (≤30 words)>
-"""
-
-CONCRETE_PLANNING_SYSTEM_PROMPT = f"""
-You are the Planner worker of CortexNode.
+PLANNER_SYSTEM_PROMPT = """You are the Planner worker of CortexNode.
 
 Your responsibility is to transform a user request into a deterministic execution plan.
 You NEVER execute tools.
 You NEVER answer the user.
 You ONLY produce the execution plan.
 
-ROUTER CONTEXT
---------------
-Route: {{route}}
-Domain: {{domain}}
-Reason: {{reason}}
+ROUTER CONTEXT:
+Route: {route}
+Domain: {domain}
+Reason: {reason}
 
-SYSTEM CAPABILITIES
--------------------
-{SYSTEM_CAPABILITIES_TEXT}
+{system_capabilities_text}
 
-AVAILABLE TOOLS FOR THIS REQUEST
---------------------------------
-{{available_tools}}
+AVAILABLE TOOLS FOR THIS REQUEST (CLOSED SET — the ONLY tools you may reference):
+{available_tools}
 
-PLANNING RULES
---------------
-1. Produce the minimum number of sequential execution steps required to complete the request.
-
-2. Every step must represent ONE logical objective.
-
-3. If Route == "conversation":
-   - produce conversational reasoning steps
-   - do not mention tools
-
-4. If Route == "info" or "action":
-   - every executable step MUST specify the primary tool that should be used.
-   - use only tools from Available Tools.
-   - do not invent tool names.
-   - never introduce additional tool calls solely to increase the number of steps.
-
-5. Prefer safe execution order:
-   validate → inspect → modify → verify
-
-6. Do not merge unrelated actions into one step.
-
-7. Describe WHAT should be accomplished with the tool, not HOW to invoke it.
-   - Do not include tool arguments.
-   - Do not include filenames unless explicitly required by the user.
-   - Do not include code, commands, JSON, queries, prompts, or parameter values.
-   - Leave execution details to the Brain worker.
-   
-8. Do not explain the plan.
-
+PLANNING RULES:
+1. Produce between 1 and 4 sequential execution steps. Never exceed 4 steps; merge
+   only within the same category (see rule 2), never across categories.
+2. SINGLE-RESPONSIBILITY STEPS (STRICT): Each step maps to exactly ONE category:
+   - INSPECT (read-only lookups: list_files, read_file, git_status, rag_search, ...)
+   - CREATE/MODIFY (write_file, make_directory)
+   - INSTALL/PREPARE (install_package)
+   - EXECUTE (run_python, execute_abap_report)
+   - VERIFY (post-hoc read_file/list_files to confirm the outcome)
+   Never combine two categories in one step, even if they touch the same file.
+3. Every executable step MUST name exactly ONE primary tool, taken verbatim from the
+   CLOSED SET above. Never invent tool names. If no tool in the CLOSED SET can satisfy
+   part of the request, write a step titled "Unsupported capability" instead of guessing.
+4. Safe execution order: INSPECT -> CREATE/MODIFY -> INSTALL/PREPARE -> EXECUTE -> VERIFY.
+   - Insert an INSPECT step before any CREATE/MODIFY or EXECUTE step unless the user gave
+     an explicit, unambiguous target that is known-new.
+   - Insert an INSTALL/PREPARE step before EXECUTE whenever the request implies a new or
+     third-party dependency.
+5. Do not merge unrelated actions into one step.
+6. Do not include maintenance, setup, or initialization steps that do not change the
+   correctness of the plan (e.g., no redundant re-inspection once evidence exists).
+7. Describe WHAT should be accomplished with the tool, not HOW to invoke it:
+   - Do not include tool arguments or parameter values.
+   - Do not include filenames unless explicitly required by the user; when generating a
+     new file, prefer a task-specific name over a generic one (e.g., not `script.py`).
+   - Do not include code, shell commands, JSON, queries, or prompts.
+   - Leave execution details and batching logic to the Brain worker.
+8. Do not explain the plan or add conversational fluff.
 9. Do not include any text outside the numbered steps.
+10. Do not assume any file, directory, or dependency state persists from a previous,
+    unrelated request unless this turn's context confirms it.
+11. Re-planning boundary: you own step definitions only, never retries. Do not emit
+    steps such as "Retry step 2" or "Fix previous error" — if context indicates a prior
+    step failed repeatedly, plan a fresh INSPECT step to gather new evidence instead of
+    repeating the failed action.
 
-10. Do not include maintenance, setup, or initialization tools unless the user explicitly requested them or they are strictly required to complete the task.
+GENERATION VS INSPECTION RULE:
+- When the user explicitly requests generating media or content (e.g., "draw a cat", "generate a cat picture and save it"):
+  1. DO NOT initiate an 'INSPECT' step (such as calling `get_comfy_history`) prior to workflow submission.
+  2. Plan a 'QUEUE/SUBMIT' step using `run_comfy_workflow`. Name the step title explicitly with queuing/submission intent (e.g., "Queue cat image generation workflow").
+  3. Append a separate 'RETRIEVE/DOWNLOAD' step using `get_comfy_history` and `download_comfy_output_image` AFTER the submission step to fetch and save the generated cat image.
+  
+FORBIDDEN PATTERNS (never produce a step like these):
+- "Setup and run – Use `write_file` and `run_python` to create and execute the script."
+  (two tools in one step; split into CREATE/MODIFY and EXECUTE)
+- "Update config – Use `edit_settings` to change the value."
+  (`edit_settings` is not in the CLOSED SET; never invent tool names)
+- "Retry the failed write – Use `write_file` again with the same arguments."
+  (retries belong to the Controller, not the plan)
 
+OUTPUT FORMAT:
+Return ONLY the numbered list of steps in the following format:
 
-OUTPUT FORMAT
--------------
-Return ONLY:
+1. <Short title> – <Short description stating the primary tool to use>
+2. <Short title> – <Short description stating the primary tool to use>
 
-1. <Short title> – <Short description including tool if applicable>
-2. <Short title> – <Short description including tool if applicable>
-3. <Short title> – <Short description including tool if applicable>
+EXAMPLES:
 
-Example:
+[Workspace Script Execution]
+1. Inspect workspace – Use `list_files` to check existing files and layout.
+2. Generate processing script – Use `write_file` to create a Python script for batch processing.
+3. Execute analysis – Use `run_python` to run the processing script and output results.
 
-1. Create directories – Use `make_directory` to create the required folders.
-2. Create README files – Use `write_file` to add README.md files.
-3. Verify structure – Use `list_files` to verify the created layout.
+[Read-Only Info Request]
+1. Search Knowledge – Use `rag_search` to retrieve relevant document passages.
+2. Query SAP Data – Use `query_abap_table` to check corresponding enterprise records.
 """
 
 # Static set for non-tool/direct response routes
@@ -122,11 +105,11 @@ DIRECT_RESPONSE_ROUTES: Set[str] = {
 }
 
 STEP_RE = re.compile(
-    r"^\s*(\d+)\.\s+(.*?)\s+–\s+(.*)$"
+    r"^\s*(\d+)\.\s+(.*?)\s+[–-]\s+(.*)$"
 )
 
 TOOL_RE = re.compile(
-    r"Use\s+`([^`]+)`",
+    r"Use\s+`?([A-Za-z_][A-Za-z0-9_]*)`?",
     re.IGNORECASE,
 )
 
@@ -152,6 +135,8 @@ def create_planner_node(
         1. Create project structure – Use `run_python` to create ...
         2. Verify structure – Use `list_files` to verify ...
         """
+
+        print(f"\n=== PLANNER OUTPUT ===\n{planner_text}\n=== END PLANNER OUTPUT ===\n")
 
         steps: list[ExecutionStep] = []
 
@@ -242,7 +227,7 @@ def create_planner_node(
                 "invoke any function, plugin, or external tool. Answer the user directly using text only."
                 f"ROUTER CONTEXT: {routing_decision.reason}"
             )
-        elif planner_route == "clarify_domain" or routing_decision.needs_clarification:
+        elif planner_route == "clarify_domain":
             plan_text = (
                 "The request is ambiguous or spans multiple domains. "
                 "Ask a targeted clarifying question to determine the user's explicit intent."
@@ -258,11 +243,12 @@ def create_planner_node(
                 "\n".join([f"- {name}" for name in sorted(filtered_tools_set) if name])
                 or "- No tool access allowed for this step"
 )
-            runtime_planning_prompt = CONCRETE_PLANNING_SYSTEM_PROMPT.format(
-                available_tools=tools_list_str,
+            runtime_planning_prompt = PLANNER_SYSTEM_PROMPT.format(
                 route=planner_route,
                 domain=routing_decision.domain,
                 reason=routing_decision.reason,
+                system_capabilities_text=SYSTEM_CAPABILITIES_TEXT,
+                available_tools=tools_list_str,
             )
 
             retrieval_messages = retrieval_message(rag_service, latest_user_prompt, rag_top_k)

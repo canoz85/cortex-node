@@ -39,7 +39,7 @@ def is_pseudo_tool_response(message: AIMessage) -> bool:
     if getattr(message, "tool_calls", None):
         return False
     
-    return looks_like_pseudo_tool_text(str(getattr(message, "content", "")))
+    return looks_like_pseudo_tool_text(normalize_message_content(message))
 
 def _escape_newlines_inside_strings(text: str) -> str:
     """Escape literal newlines occurring inside quoted string values."""

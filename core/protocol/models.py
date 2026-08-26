@@ -163,6 +163,45 @@ class ToolInput(ImmutableProtocolModel):
 
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
 
+
+class ContentIntegrity(ImmutableProtocolModel):
+    """Explicit indicators for content bounding and truncation.
+
+    Protocol purpose: formalize content integrity and truncation metadata.
+    Runtime purpose: allow Controller and Brain to detect truncated output.
+    """
+
+    is_truncated: bool = False
+    original_bytes: int = Field(default=0, ge=0)
+    captured_bytes: int = Field(default=0, ge=0)
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+
+
+class PaginationMetadata(ImmutableProtocolModel):
+    """Pagination tracking for chunked read/list operations.
+
+    Protocol purpose: formalize chunking and pagination offset/limit metadata.
+    Runtime purpose: allow Controller to make page continuation decisions.
+    """
+
+    has_more: bool = False
+    total_items: int = Field(default=0, ge=0)
+    returned_items: int = Field(default=0, ge=0)
+    offset: int = Field(default=0, ge=0)
+    limit: int | None = None
+
+
+class ArtifactRecord(ImmutableProtocolModel):
+    """Track resource or file mutations performed during tool execution."""
+
+    artifact_id: str = Field(min_length=1)
+    step_id: str = ""
+    path: str = Field(min_length=1)
+    action: str = "modified"
+    hash_sha256: str | None = None
+
+
 class ToolResult(ImmutableProtocolModel):
     """Deterministic tool invocation outcome consumed by continuation logic.
 
@@ -179,6 +218,8 @@ class ToolResult(ImmutableProtocolModel):
     rendered_output: str = ""
     data: JsonValue = None
     error_code: str | None = None
+    integrity: ContentIntegrity = Field(default_factory=ContentIntegrity)
+    pagination: PaginationMetadata | None = None
 
 
 class ToolExecutionRecord(ImmutableProtocolModel):
@@ -187,6 +228,7 @@ class ToolExecutionRecord(ImmutableProtocolModel):
     tool_name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     result: ToolResult
+    artifacts: tuple[ArtifactRecord, ...] = Field(default_factory=tuple)
 
 
 class ReplanRequest(ImmutableProtocolModel):

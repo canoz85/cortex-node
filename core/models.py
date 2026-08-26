@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Dict, Optional, Union
 
 import json
 
@@ -35,9 +35,9 @@ class ToolSerializableModel(BaseModel):
             content = data_dict.get("content")
         if isinstance(content, str):
             path_label = str(payload.get("path", "") or data_dict.get("path", "") or "file")
-            max_chars = 4000
-            if len(content) > max_chars:
-                return f"Contents of {path_label}:\n{content[:max_chars]}\n\n...[truncated]"
+            # max_chars = 4000
+            # if len(content) > max_chars:
+            #     return f"Contents of {path_label}:\n{content[:max_chars]}\n\n...[truncated]"
             return f"Contents of {path_label}:\n{content}"
 
         if {"prompt_tokens", "completion_tokens", "total_tokens"}.issubset(data_dict.keys()):
@@ -279,7 +279,9 @@ class ReadFileRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    path: str = Field(min_length=1)
+    path: str = Field(min_length=1, description="Relative path to the file inside the workspace.")
+    offset: int = Field(default=0, ge=0, description="Character offset to start reading from.")
+    limit: int = Field(default=4000, gt=0, description="Maximum number of characters to read.")
 
 
 class ReadFileResult(ToolSerializableModel):
@@ -291,7 +293,12 @@ class ReadFileResult(ToolSerializableModel):
     message: str
     path: str
     content: str = ""
-
+    total_chars: int = 0
+    offset: int = 0
+    read_chars: int = 0
+    is_truncated: bool = False
+    error_code: str = ""
+    error_details: dict = Field(default_factory=dict)
 
 class MakeDirectoryRequest(BaseModel):
     """Validated arguments for the make_directory tool."""
@@ -309,3 +316,82 @@ class MakeDirectoryResult(ToolSerializableModel):
     success: bool
     message: str
     path: str
+
+class ComfyPromptRequest(BaseModel):
+    """Validated arguments for queueing a ComfyUI prompt workflow."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow: str = Field(
+        min_length=1,
+        description="Raw JSON string of the workflow OR relative path to a JSON file inside workspace.",
+    )
+    client_id: str | None = Field(
+        default=None,
+        description="Optional unique identifier for WebSocket client session.",
+    )
+
+
+class ComfyPromptResult(ToolSerializableModel):
+    """Structured run_comfy_workflow tool output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    message: str
+    prompt_id: str | None = None
+    node_errors: dict[str, Any] | None = None
+
+
+class ComfyHistoryRequest(BaseModel):
+    """Validated arguments for fetching ComfyUI prompt execution history."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_id: str = Field(min_length=1)
+
+
+class ComfyHistoryResult(ToolSerializableModel):
+    """Structured get_comfy_history tool output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    message: str
+    prompt_id: str
+    completed: bool = False
+    filenames: list[str] = []
+    primary_filename: str | None = None
+    outputs: dict[str, Any] | None = None
+    status_details: dict[str, Any] | None = None
+
+
+class ComfyDownloadImageRequest(BaseModel):
+    """Validated arguments for downloading an output image from ComfyUI."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(min_length=1)
+    subfolder: str = ""
+    folder_type: str = "output"
+    save_path: str = "generated_image.png"
+
+
+class ComfyDownloadImageResult(ToolSerializableModel):
+    """Structured download_comfy_output_image tool output."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success: bool
+    message: str
+    save_path: str
+
+class RunWorkflowRequest(BaseModel):
+    workflow_json: Union[str, Dict[str, Any]] = Field(
+        ..., 
+        description="ComfyUI API workflow as a serialized JSON string or direct Python dictionary mapping node IDs to inputs."
+    )
+    client_id: Optional[str] = Field(
+        default="cortex_node_agent", 
+        description="Unique identifier for the client session."
+    )

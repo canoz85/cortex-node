@@ -1,14 +1,17 @@
 from langchain_core.messages import AIMessage, HumanMessage
 
-from core.protocol.bridge import build_brain_input, build_controller_input
+from core.protocol.bridge import build_brain_input, build_controller_input, legacy_tool_result_to_model
 from core.protocol.enums import BrainOutcome, ExecutionPhase, WorkerRole
 from core.protocol.models import (
+    ArtifactRecord,
     BrainResult,
+    ContentIntegrity,
     ExecutionCursor,
     ExecutionIdentity,
     ExecutionPlan,
     ExecutionState,
     ExecutionStep,
+    PaginationMetadata,
     PlannerResult,
     ProtocolVisibleState,
     ToolExecutionRecord,
@@ -136,3 +139,25 @@ def test_build_brain_input_transfers_tool_execution_history_from_working_state()
     assert record.result.request_id == "req-1"
     assert record.step_id == "s1"
     assert record.tool_name == "list_files"
+
+
+def test_tool_result_content_integrity_and_artifacts():
+    legacy_state = {
+        "last_tool_signature": "read_file:{\"path\":\"test.txt\"}",
+        "last_tool_output": {
+            "success": True,
+            "message": "Read file test.txt",
+            "is_truncated": True,
+            "offset": 0,
+            "limit": 4000,
+            "read_chars": 4000,
+            "total_chars": 10000,
+        },
+    }
+    res = legacy_tool_result_to_model(legacy_state)
+    assert res is not None
+    assert res.integrity.is_truncated is True
+    assert res.pagination is not None
+    assert res.pagination.has_more is True
+    assert res.pagination.total_items == 10000
+    assert res.pagination.offset == 0

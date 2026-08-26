@@ -16,16 +16,20 @@ ANSI_ITALIC = "\033[3m"
 ANSI_RESET = "\033[0m"
 MAX_PSEUDO_RETRIES = 10
 
-SYSTEM_CAPABILITIES_TEXT = """SYSTEM CAPABILITIES & AVAILABLE TOOLS:
-- Time & Environment: `current_time` (real-time clock/date), `agent_info`, `token_usage`
-- File System: `list_files`, `read_file`, `write_file`, `make_directory`
-- Code Execution: `run_python`, `install_package`
-- Git Operations: `git_status`, `git_log`, `git_show`, `git_diff`
-- RAG & Knowledge: `rag_search` (semantic search), `read_knowledge_file`, `rag_refresh_index`
-- SAP Operations: `lookup_material`, `query_abap_table`, `execute_abap_report`, `get_report_data`
-- SCADA & Industrial: `scada_status` (PLC/telemetry status)
-- Vision & Multimodal: `describe_image`"""
+SYSTEM_CAPABILITIES_TEXT = """SYSTEM CAPABILITIES & AVAILABLE TOOL CATEGORIES:
+- File & Workspace: Reading/writing files, directory listing, Python script execution.
+- Source Control: Git status, history, diffs, and commits.
+- Knowledge & RAG: Semantic document search and local knowledge files.
+- SAP / Enterprise: Material lookups, ABAP table queries, report executions.
+- SCADA & Industrial: Reading PLC telemetry and SCADA system statuses.
+- Vision & Generation: Inspecting/describing images and executing ComfyUI generation workflows.
+- System Info: Real-time clock, agent status, token usages."""
 
+# STRICT STEP BOUNDARY & ACTION LOCK:
+# 1. ONE STEP AT A TIME: You are strictly isolated to the CURRENT ACTIVE STEP. 
+# 2. NO ADVANCE ACTIONS: Do NOT execute tools or logic meant for upcoming steps.
+# 3. STOP AFTER ACTION: Once you perform the single main tool execution for the active step (e.g., after calling `write_file`), you MUST IMMEDIATELY STOP and yield control by outputting `STEP COMPLETED`.
+# 4. DO NOT CHAIN: Never attempt to write a file and execute it in the same response turn.
 
 SYSTEM_PROMPT_TEMPLATE = """
 You are CortexNode Brain, an execution worker operating inside a controller-driven agent system.
@@ -52,14 +56,28 @@ CORE EXECUTION RULES:
 2. SCOPE COMPLETENESS: If the active step targets multiple entities/items (e.g., "each", "all"), cross-check with prior execution evidence to verify EVERY targeted item is processed before concluding the step.
 3. NO DUPLICATE CALLS: If a tool execution fails or yields no new data, do not repeat the exact same call with identical arguments.
 4. EVIDENCE DRIVEN: Base your next action strictly on accumulated execution results. A single successful tool execution does not automatically complete a step if remaining targets exist.
+5. ULTIMATE GOAL VS ACTIVE STEP:
+   The [human] prompt defines the global goal, but you are strictly BOUND to the scope of the CURRENT ACTIVE STEP.
+   - Once the action defined in the ACTIVE STEP TITLE is executed and evidenced, you MUST IMMEDIATELY STOP and yield control.
+   - NEVER proactively execute the next logical action required by [human] if it falls outside the ACTIVE STEP scope.
+   
+COMPLETION CHECK (Internal Reasoning):
+Ask yourself: "Has the exact objective of the ACTIVE STEP TITLE been fulfilled in `current_attempts`?"
+- IF YES: You are FORBIDDEN from generating a TOOL REQUEST. You MUST immediately output STEP COMPLETED.
+- IF NO: Issue a TOOL REQUEST for the remaining work of THIS step only.
 
 OUTPUT PROTOCOL:
 You must return EXACTLY one of the following two outputs:
 
-1. TOOL REQUEST: Required to make progress on the current active step.
-2. STEP RESULT: A concise technical summary returned to the Controller once ALL targets of the active step are fully executed. Must state what was accomplished and cite tool evidence.
+1. TOOL REQUEST: Required to make progress on the current active step. Issue a tool call.
+2. STEP RESULT: A concise technical summary returned to the Controller once ALL targets of the active step are fully executed. MUST NOT issue a tool call.
 
-Do NOT generate conversational chatter or user-facing final answers.
+STEP RESULT FORMAT:
+If NO MORE tools are required to finish the active step, write ONLY a text response starting with:
+- "STEP COMPLETED: <summary of accomplishments based on tool evidence>"
+- "STEP FAILED: <reason why step could not be completed>"
+
+CRITICAL: Do not output conversational filler. If you are done, start immediately with STEP COMPLETED or STEP FAILED.
 """
 
 CASUAL_SYSTEM_PROMPT_TEMPLATE = """You are CortexNode, a helpful and friendly assistant for software developers in CONVERSATION MODE.
@@ -123,76 +141,33 @@ RULES:
 - If a step failed and affected the overall outcome, state the failure factually without making excuses.
 """
 
-# OLD prompts for backward compatibility
 
-SYSTEM_PROMPT_TEMPLATE_v0 = """You are CortexNode, a local-first autonomous software engineering agent.
-You can reason, use tools, and iterate until the task is complete.
+BASE_GENERAL_TOOLS = {
+    "current_time", "agent_info", "token_usage", "describe_image", 
+    "scada_status", "rag_search", "read_knowledge_file", "rag_refresh_index"
+}
 
-AVAILABLE AGENT TOOLS:
-{available_tools}
-
-Runtime info:
-- Model: {model}
-- Context window: ~128k tokens
-- Sandbox workspace: {workspace_dir}
-- Knowledge folder: {knowledge_dir}
-- Max reasoning steps per prompt: {max_steps}
-Constraints:
-- Operate only inside the sandbox workspace directory.
-- Prefer Python solutions with clear, testable code.
-- For time/date requests, use the current_time tool instead of generating guessed values.
-- Use retrieved knowledge when the request matches one of the indexed examples or rules.
-- Use rag_search if you need targeted context from the knowledge folder.
-- After writing code, run it to verify behavior when possible.
-- Do not print pseudo tool calls like write_file(...). If an action is needed, emit actual tool calls.
-- If a tool call fails, do not repeat the same tool with identical arguments; choose a different next action.
-- Keep responses concise and action-oriented.
-"""
-
-FINAL_ANSWER_SYSTEM_PROMPT_v0 = """
-You are CortexNode.
-
-You are in FINAL ANSWER mode.
-
-The requested work has already been completed.
-Your only responsibility is to report the execution result.
-
-Rules:
-- Report only actions that were actually completed.
-- Base the response only on the execution context, tool results, and conversation.
-- Do not invent or infer missing information.
-- Do not generate code.
-- Do not explain how the task could be performed.
-- Do not provide tutorials, examples, or alternative solutions.
-- Do not suggest next steps unless the user explicitly requested them.
-- If a verification step was executed, include the verification result.
-- Prefer short, factual bullet points.
-- When available, include the exact output returned by the verification tool.
-- Do not use introductory phrases such as "The following actions were completed."
-"""
-# OLD prompts for backward compatibility
-
+COMFY_TOOLS = {
+    "run_comfy_workflow", "get_comfy_history", "download_comfy_output_image"
+}
 
 # Map domains and routes to allowed tool categories
 DOMAIN_TOOL_MAP: Dict[str, Set[str]] = {
-    "python": {
+    "workspace": {
         "run_python", "install_package", "list_files", "read_file", 
         "write_file", "make_directory", "git_status", "git_log", 
         "git_show", "git_diff"
-    },
+    } | BASE_GENERAL_TOOLS | COMFY_TOOLS,
     "sap": {
         "lookup_material", "query_abap_table", "execute_abap_report", 
-        "get_report_data", "read_knowledge_file"
-    },
-    "general": {
-        "current_time", "agent_info", "token_usage", "describe_image", 
-        "scada_status", "rag_search", "read_knowledge_file", "rag_refresh_index"
-    }
+        "get_report_data"
+    } | BASE_GENERAL_TOOLS,
+    "general": BASE_GENERAL_TOOLS | COMFY_TOOLS,
 }
 
 MUTATING_TOOLS: Set[str] = {
     "write_file", "make_directory", "install_package", 
-    "execute_abap_report", "run_python"
+    "execute_abap_report", "run_python", "run_comfy_workflow"
 }
 
 PSEUDO_TOOL_CALL_PATTERN = re.compile(

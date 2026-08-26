@@ -16,6 +16,7 @@ from core.graph_runner import run_prompt
 from core.rag import WorkspaceRAG
 from core.runtime.state_propagation import propagate_execution_state
 from core.state import AgentState
+from tools.comfy_ops import get_comfy_tools
 from tools.exec_ops import get_exec_tools
 from tools.file_ops import get_file_tools
 from tools.git_ops import get_git_tools
@@ -58,6 +59,7 @@ def _default_tool_list_factory(workspace_root: str, knowledge_root: str, rag_ser
         *get_sap_tools(workspace_root),
         *get_scada_tools(workspace_root),
         *get_vision_tools(workspace_root),
+        *get_comfy_tools(workspace_root),
     ]
 
 
@@ -156,7 +158,7 @@ def _wrap_tool_node_for_protocol_request_id(tool_node: Any) -> StateNodeCallable
 
 def build_app(
     workspace_dir: str = "workspace",
-    model: str = "gpt-oss:20b", #"qwen2.5-coder:14b",
+    model: str = "gpt-oss:20b",
     model_planner: str = "gpt-oss:20b",
     knowledge_dir: str = "knowledge",
     embedding_model: str = "nomic-embed-text",
