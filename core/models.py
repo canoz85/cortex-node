@@ -1,8 +1,11 @@
+from datetime import datetime
 from typing import Any, Dict, Optional, Union
 
 import json
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from core.protocol.enums import AsyncJobStatus
 
 
 TOOL_RESULT_MARKER = "<tool_result_json>"
@@ -120,6 +123,32 @@ class ToolResult(ToolSerializableModel):
     success: bool
     message: str
     data: dict[str, Any] | list[Any] | str | None = None
+    is_async_job: bool = False
+    async_job_id: str | None = None
+    async_job_status: AsyncJobStatus | None = None
+    async_terminal: bool = False
+    async_observed_at_utc: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_async_job_fields(self) -> "ToolResult":
+        if not self.is_async_job:
+            if any((self.async_job_id, self.async_job_status, self.async_terminal, self.async_observed_at_utc)):
+                raise ValueError("async fields require is_async_job=True")
+            return self
+
+        if not self.async_job_id:
+            raise ValueError("async_job_id is required for async jobs")
+        if self.async_job_status is None:
+            raise ValueError("async_job_status is required for async jobs")
+
+        is_terminal_status = self.async_job_status in {
+            AsyncJobStatus.COMPLETED,
+            AsyncJobStatus.FAILED,
+            AsyncJobStatus.CANCELLED,
+        }
+        if self.async_terminal != is_terminal_status:
+            raise ValueError("async_terminal must match async_job_status terminality")
+        return self
 
     @staticmethod
     def split_tool_output(raw: str) -> tuple[str | None, str]:

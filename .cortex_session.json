@@ -4,55 +4,12 @@
         {
             "type": "human",
             "data": {
-                "content": "what will be the time after 4 hours",
+                "content": "d:\\Projects\\AIOT\\cortex-node\\.venv\\Scripts\\python.exe d:/Projects/AIOT/cortex-node/main.py",
                 "additional_kwargs": {},
                 "response_metadata": {},
                 "type": "human",
                 "name": null,
-                "id": "a6cb5abe-9823-46b0-a173-16ee53b70136"
-            }
-        },
-        {
-            "type": "ai",
-            "data": {
-                "content": "Since I don't know your current local time or timezone, I can't give you an exact answer! \n\nIf you tell me what time it is for you right now, I'll calculate it for you instantly. Otherwise, you can just add 4 hours to whatever your clock says!",
-                "additional_kwargs": {},
-                "response_metadata": {
-                    "model": "gemma4:26b",
-                    "created_at": "2026-08-26T22:19:27.7934332Z",
-                    "done": true,
-                    "done_reason": "stop",
-                    "total_duration": 20706788200,
-                    "load_duration": 14519396400,
-                    "prompt_eval_count": 64,
-                    "prompt_eval_duration": 228407000,
-                    "eval_count": 788,
-                    "eval_duration": 5952426000,
-                    "logprobs": null,
-                    "model_name": "gemma4:26b",
-                    "model_provider": "ollama"
-                },
-                "type": "ai",
-                "name": null,
-                "id": "lc_run--01a04027-d3cc-7ff0-84e1-ff6e8fb3190f-0",
-                "tool_calls": [],
-                "invalid_tool_calls": [],
-                "usage_metadata": {
-                    "input_tokens": 64,
-                    "output_tokens": 788,
-                    "total_tokens": 852
-                }
-            }
-        },
-        {
-            "type": "human",
-            "data": {
-                "content": "what is time now",
-                "additional_kwargs": {},
-                "response_metadata": {},
-                "type": "human",
-                "name": null,
-                "id": "92a3015c-2aa2-4941-a146-397d83fd9843"
+                "id": "85ed2e03-5624-4230-a15c-29ea2e704624"
             }
         },
         {
@@ -63,14 +20,14 @@
                 "response_metadata": {},
                 "type": "ai",
                 "name": null,
-                "id": "f3bfcb83-2423-4005-a00f-b6a8fda40c41",
+                "id": "68d2c7ba-c08c-486c-ad50-27cd86a84534",
                 "tool_calls": [
                     {
-                        "name": "current_time",
+                        "name": "list_files",
                         "args": {
-                            "format": "%Y-%m-%d %H:%M:%S"
+                            "path": "."
                         },
-                        "id": "c9ac3e74-c6f4-4c95-a7c7-d6d1649f8c40",
+                        "id": "91de0307-cf38-4f77-b848-91ca2b95e6cb",
                         "type": "tool_call"
                     }
                 ],
@@ -81,13 +38,13 @@
         {
             "type": "tool",
             "data": {
-                "content": "Current local system time\n<tool_result_json>\n{\"display\": \"The current time is: 2026-08-27 01:20:19\", \"error_code\": null, \"error_details\": null, \"success\": true, \"message\": \"Current local system time\", \"data\": {\"iso\": \"2026-08-27T01:20:19.260873\", \"formatted\": \"2026-08-27 01:20:19\", \"format\": \"%Y-%m-%d %H:%M:%S\"}}",
+                "content": "Listing for .\n<tool_result_json>\n{\"display\": \"Files under .:\\n- __pycache__/\\n- logoss/\\n- test_workspace/\\n- analysis_script.py\\n- analyze_all_py_files.py\\n- analyze_and_report.py\\n- analyze_workspace.py\\n- audit_script.py\\n- cake.png\\n- cake.txt\\n- calc_time.py\\n- calculate_age.py\\n- cheerful_calculator.py\\n- complex_analysis.json\\n- CortexNode.png\\n- count_lines.py\\n- count_loc.py\\n- create_line_counter.py\\n- create_structure.py\\n- create_structure_cli.py\\n- fibonacci_gen.py\\n- find_json.py\\n- find_workflows_v2.py\\n- generate_project_structure.py\\n- generate_report.py\\n- generate_summary_report.py\\n- get_cwd.py\\n- get_sys_info.py\\n- loc_summary.txt\\n- NightmareBeforeChristmas_00001_.png\\n- personal.md\\n- process_logs.py\\n- project_template.txt\\n- README.md\\n- rename_script.py\\n- result.json\\n- say\\u0131lar.md\\n- security_audit.json\\n- sensor.py\\n- sudoku_game.py\\n- test_calculator.py\", \"error_code\": null, \"error_details\": null, \"success\": true, \"message\": \"Listing for .\", \"path\": \".\", \"entries\": [\"__pycache__/\", \"logoss/\", \"test_workspace/\", \"analysis_script.py\", \"analyze_all_py_files.py\", \"analyze_and_report.py\", \"analyze_workspace.py\", \"audit_script.py\", \"cake.png\", \"cake.txt\", \"calc_time.py\", \"calculate_age.py\", \"cheerful_calculator.py\", \"complex_analysis.json\", \"CortexNode.png\", \"count_lines.py\", \"count_loc.py\", \"create_line_counter.py\", \"create_structure.py\", \"create_structure_cli.py\", \"fibonacci_gen.py\", \"find_json.py\", \"find_workflows_v2.py\", \"generate_project_structure.py\", \"generate_report.py\", \"generate_summary_report.py\", \"get_cwd.py\", \"get_sys_info.py\", \"loc_summary.txt\", \"NightmareBeforeChristmas_00001_.png\", \"personal.md\", \"process_logs.py\", \"project_template.txt\", \"README.md\", \"rename_script.py\", \"result.json\", \"say\\u0131lar.md\", \"security_audit.json\", \"sensor.py\", \"sudoku_game.py\", \"test_calculator.py\"], \"is_file\": false}",
                 "additional_kwargs": {},
                 "response_metadata": {},
                 "type": "tool",
-                "name": "current_time",
-                "id": "43f52c20-0b05-464a-8adb-15256f6712ee",
-                "tool_call_id": "c27bc6dbd391:tool:45bf28fe1b7b42dcac49de0cdccb82ce",
+                "name": "list_files",
+                "id": "35147181-2035-4ed0-a3f9-15cb5fd90748",
+                "tool_call_id": "e6d2cb6afde1:tool:ab7b1c359f8e4fc4b5b48ff368b4154e",
                 "artifact": null,
                 "status": "success"
             }
@@ -95,76 +52,33 @@
         {
             "type": "ai",
             "data": {
-                "content": "STEP COMPLETED: The current time is 2026-08-27 01:20:19.",
+                "content": "STEP COMPLETED: The workspace has been inspected using `list_files`, revealing various Python scripts, JSON files, images, and markdown documents in the root directory.",
                 "additional_kwargs": {},
                 "response_metadata": {
                     "model": "gemma4:26b",
-                    "created_at": "2026-08-26T22:20:21.1915708Z",
+                    "created_at": "2026-08-26T22:32:16.6422721Z",
                     "done": true,
                     "done_reason": "stop",
-                    "total_duration": 1928196800,
-                    "load_duration": 708873500,
-                    "prompt_eval_count": 3463,
-                    "prompt_eval_duration": 88034000,
-                    "eval_count": 112,
-                    "eval_duration": 1067821999,
+                    "total_duration": 2050806300,
+                    "load_duration": 298552800,
+                    "prompt_eval_count": 3768,
+                    "prompt_eval_duration": 151054000,
+                    "eval_count": 191,
+                    "eval_duration": 1586167000,
                     "logprobs": null,
                     "model_name": "gemma4:26b",
                     "model_provider": "ollama"
                 },
                 "type": "ai",
                 "name": null,
-                "id": "lc_run--01a04028-edbe-7fa0-9bbc-bd4ce5625594-0",
+                "id": "lc_run--01a04033-d7ff-7fb0-8cf5-859794740db8-0",
                 "tool_calls": [],
                 "invalid_tool_calls": [],
                 "usage_metadata": {
-                    "input_tokens": 3463,
-                    "output_tokens": 112,
-                    "total_tokens": 3575
+                    "input_tokens": 3768,
+                    "output_tokens": 191,
+                    "total_tokens": 3959
                 }
-            }
-        },
-        {
-            "type": "ai",
-            "data": {
-                "content": "* Current time: 2026-08-27 01:20:19",
-                "additional_kwargs": {},
-                "response_metadata": {
-                    "model": "gemma4:26b",
-                    "created_at": "2026-08-26T22:20:23.821439Z",
-                    "done": true,
-                    "done_reason": "stop",
-                    "total_duration": 2623934400,
-                    "load_duration": 692801400,
-                    "prompt_eval_count": 471,
-                    "prompt_eval_duration": 183281000,
-                    "eval_count": 197,
-                    "eval_duration": 1555387000,
-                    "logprobs": null,
-                    "model_name": "gemma4:26b",
-                    "model_provider": "ollama"
-                },
-                "type": "ai",
-                "name": null,
-                "id": "lc_run--01a04028-f54c-76a1-b815-7648b74503fa-0",
-                "tool_calls": [],
-                "invalid_tool_calls": [],
-                "usage_metadata": {
-                    "input_tokens": 471,
-                    "output_tokens": 197,
-                    "total_tokens": 668
-                }
-            }
-        },
-        {
-            "type": "human",
-            "data": {
-                "content": "read readme.md",
-                "additional_kwargs": {},
-                "response_metadata": {},
-                "type": "human",
-                "name": null,
-                "id": "51ba9256-b5c8-43de-a10f-bb6a89483db4"
             }
         },
         {
@@ -175,14 +89,14 @@
                 "response_metadata": {},
                 "type": "ai",
                 "name": null,
-                "id": "e5c33fe7-324a-4549-9e69-c52eb0494a18",
+                "id": "6cf48267-5104-46ba-b231-433921a5f7da",
                 "tool_calls": [
                     {
-                        "name": "read_file",
+                        "name": "run_python",
                         "args": {
-                            "path": "readme.md"
+                            "path": "main.py"
                         },
-                        "id": "fb9138f0-6c26-4c6f-bd59-796a737259fa",
+                        "id": "40db1e06-056b-4e08-b41f-0fbe0affdddb",
                         "type": "tool_call"
                     }
                 ],
@@ -193,13 +107,13 @@
         {
             "type": "tool",
             "data": {
-                "content": "Read file readme.md (characters 0-4000 of 8049). File is truncated.\n<tool_result_json>\n{\"display\": \"Contents of readme.md:\\n# CortexNode\\n\\nLocal-first AI agent built with LangGraph + Ollama. The current implementation is a controller-driven execution system: the planner proposes work, the controller decides what happens next, and the brain only executes the currently active step.\\n\\n## Current execution model\\n\\nThe live graph is centered on the protocol and controller, not a loose brain-led loop.\\n\\n- `planner`: creates an `ExecutionPlan` and concrete `ExecutionStep` objects.\\n- `controller`: evaluates the latest protocol state and decides the next legal action: dispatch planner, dispatch brain, run tools, summarize, or terminate.\\n- `brain`: executes the single currently active step. It does not own planning, ordering, retries, or final user response.\\n- `tools`: invokes the actual tool calls requested by the brain.\\n- `capture_tool_output`: normalizes the tool result into structured protocol payloads.\\n- `summarize_memory`: terminal summary path after execution ends.\\n\\nThe effective loop is:\\n\\n```text\\nplanner -> controller -> brain -> tools -> capture_tool_output -> controller -> ...\\n```\\n\\n`controller` decides when to continue, retry, advance to the next step, or stop. The controller is the authority for execution decisions, step transitions, and termination conditions.\\n\\n## What the current code does\\n\\n### Planner / Controller / Brain split\\n\\nThe ownership boundaries are explicit in the active prompts and protocol contracts:\\n\\n- Planner owns the execution plan and step definitions.\\n- Controller owns execution order, iterations, retries, stopping conditions, and final user-visible completion logic.\\n- Brain owns only the current active step and returns structured outcomes for the controller to consume.\\n\\nThis is enforced in the runtime prompts and in `core/protocol/controller.py`, which validates exactly one worker result at a time and chooses the next legal transition.\\n\\n### Active-step execution model\\n\\nThe brain operates in a strict active-step mode:\\n\\n- It only works on the current `active_step`.\\n- It may request a tool call or return a step-level outcome.\\n- It is not allowed to re-order the plan or decide the final answer on its own.\\n\\nThe execution brief passed to the brain includes the full plan and highlights the active step. This keeps the model focused on the current objective instead of broad plan improvisation.\\n\\n### Step Completion Checker\\n\\nThe project includes a dedicated completion check path driven by `STEP_COMPLETED_SYSTEM_PROMPT` in `core/graph_constants.py`.\\n\\nIts job is to answer one question only: is the current active step complete or unreachable?\\n\\nThe checker is instructed to:\\n\\n- evaluate the accumulated evidence across the active step, not only the newest result;\\n- treat prior successful tool results as valid unless later evidence directly contradicts them;\\n- return `YES` if the intent is satisfied or if it is demonstrably unreachable;\\n- return `NO` if the step is still incomplete or requires additional verification.\\n\\nThe check is intentionally narrow: it does not decide plan strategy or final messaging. The controller interprets that answer and advances or terminates execution.\\n\\n### Evidence semantics\\n\\nThe brain assembles cumulative execution evidence from `tool_execution_history`, including prior successful facts and prior failures. Important semantics in the current code:\\n\\n- a later failed tool call does not invalidate an earlier successful result;\\n- evidence is cumulative across the active step;\\n- successful prior execution remains relevant unless newer evidence explicitly disproves it;\\n- a step is not considered complete simply because the last tool call failed or because only the latest output is examined.\\n\\nThis is reflected in the `Execution evidence v1` block built in `core/graph_brain.py` and in the completion-checker prompt text.\\n\\n### Completion vs. unreachability\\n\\nThe completion checker distinguishes two ways a step can be treated as terminal:\\n\\n- `completed`: the original step intent has been satisfied;\\n- `unreachable`: the intent cannot\\n\\n--- [TRUNCATED] ---\\nShowing characters 0 to 4000 of 8049 total.\\n4049 characters remaining. To read more, call `read_file` with path='readme.md' and offset=4000.\", \"error_code\": \"\", \"error_details\": {}, \"success\": true, \"message\": \"Read file readme.md (characters 0-4000 of 8049). File is truncated.\", \"path\": \"readme.md\", \"content\": \"# CortexNode\\n\\nLocal-first AI agent built with LangGraph + Ollama. The current implementation is a controller-driven execution system: the planner proposes work, the controller decides what happens next, and the brain only executes the currently active step.\\n\\n## Current execution model\\n\\nThe live graph is centered on the protocol and controller, not a loose brain-led loop.\\n\\n- `planner`: creates an `ExecutionPlan` and concrete `ExecutionStep` objects.\\n- `controller`: evaluates the latest protocol state and decides the next legal action: dispatch planner, dispatch brain, run tools, summarize, or terminate.\\n- `brain`: executes the single currently active step. It does not own planning, ordering, retries, or final user response.\\n- `tools`: invokes the actual tool calls requested by the brain.\\n- `capture_tool_output`: normalizes the tool result into structured protocol payloads.\\n- `summarize_memory`: terminal summary path after execution ends.\\n\\nThe effective loop is:\\n\\n```text\\nplanner -> controller -> brain -> tools -> capture_tool_output -> controller -> ...\\n```\\n\\n`controller` decides when to continue, retry, advance to the next step, or stop. The controller is the authority for execution decisions, step transitions, and termination conditions.\\n\\n## What the current code does\\n\\n### Planner / Controller / Brain split\\n\\nThe ownership boundaries are explicit in the active prompts and protocol contracts:\\n\\n- Planner owns the execution plan and step definitions.\\n- Controller owns execution order, iterations, retries, stopping conditions, and final user-visible completion logic.\\n- Brain owns only the current active step and returns structured outcomes for the controller to consume.\\n\\nThis is enforced in the runtime prompts and in `core/protocol/controller.py`, which validates exactly one worker result at a time and chooses the next legal transition.\\n\\n### Active-step execution model\\n\\nThe brain operates in a strict active-step mode:\\n\\n- It only works on the current `active_step`.\\n- It may request a tool call or return a step-level outcome.\\n- It is not allowed to re-order the plan or decide the final answer on its own.\\n\\nThe execution brief passed to the brain includes the full plan and highlights the active step. This keeps the model focused on the current objective instead of broad plan improvisation.\\n\\n### Step Completion Checker\\n\\nThe project includes a dedicated completion check path driven by `STEP_COMPLETED_SYSTEM_PROMPT` in `core/graph_constants.py`.\\n\\nIts job is to answer one question only: is the current active step complete or unreachable?\\n\\nThe checker is instructed to:\\n\\n- evaluate the accumulated evidence across the active step, not only the newest result;\\n- treat prior successful tool results as valid unless later evidence directly contradicts them;\\n- return `YES` if the intent is satisfied or if it is demonstrably unreachable;\\n- return `NO` if the step is still incomplete or requires additional verification.\\n\\nThe check is intentionally narrow: it does not decide plan strategy or final messaging. The controller interprets that answer and advances or terminates execution.\\n\\n### Evidence semantics\\n\\nThe brain assembles cumulative execution evidence from `tool_execution_history`, including prior successful facts and prior failures. Important semantics in the current code:\\n\\n- a later failed tool call does not invalidate an earlier successful result;\\n- evidence is cumulative across the active step;\\n- successful prior execution remains relevant unless newer evidence explicitly disproves it;\\n- a step is not considered complete simply because the last tool call failed or because only the latest output is examined.\\n\\nThis is reflected in the `Execution evidence v1` block built in `core/graph_brain.py` and in the completion-checker prompt text.\\n\\n### Completion vs. unreachability\\n\\nThe completion checker distinguishes two ways a step can be treated as terminal:\\n\\n- `completed`: the original step intent has been satisfied;\\n- `unreachable`: the intent cannot\\n\\n--- [TRUNCATED] ---\\nShowing characters 0 to 4000 of 8049 total.\\n4049 characters remaining. To read more, call `read_file` with path='readme.md' and offset=4000.\", \"total_chars\": 8049, \"offset\": 0, \"read_chars\": 4000, \"is_truncated\": true}",
+                "content": "Error: Python file does not exist: main.py\n<tool_result_json>\n{\"display\": \"Error: Python file does not exist: main.py\", \"error_code\": \"EXEC_SCRIPT_NOT_FOUND\", \"error_details\": {\"path\": \"main.py\"}, \"success\": false, \"message\": \"Error: Python file does not exist: main.py\", \"data\": null}",
                 "additional_kwargs": {},
                 "response_metadata": {},
                 "type": "tool",
-                "name": "read_file",
-                "id": "f337da50-851e-4e6a-b6db-fa1d18765d0d",
-                "tool_call_id": "93c749f42623:tool:85d334d9cb7242f79b4af48447b79b90",
+                "name": "run_python",
+                "id": "5f471095-d61e-449a-8a4a-4e366236e6ab",
+                "tool_call_id": "e6d2cb6afde1:tool:b2d90a769a764277a00f1b9efde5d292",
                 "artifact": null,
                 "status": "success"
             }
@@ -207,140 +121,32 @@
         {
             "type": "ai",
             "data": {
-                "content": "",
-                "additional_kwargs": {},
-                "response_metadata": {},
-                "type": "ai",
-                "name": null,
-                "id": "0dc759f0-e760-4583-8ff1-bcf7bc8cabb0",
-                "tool_calls": [
-                    {
-                        "name": "read_file",
-                        "args": {
-                            "offset": 4000,
-                            "path": "readme.md"
-                        },
-                        "id": "23ab9724-6b81-46dc-a5d7-358ffc039f59",
-                        "type": "tool_call"
-                    }
-                ],
-                "invalid_tool_calls": [],
-                "usage_metadata": null
-            }
-        },
-        {
-            "type": "tool",
-            "data": {
-                "content": "Read file readme.md (characters 4000-8000 of 8049). File is truncated.\n<tool_result_json>\n{\"display\": \"Contents of readme.md:\\n be achieved under the current constraints and no meaningful allowed action remains.\\n\\nBoth are considered terminal states for the active step, but they are not the same outcome. A failed tool alone is not enough to mark a step as satisfied or unreachable.\\n\\n## Controller ownership\\n\\nThe controller is the execution owner in the current implementation:\\n\\n- it enforces max reasoning limits;\\n- it decides when to request a planner rework;\\n- it turns brain `TOOL_REQUEST` into tool execution;\\n- it processes tool success/failure and routes back to the brain;\\n- it advances to the next step when a step is complete;\\n- it terminates on max-step or failure conditions.\\n\\nThe controller is also the location where tool result mismatches and invalid continuations are rejected. This is the authoritative state transition layer.\\n\\n## Protocol / data contracts\\n\\nThe project has an explicit protocol layer under `core/protocol/`.\\n\\nCore types include:\\n\\n- `ExecutionPlan` and `ExecutionStep`\\n- `ExecutionCursor`\\n- `ToolRequest` and `ToolResult`\\n- `BrainInput` and `BrainResult`\\n- `ControllerInput` and `ControllerDecision`\\n- `ExecutionState` with `protocol_visible` and `working` sections\\n\\nThe key design choice is that `ExecutionState.protocol_visible` is the authoritative accepted state, while `working` holds runtime orchestration metadata. The controller writes the accepted-state transitions; the workers consume typed input contracts rather than ad hoc state dictionaries.\\n\\n## Setup\\n\\n### Requirements\\n\\n- Python 3.10+\\n- Ollama running locally\\n- A model available in Ollama (default examples in the project use `qwen2.5-coder:14b` or `gpt-oss:20b` depending on settings)\\n\\n### Install\\n\\n```bash\\npython -m venv .venv\\n.venv\\\\Scripts\\\\Activate.ps1\\npip install -r requirements.txt\\n```\\n\\n### Run\\n\\nInteractive mode:\\n\\n```bash\\npython main.py\\n```\\n\\nSingle prompt:\\n\\n```bash\\npython main.py --prompt \\\"Create hello.py in the workspace and run it\\\"\\n```\\n\\nOptional config is still supported through the CLI and environment variables. See `main.py` and the project config handling for the current defaults.\\n\\n## Tools and capabilities\\n\\nCortexNode currently exposes a sandboxed tool set including:\\n\\n- file system: `list_files`, `read_file`, `write_file`, `make_directory`\\n- Python execution: `run_python`, `install_package`\\n- git: `git_status`, `git_log`, `git_show`, `git_diff`\\n- runtime: `agent_info`, `token_usage`, `current_time`\\n- knowledge: `rag_search`, `rag_refresh_index`\\n- SAP / SCADA / vision tools depending on the active tool bundle\\n\\n## Quality checks\\n\\nRun the local test suite:\\n\\n```bash\\npython -m pytest\\n```\\n\\nGraph-oriented regression checks are also available in the project tests and are designed around the controller/planner/brain execution flow.\\n\\n## Notes\\n\\nThis README reflects the implementation currently in the repository, not a planned future architecture. The active behavior is controller-owned execution with explicit protocol contracts and active-step completion checks.\\n\\n- File and execution tools enforce sandbox boundaries relative to the selected workspace.\\n- The controller and protocol layer are the authoritative execution state path; the brain is intentionally scoped to the active step.\\n- The runtime still includes RAG, git, file, runtime, SAP, and SCADA tool bundles depending on the active setup.\\n- Current evidence handling is cumulative and explicit: failed later tool calls do not automatically invalidate earlier successful results for the same step.\\n- The project may still have legacy references in some prompts or historical notes, but the current execution logic is the protocol-driven controller model described above.\\n- **One task per prompt:** Bundle logically related steps, but avoid 5+ independent operations.\\n- **Be explicit:** State expected output format and verification steps clearly.\\n- **Break into steps:** If your prompt requires multiple independent scripts/files, consider running them separately.\\n- **Example good prompt:** `\\\"Create sensor.py that reads temperature and save\\n\\n--- [TRUNCATED] ---\\nShowing characters 4000 to 8000 of 8049 total.\\n49 characters remaining. To read more, call `read_file` with path='readme.md' and offset=8000.\", \"error_code\": \"\", \"error_details\": {}, \"success\": true, \"message\": \"Read file readme.md (characters 4000-8000 of 8049). File is truncated.\", \"path\": \"readme.md\", \"content\": \" be achieved under the current constraints and no meaningful allowed action remains.\\n\\nBoth are considered terminal states for the active step, but they are not the same outcome. A failed tool alone is not enough to mark a step as satisfied or unreachable.\\n\\n## Controller ownership\\n\\nThe controller is the execution owner in the current implementation:\\n\\n- it enforces max reasoning limits;\\n- it decides when to request a planner rework;\\n- it turns brain `TOOL_REQUEST` into tool execution;\\n- it processes tool success/failure and routes back to the brain;\\n- it advances to the next step when a step is complete;\\n- it terminates on max-step or failure conditions.\\n\\nThe controller is also the location where tool result mismatches and invalid continuations are rejected. This is the authoritative state transition layer.\\n\\n## Protocol / data contracts\\n\\nThe project has an explicit protocol layer under `core/protocol/`.\\n\\nCore types include:\\n\\n- `ExecutionPlan` and `ExecutionStep`\\n- `ExecutionCursor`\\n- `ToolRequest` and `ToolResult`\\n- `BrainInput` and `BrainResult`\\n- `ControllerInput` and `ControllerDecision`\\n- `ExecutionState` with `protocol_visible` and `working` sections\\n\\nThe key design choice is that `ExecutionState.protocol_visible` is the authoritative accepted state, while `working` holds runtime orchestration metadata. The controller writes the accepted-state transitions; the workers consume typed input contracts rather than ad hoc state dictionaries.\\n\\n## Setup\\n\\n### Requirements\\n\\n- Python 3.10+\\n- Ollama running locally\\n- A model available in Ollama (default examples in the project use `qwen2.5-coder:14b` or `gpt-oss:20b` depending on settings)\\n\\n### Install\\n\\n```bash\\npython -m venv .venv\\n.venv\\\\Scripts\\\\Activate.ps1\\npip install -r requirements.txt\\n```\\n\\n### Run\\n\\nInteractive mode:\\n\\n```bash\\npython main.py\\n```\\n\\nSingle prompt:\\n\\n```bash\\npython main.py --prompt \\\"Create hello.py in the workspace and run it\\\"\\n```\\n\\nOptional config is still supported through the CLI and environment variables. See `main.py` and the project config handling for the current defaults.\\n\\n## Tools and capabilities\\n\\nCortexNode currently exposes a sandboxed tool set including:\\n\\n- file system: `list_files`, `read_file`, `write_file`, `make_directory`\\n- Python execution: `run_python`, `install_package`\\n- git: `git_status`, `git_log`, `git_show`, `git_diff`\\n- runtime: `agent_info`, `token_usage`, `current_time`\\n- knowledge: `rag_search`, `rag_refresh_index`\\n- SAP / SCADA / vision tools depending on the active tool bundle\\n\\n## Quality checks\\n\\nRun the local test suite:\\n\\n```bash\\npython -m pytest\\n```\\n\\nGraph-oriented regression checks are also available in the project tests and are designed around the controller/planner/brain execution flow.\\n\\n## Notes\\n\\nThis README reflects the implementation currently in the repository, not a planned future architecture. The active behavior is controller-owned execution with explicit protocol contracts and active-step completion checks.\\n\\n- File and execution tools enforce sandbox boundaries relative to the selected workspace.\\n- The controller and protocol layer are the authoritative execution state path; the brain is intentionally scoped to the active step.\\n- The runtime still includes RAG, git, file, runtime, SAP, and SCADA tool bundles depending on the active setup.\\n- Current evidence handling is cumulative and explicit: failed later tool calls do not automatically invalidate earlier successful results for the same step.\\n- The project may still have legacy references in some prompts or historical notes, but the current execution logic is the protocol-driven controller model described above.\\n- **One task per prompt:** Bundle logically related steps, but avoid 5+ independent operations.\\n- **Be explicit:** State expected output format and verification steps clearly.\\n- **Break into steps:** If your prompt requires multiple independent scripts/files, consider running them separately.\\n- **Example good prompt:** `\\\"Create sensor.py that reads temperature and save\\n\\n--- [TRUNCATED] ---\\nShowing characters 4000 to 8000 of 8049 total.\\n49 characters remaining. To read more, call `read_file` with path='readme.md' and offset=8000.\", \"total_chars\": 8049, \"offset\": 4000, \"read_chars\": 4000, \"is_truncated\": true}",
-                "additional_kwargs": {},
-                "response_metadata": {},
-                "type": "tool",
-                "name": "read_file",
-                "id": "08e15e76-25d0-4ee5-983d-4a7085ec0b65",
-                "tool_call_id": "93c749f42623:tool:60f0e58da735466f986fada362cd4934",
-                "artifact": null,
-                "status": "success"
-            }
-        },
-        {
-            "type": "ai",
-            "data": {
-                "content": "",
-                "additional_kwargs": {},
-                "response_metadata": {},
-                "type": "ai",
-                "name": null,
-                "id": "340df01c-5376-4dcd-863e-1a0e3ec8985f",
-                "tool_calls": [
-                    {
-                        "name": "read_file",
-                        "args": {
-                            "offset": 8000,
-                            "path": "readme.md"
-                        },
-                        "id": "cbce971b-076d-423a-83aa-063a31021948",
-                        "type": "tool_call"
-                    }
-                ],
-                "invalid_tool_calls": [],
-                "usage_metadata": null
-            }
-        },
-        {
-            "type": "tool",
-            "data": {
-                "content": "Read file: readme.md (8049 total characters)\n<tool_result_json>\n{\"display\": \"Contents of readme.md:\\ns to temp.json. Run it and show me the output.\\\"`\\n\", \"error_code\": \"\", \"error_details\": {}, \"success\": true, \"message\": \"Read file: readme.md (8049 total characters)\", \"path\": \"readme.md\", \"content\": \"s to temp.json. Run it and show me the output.\\\"`\\n\", \"total_chars\": 8049, \"offset\": 8000, \"read_chars\": 49, \"is_truncated\": false}",
-                "additional_kwargs": {},
-                "response_metadata": {},
-                "type": "tool",
-                "name": "read_file",
-                "id": "1316ec3c-c3eb-4dbe-9e26-7a00dfdcbe82",
-                "tool_call_id": "93c749f42623:tool:70bdd125bb7e4a50a8de0cbf7c4ab84e",
-                "artifact": null,
-                "status": "success"
-            }
-        },
-        {
-            "type": "ai",
-            "data": {
-                "content": "STEP COMPLETED: The contents of `readme.md` have been fully read and reviewed.",
+                "content": "I cannot execute the requested command because `main.py` was not found in the current workspace directory. \n\n**Evidence from `list_files`:**\nThe following files were found in the root of the workspace:\n- `analysis_script.py`\n- `analyze_all_py_files.py`\n- `analyze_and_report.py`\n- `analyze_workspace.py`\n- `audit_script.py`\n- ... (and others, but no `main.py`)\n\nIf `main.py` is located in a different directory or has a different name, please provide the correct path or filename.",
                 "additional_kwargs": {},
                 "response_metadata": {
                     "model": "gemma4:26b",
-                    "created_at": "2026-08-26T22:21:05.4531935Z",
+                    "created_at": "2026-08-26T22:32:35.9783015Z",
                     "done": true,
                     "done_reason": "stop",
-                    "total_duration": 2468077300,
-                    "load_duration": 413747400,
-                    "prompt_eval_count": 5633,
-                    "prompt_eval_duration": 131943000,
-                    "eval_count": 183,
-                    "eval_duration": 1872676000,
+                    "total_duration": 9068482900,
+                    "load_duration": 467694100,
+                    "prompt_eval_count": 3850,
+                    "prompt_eval_duration": 220142000,
+                    "eval_count": 887,
+                    "eval_duration": 8366223000,
                     "logprobs": null,
                     "model_name": "gemma4:26b",
                     "model_provider": "ollama"
                 },
                 "type": "ai",
                 "name": null,
-                "id": "lc_run--01a04029-9888-7b13-bfdf-57f722fa2402-0",
+                "id": "lc_run--01a04034-081d-7d73-ab37-5c910997a707-0",
                 "tool_calls": [],
                 "invalid_tool_calls": [],
                 "usage_metadata": {
-                    "input_tokens": 5633,
-                    "output_tokens": 183,
-                    "total_tokens": 5816
-                }
-            }
-        },
-        {
-            "type": "ai",
-            "data": {
-                "content": "The contents of `readme.md` have been retrieved.\n\n**Summary of README.md:**\n* **Project Overview**: CortexNode is a local-first AI agent built with LangGraph and Ollama, utilizing a controller-driven execution system (Planner $\\rightarrow$ Controller $\\rightarrow$ Brain $\\rightarrow$ Tools).\n* **Execution Model**: \n    * `planner`: Creates execution plans and steps.\n    * `controller`: The authoritative decision-maker for transitions, retries, and termination.\n    * `brain`: Executes only the currently active step.\n    * `tools`: Performs actual tasks (file system, Python, git, RAG, etc.).\n* **Key Features**: \n    * Explicit protocol/data contracts (`core/protocol/`).\n    * Active-step execution with a dedicated completion checker.\n    * Cumulative evidence semantics (prior successes remain valid despite later failures).\n* **Setup & Usage**: Requires Python 3.10+ and Ollama; supports interactive and single-prompt modes via `main.py`.\n* **Tool Capabilities**: Includes file system manipulation, Python execution, git operations, RAG, and specialized industrial tools (SAP/SCADA).",
-                "additional_kwargs": {},
-                "response_metadata": {
-                    "model": "gemma4:26b",
-                    "created_at": "2026-08-26T22:21:09.3516649Z",
-                    "done": true,
-                    "done_reason": "stop",
-                    "total_duration": 3895074700,
-                    "load_duration": 487583000,
-                    "prompt_eval_count": 2764,
-                    "prompt_eval_duration": 625761000,
-                    "eval_count": 255,
-                    "eval_duration": 2205542000,
-                    "logprobs": null,
-                    "model_name": "gemma4:26b",
-                    "model_provider": "ollama"
-                },
-                "type": "ai",
-                "name": null,
-                "id": "lc_run--01a04029-a22f-79f3-a16b-e0e25950c14c-0",
-                "tool_calls": [],
-                "invalid_tool_calls": [],
-                "usage_metadata": {
-                    "input_tokens": 2764,
-                    "output_tokens": 255,
-                    "total_tokens": 3019
+                    "input_tokens": 3850,
+                    "output_tokens": 887,
+                    "total_tokens": 4737
                 }
             }
         }

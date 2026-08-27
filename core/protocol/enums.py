@@ -50,6 +50,18 @@ class StepStatus(StrEnum):
     FAILED = "failed"
     SKIPPED = "skipped"
 
+
+class AsyncJobStatus(StrEnum):
+    """Observed lifecycle state of a provider-managed asynchronous job."""
+
+    SUBMITTED = "submitted"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    UNKNOWN = "unknown"
+
+
 class PlannerOutcome(StrEnum):
     EXECUTION_PLAN = "execution_plan"
     DIRECT_RESPONSE = "direct_response"

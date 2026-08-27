@@ -39,13 +39,6 @@ class ActionRecoveryDecision:
     reason: str
 
 
-@dataclass(frozen=True)
-class RepeatedSignatureDecision:
-    apply_guard: bool
-    request_final_answer: bool
-    repeat_reason: str
-    reason: str
-
 def get_controller_decision(state: AgentState) -> ControllerDecision | None:
     decision = state.get("controller_decision")
 
@@ -367,38 +360,4 @@ def decide_action_recovery(
     return ActionRecoveryDecision(
         kind=ActionRecoveryKind.UNCHANGED,
         reason="no_recovery_needed",
-    )
-
-
-def decide_repeated_signature(
-    *,
-    action_required: bool,
-    has_last_tool_signature: bool,
-    response_repeats_signature: bool,
-    last_tool_success: bool,
-    corrected_repeats_signature: bool,
-) -> RepeatedSignatureDecision:
-    if not (action_required and has_last_tool_signature):
-        return RepeatedSignatureDecision(
-            apply_guard=False,
-            request_final_answer=False,
-            repeat_reason="",
-            reason="no_signature_guard",
-        )
-
-    if not response_repeats_signature:
-        return RepeatedSignatureDecision(
-            apply_guard=False,
-            request_final_answer=False,
-            repeat_reason="",
-            reason="signature_not_repeated",
-        )
-
-    repeat_reason = "already succeeded" if last_tool_success else "already failed"
-    request_final = bool(last_tool_success and corrected_repeats_signature)
-    return RepeatedSignatureDecision(
-        apply_guard=True,
-        request_final_answer=request_final,
-        repeat_reason=repeat_reason,
-        reason=("repeat_signature_force_finalize" if request_final else "repeat_signature_request_correction"),
     )

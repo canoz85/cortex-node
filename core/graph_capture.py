@@ -233,7 +233,7 @@ def create_capture_tool_output_node():
         history = state.get("messages", [])
 
         if not history:
-            return {"repeat_fail_count": 0}
+            return {}
 
         last_message = history[-1]
         if not isinstance(last_message, ToolMessage):

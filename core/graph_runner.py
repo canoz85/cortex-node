@@ -104,8 +104,6 @@ def run_prompt(
         "planner_route": "",
         "rolling_summary": rolling_summary,
         "retrieval_messages": [],
-        "last_tool_output": "",
-        "repeat_fail_count": 0,
         "tool_text_retry_used": False,
         "run_id": run_id,
     }
