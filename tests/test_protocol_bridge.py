@@ -1,8 +1,9 @@
 from langchain_core.messages import AIMessage, HumanMessage
 
 from core.protocol.bridge import build_brain_input, build_controller_input, legacy_tool_result_to_model
-from core.protocol.enums import BrainOutcome, ExecutionPhase, WorkerRole
+from core.protocol.enums import AsyncJobStatus, BrainOutcome, ExecutionPhase, WorkerRole
 from core.protocol.models import (
+    AsyncJobPolicy,
     ArtifactRecord,
     BrainResult,
     ContentIntegrity,
@@ -94,6 +95,23 @@ def test_build_controller_input_leaves_optional_worker_outputs_none_when_missing
     assert controller_input.planner_result is None
     assert controller_input.brain_result is None
     assert controller_input.tool_result is None
+
+
+def test_build_controller_input_preserves_checkpointed_async_policy():
+    policy = AsyncJobPolicy(
+        visibility_grace_seconds=4,
+        poll_interval_seconds=3,
+        max_poll_interval_seconds=12,
+        execution_timeout_seconds=60,
+        max_poll_failures=2,
+        max_submission_attempts=2,
+    )
+    controller_input = build_controller_input({
+        "messages": [HumanMessage(content="generate image")],
+        "async_job_policy": policy,
+    })
+
+    assert controller_input.async_policy == policy
 
 
 def test_build_brain_input_transfers_tool_execution_history_from_working_state():
@@ -244,6 +262,85 @@ def test_controller_input_evidence_predicates_and_consecutive_failures():
     decision = ctrl.decide(ci3)
     assert decision.decision_type.value == "dispatch_planner"
     assert "Repeated tool failure threshold" in decision.reason
+
+
+def test_controller_input_async_evidence_queries_use_latest_valid_observation():
+    def async_record(request_id: str, job_id: str, status: AsyncJobStatus) -> ToolExecutionRecord:
+        return ToolExecutionRecord(
+            step_id="step-1",
+            tool_name="get_comfy_history",
+            result=ToolResult(
+                request_id=request_id,
+                success=status not in {AsyncJobStatus.FAILED, AsyncJobStatus.CANCELLED},
+                message=f"Observed {status.value}",
+                is_async_job=True,
+                async_job_id=job_id,
+                async_job_status=status,
+                async_terminal=status in {
+                    AsyncJobStatus.COMPLETED,
+                    AsyncJobStatus.FAILED,
+                    AsyncJobStatus.CANCELLED,
+                },
+            ),
+        )
+
+    submitted = async_record("req-1", "prompt-1", AsyncJobStatus.SUBMITTED)
+    completed = async_record("req-2", "prompt-1", AsyncJobStatus.COMPLETED)
+    stale_running = async_record("req-3", "prompt-1", AsyncJobStatus.RUNNING)
+    running = async_record("req-4", "prompt-2", AsyncJobStatus.RUNNING)
+    controller_input = build_controller_input({
+        "execution_state": ExecutionState(
+            protocol_visible=ProtocolVisibleState(
+                identity=ExecutionIdentity(execution_id="ex-1", protocol_version="1.0"),
+                cursor=ExecutionCursor(step_id="step-1"),
+                active_step=ExecutionStep(step_id="step-1", title="Generate image"),
+            ),
+            working=WorkingState(
+                tool_execution_history=(submitted, completed, stale_running, running),
+            ),
+        )
+    })
+
+    latest = controller_input.get_latest_async_result()
+
+    assert latest is not None
+    assert latest.async_job_id == "prompt-2"
+    assert latest.async_job_status == AsyncJobStatus.RUNNING
+    assert controller_input.get_nonterminal_async_job_id() == "prompt-2"
+    assert controller_input.has_terminal_async_result("prompt-1") is True
+    assert controller_input.has_terminal_async_result("prompt-2") is False
+
+
+def test_controller_input_async_evidence_queries_respect_terminal_latest_result():
+    terminal_record = ToolExecutionRecord(
+        step_id="step-1",
+        tool_name="get_comfy_history",
+        result=ToolResult(
+            request_id="req-1",
+            success=True,
+            message="ComfyUI workflow completed.",
+            is_async_job=True,
+            async_job_id="prompt-1",
+            async_job_status=AsyncJobStatus.COMPLETED,
+            async_terminal=True,
+        ),
+    )
+    controller_input = build_controller_input({
+        "execution_state": ExecutionState(
+            protocol_visible=ProtocolVisibleState(
+                identity=ExecutionIdentity(execution_id="ex-1", protocol_version="1.0"),
+                cursor=ExecutionCursor(step_id="step-1"),
+                active_step=ExecutionStep(step_id="step-1", title="Generate image"),
+            ),
+            working=WorkingState(tool_execution_history=(terminal_record,)),
+        )
+    })
+
+    latest = controller_input.get_latest_async_result()
+
+    assert latest is not None
+    assert latest.async_terminal is True
+    assert controller_input.get_nonterminal_async_job_id() is None
 
 
 def test_format_action_completion_and_brain_evidence_with_records():

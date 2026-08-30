@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from langchain_core.messages import ToolMessage
 
 from core.graph_node_helpers import build_tool_signature
+from core.protocol.enums import AsyncJobStatus
 from core.protocol.models import ArtifactRecord, ContentIntegrity, PaginationMetadata, ToolExecutionRecord, ToolRequest, ToolResult
 from core.graph_messages import normalize_message_content, tool_message_content
 from core.graph_response_formatters import format_tool_result_response
@@ -21,6 +22,11 @@ class NormalizedToolPayload:
     error_code: str | None
     integrity: ContentIntegrity
     pagination: PaginationMetadata | None
+    is_async_job: bool
+    async_job_id: str | None
+    async_job_status: AsyncJobStatus | None
+    async_terminal: bool
+    async_observed_at_utc: str | None
 
 
 def _extract_integrity_and_pagination(
@@ -146,6 +152,11 @@ def _normalize_transport_payload(raw_content: str) -> NormalizedToolPayload:
             error_code=unwrapped.get("error_code"),
             integrity=integrity,
             pagination=pagination,
+            is_async_job=bool(unwrapped.get("is_async_job", False)),
+            async_job_id=unwrapped.get("async_job_id"),
+            async_job_status=unwrapped.get("async_job_status"),
+            async_terminal=bool(unwrapped.get("async_terminal", False)),
+            async_observed_at_utc=unwrapped.get("async_observed_at_utc"),
         )
 
     if isinstance(unwrapped, list):
@@ -158,6 +169,11 @@ def _normalize_transport_payload(raw_content: str) -> NormalizedToolPayload:
             error_code=None,
             integrity=integrity,
             pagination=pagination,
+            is_async_job=False,
+            async_job_id=None,
+            async_job_status=None,
+            async_terminal=False,
+            async_observed_at_utc=None,
         )
 
     if isinstance(unwrapped, str):
@@ -169,6 +185,11 @@ def _normalize_transport_payload(raw_content: str) -> NormalizedToolPayload:
             error_code=None,
             integrity=integrity,
             pagination=pagination,
+            is_async_job=False,
+            async_job_id=None,
+            async_job_status=None,
+            async_terminal=False,
+            async_observed_at_utc=None,
         )
 
     return NormalizedToolPayload(
@@ -179,6 +200,11 @@ def _normalize_transport_payload(raw_content: str) -> NormalizedToolPayload:
         error_code=None,
         integrity=integrity,
         pagination=pagination,
+        is_async_job=False,
+        async_job_id=None,
+        async_job_status=None,
+        async_terminal=False,
+        async_observed_at_utc=None,
     )
 
 
@@ -201,6 +227,11 @@ def _build_tool_result(
         error_code=payload.error_code,
         integrity=payload.integrity,
         pagination=payload.pagination,
+        is_async_job=payload.is_async_job,
+        async_job_id=payload.async_job_id,
+        async_job_status=payload.async_job_status,
+        async_terminal=payload.async_terminal,
+        async_observed_at_utc=payload.async_observed_at_utc,
     )
 
 
@@ -210,6 +241,9 @@ def _compute_repeat_fail_count(
     previous_repeat_count: int,
     current: ToolResult,
 ) -> int:
+    if current.is_async_job and not current.async_terminal:
+        return 0
+
     if (
         not current.success
         and current.signature

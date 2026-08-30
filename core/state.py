@@ -4,7 +4,14 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 from core.models import TokenUsage
-from core.protocol.models import BrainResult, ControllerDecision, ExecutionState, PlannerResult, ToolResult
+from core.protocol.models import (
+    AsyncJobPolicy,
+    BrainResult,
+    ControllerDecision,
+    ExecutionState,
+    PlannerResult,
+    ToolResult,
+)
 
 
 class AgentState(TypedDict, total=False):
@@ -35,6 +42,7 @@ class AgentState(TypedDict, total=False):
     retrieval_messages: list[BaseMessage]
     brain_result: BrainResult
     run_id: str
+    async_job_policy: AsyncJobPolicy
     execution_state: ExecutionState
     controller_decision: ControllerDecision
 

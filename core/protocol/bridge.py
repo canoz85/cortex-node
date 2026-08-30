@@ -37,6 +37,7 @@ from .converters import (
 
 from .enums import (
     BrainOutcome,
+    CancellationSource,
     ControllerDecisionType,
     EventType,
     ExecutionPhase,
@@ -45,6 +46,7 @@ from .enums import (
     WorkerRole,
 )
 from .models import (
+    AsyncJobPolicy,
     BrainInput,
     BrainResult,
     ContentIntegrity,
@@ -130,6 +132,9 @@ _WORKING_STATE_CONSUMED_KEYS: Final[frozenset[str]] = frozenset({
     "last_error_message",
     "routing_metadata",
     "brain_result",
+    "async_job_policy",
+    "cancel_requested",
+    "cancellation_source",
 })
 
 
@@ -271,6 +276,16 @@ def _build_retry_metadata(legacy_state: LegacyState | None) -> RetryMetadata:
         last_error_code=_to_str(state.get("last_error_code"), default="") or None,
         last_error_message=_to_str(state.get("last_error_message"), default="") or None,
     )
+
+
+def _build_async_job_policy(legacy_state: LegacyState | None) -> AsyncJobPolicy:
+    state = _state_or_empty(legacy_state)
+    raw_policy = state.get("async_job_policy")
+    if isinstance(raw_policy, AsyncJobPolicy):
+        return raw_policy
+    if isinstance(raw_policy, Mapping):
+        return AsyncJobPolicy.model_validate(raw_policy)
+    return AsyncJobPolicy()
 
 
 def _build_active_plan(legacy_state: LegacyState | None, identity: ExecutionIdentity) -> ExecutionPlan | None:
@@ -599,6 +614,7 @@ def build_protocol_visible_state(
     active_plan = build_execution_plan(state, identity=resolved_identity,)
     active_step = build_execution_step(state)
     retry = _build_retry_metadata(state)
+    async_policy = _build_async_job_policy(state)
     accepted_event_history = _build_event_history(state)
 
     summary = _build_execution_summary(state=state, identity=resolved_identity, status=resolved_status)
@@ -615,6 +631,11 @@ def build_protocol_visible_state(
          completed_step_ids=completed_step_ids,
         accepted_event_history=accepted_event_history,
         retry=retry,
+        async_policy=async_policy,
+        cancellation_source=_enum_or_none(
+            CancellationSource,
+            state.get("cancellation_source"),
+        ),
         summary=summary,
     )
 
@@ -637,6 +658,8 @@ def build_working_state(legacy_state: LegacyState | None = None) -> WorkingState
         retrieval_context=retrieval_context,
         last_tool_result=last_tool_result,
         tool_execution_history=tool_execution_history,
+        repeat_fail_count=_to_int(state.get("repeat_fail_count"), default=0, minimum=0),
+        cancel_requested=bool(state.get("cancel_requested") is True),
         routing_metadata=routing_metadata,
         planner_metadata=planner_metadata,
         debug_metadata=debug_metadata,
@@ -798,6 +821,8 @@ def build_controller_input(
         brain_result=brain_result,
         tool_result=tool_result,
         retry=protocol.retry,
+        async_policy=protocol.async_policy,
+        cancel_requested=working.cancel_requested,
         tool_execution_history=working.tool_execution_history,
     )
 

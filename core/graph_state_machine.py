@@ -3,7 +3,13 @@ from enum import Enum
 
 from langgraph.graph import END
 
-from core.protocol.enums import BrainOutcome, ControllerDecisionType, ExecutionPhase, WorkerRole
+from core.protocol.enums import (
+    BrainOutcome,
+    ControllerDecisionType,
+    ExecutionPhase,
+    ExecutionStatus,
+    WorkerRole,
+)
 from core.protocol.models import BrainInput, ControllerDecision, ControllerInput, ExecutionPlan, ExecutionState, PlannerResult
 
 from core.graph_constants import MAX_REASONING_STEPS
@@ -70,6 +76,15 @@ def map_controller_decision(
         case ControllerDecisionType.DISPATCH_SUMMARY:
              return END #return "summarize_memory" todo commented for debugging, we are not using summarize_memory node
 
+        case ControllerDecisionType.AWAIT_ASYNC_JOB:
+            return END
+
+        case ControllerDecisionType.PAUSE:
+            return END
+
+        case ControllerDecisionType.CANCEL:
+            return END
+
         case ControllerDecisionType.TERMINATE:
             return END
 
@@ -122,6 +137,7 @@ def apply_controller_decision_to_state(
     #
     # Pending tool request
     #
+    is_cancelled = decision.decision_type == ControllerDecisionType.CANCEL
     is_terminating = (
         decision.decision_type == ControllerDecisionType.TERMINATE
         or decision.terminal
@@ -169,8 +185,12 @@ def apply_controller_decision_to_state(
             )
 
     synchronized_phase = cursor.phase
-    if is_terminating:
+    if is_cancelled:
+        synchronized_phase = ExecutionPhase.CANCELLED
+    elif is_terminating:
         synchronized_phase = ExecutionPhase.TERMINATING
+    elif decision.decision_type == ControllerDecisionType.PAUSE:
+        synchronized_phase = ExecutionPhase.WAITING
     elif decision.decision_type in {
         ControllerDecisionType.DISPATCH_BRAIN,
         ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
@@ -208,6 +228,16 @@ def apply_controller_decision_to_state(
         update={
             "protocol_visible": protocol_visible.model_copy(
                 update={
+                    "status": (
+                        ExecutionStatus.CANCELLED
+                        if is_cancelled
+                        else protocol_visible.status
+                    ),
+                    "cancellation_source": (
+                        decision.cancellation_source
+                        if is_cancelled
+                        else protocol_visible.cancellation_source
+                    ),
                     "cursor": synchronized_cursor,
                     "active_plan": active_plan,
                     "active_step": active_step,

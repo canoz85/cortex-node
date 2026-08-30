@@ -138,6 +138,12 @@ python main.py --prompt "Create hello.py in the workspace and run it"
 
 Optional config is still supported through the CLI and environment variables. See `main.py` and the project config handling for the current defaults.
 
+Observe-only GPU telemetry is enabled by default for the local CLI. It records
+VRAM, GPU utilization, visible GPU processes, and operation duration around
+Planner, Brain, tool execution, summary, and async-provider polling boundaries.
+It never unloads a model or changes scheduling. Disable it with
+`--no-gpu-telemetry` or `CORTEX_GPU_TELEMETRY=false`.
+
 ## Tools and capabilities
 
 CortexNode currently exposes a sandboxed tool set including:

@@ -12,6 +12,8 @@ from core.logging.node_update import extract_node_update
 from core.logging.renderer import render_node_update
 from core.logging_utils import get_logger, log_event
 from core.protocol.bridge import legacy_state_to_execution_state
+from core.protocol.enums import ControllerDecisionType
+from core.protocol.models import AsyncJobPolicy, ControllerDecision
 from core.runtime.accessors import get_execution_state
 from core.state import AgentState
 
@@ -82,9 +84,11 @@ def run_prompt(
     history: list | None = None,
     rolling_summary: str = "",
     show_summary: bool = False,
+    run_id: str | None = None,
+    async_job_policy: AsyncJobPolicy | None = None,
 ) -> tuple[list, str]:
     prior_messages = history or []
-    run_id = uuid.uuid4().hex[:12]
+    run_id = run_id or uuid.uuid4().hex[:12]
     started_at = perf_counter()
 
     log_event(
@@ -107,6 +111,8 @@ def run_prompt(
         "tool_text_retry_used": False,
         "run_id": run_id,
     }
+    if async_job_policy is not None:
+        initial_state["async_job_policy"] = async_job_policy
 
     # Migration boundary: legacy runtime state and protocol ExecutionState coexist here.
     # The protocol state is read-only and mirrors the same legacy inputs without
@@ -119,38 +125,68 @@ def run_prompt(
     metrics = RunMetrics()
     from_node = ""
 
-    events = app.stream(initial_state)
+    async_runtime = getattr(app, "async_runtime", None)
+    graph_config = {
+        "configurable": {
+            "thread_id": run_id,
+        }
+    }
+    events = (
+        app.stream(initial_state, config=graph_config)
+        if async_runtime is not None
+        else app.stream(initial_state)
+    )
 
-    for event in events:
-        for node_name, value in event.items():
-            if not isinstance(value, dict):
-                continue
+    while True:
+        latest_controller_decision: ControllerDecision | None = None
 
-            node_messages = value.get("messages")
-            if node_messages:
-                final_messages.extend(node_messages)
+        for event in events:
+            for node_name, value in event.items():
+                if not isinstance(value, dict):
+                    continue
 
-            node_update  = extract_node_update(
-                from_node=from_node,
-                to_node=node_name,
-                value=value,
-            )
+                decision = value.get("controller_decision")
+                if isinstance(decision, ControllerDecision):
+                    latest_controller_decision = decision
 
-            if node_update is None:
-                continue
+                node_messages = value.get("messages")
+                if node_messages:
+                    final_messages.extend(node_messages)
 
-            if node_update.transition:
-                log_event(
-                    logger,
-                    logging.INFO,
-                    "Graph node update",
-                    node=node_update.to_node,
-                    transition=node_update.transition,
+                node_update = extract_node_update(
+                    from_node=from_node,
+                    to_node=node_name,
+                    value=value,
                 )
 
-            render_node_update(node_update)
+                if node_update is None:
+                    continue
 
-            from_node = node_name
+                if node_update.transition:
+                    log_event(
+                        logger,
+                        logging.INFO,
+                        "Graph node update",
+                        node=node_update.to_node,
+                        transition=node_update.transition,
+                    )
+
+                render_node_update(node_update)
+
+                from_node = node_name
+
+        if (
+            async_runtime is None
+            or latest_controller_decision is None
+            or latest_controller_decision.decision_type
+            != ControllerDecisionType.AWAIT_ASYNC_JOB
+        ):
+            break
+
+        events = async_runtime.poll_and_resume(
+            config=graph_config,
+            decision=latest_controller_decision,
+        )
 
     # if metrics.latest_step_count >= MAX_REASONING_STEPS:
     #     print(

@@ -67,7 +67,7 @@ class ToolSerializableModel(BaseModel):
 
     def to_tool_output(self) -> str:
         summary = getattr(self, "message", self.__class__.__name__)
-        payload = self.model_dump()
+        payload = self.model_dump(mode="json")
         if not isinstance(payload.get("display"), str) or not str(payload.get("display") or "").strip():
             payload["display"] = self._default_display_from_payload(payload, str(summary))
         return f"{summary}\n{TOOL_RESULT_MARKER}\n{json.dumps(payload, ensure_ascii=True)}"
@@ -115,8 +115,8 @@ class WriteFileResult(ToolSerializableModel):
     characters_written: int = Field(default=0, ge=0)
 
 
-class ToolResult(ToolSerializableModel):
-    """Generic structured response envelope for tools."""
+class AsyncToolResult(ToolSerializableModel):
+    """Tool result base that validates optional provider async-job evidence."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -149,6 +149,10 @@ class ToolResult(ToolSerializableModel):
         if self.async_terminal != is_terminal_status:
             raise ValueError("async_terminal must match async_job_status terminality")
         return self
+
+
+class ToolResult(AsyncToolResult):
+    """Generic structured response envelope for tools."""
 
     @staticmethod
     def split_tool_output(raw: str) -> tuple[str | None, str]:
@@ -361,7 +365,7 @@ class ComfyPromptRequest(BaseModel):
     )
 
 
-class ComfyPromptResult(ToolSerializableModel):
+class ComfyPromptResult(AsyncToolResult):
     """Structured run_comfy_workflow tool output."""
 
     model_config = ConfigDict(extra="forbid")
@@ -380,7 +384,7 @@ class ComfyHistoryRequest(BaseModel):
     prompt_id: str = Field(min_length=1)
 
 
-class ComfyHistoryResult(ToolSerializableModel):
+class ComfyHistoryResult(AsyncToolResult):
     """Structured get_comfy_history tool output."""
 
     model_config = ConfigDict(extra="forbid")
@@ -423,4 +427,12 @@ class RunWorkflowRequest(BaseModel):
     client_id: Optional[str] = Field(
         default="cortex_node_agent", 
         description="Unique identifier for the client session."
+    )
+    prompt_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Optional caller-generated provider ID used to reconcile ambiguous "
+            "submission outcomes."
+        ),
     )

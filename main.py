@@ -9,6 +9,7 @@ from langchain_core.messages import messages_from_dict, messages_to_dict
 from core.logging_utils import configure_logging, get_logger
 
 from core.graph import build_app, run_prompt
+from core.runtime.gpu_resources import GpuResourceMode, GpuResourcePolicy
 
 
 DEFAULT_SETTINGS = {
@@ -22,6 +23,7 @@ DEFAULT_SETTINGS = {
     "show_summary": False,
     "log_level": "INFO",
     "json_logs": False,
+    "gpu_telemetry": True,
     "session_file": ".cortex_session.json"
 }
 
@@ -64,6 +66,7 @@ def _build_settings(args: argparse.Namespace) -> dict:
         "raw_llm": _env_bool("CORTEX_RAW_LLM"),
         "show_summary": _env_bool("CORTEX_SHOW_SUMMARY"),
         "json_logs": _env_bool("CORTEX_JSON_LOGS"),
+        "gpu_telemetry": _env_bool("CORTEX_GPU_TELEMETRY"),
     }
     for key, value in env_overrides.items():
         if value is not None:
@@ -86,6 +89,7 @@ def _build_settings(args: argparse.Namespace) -> dict:
         "show_summary": args.show_summary,
         "log_level": args.log_level,
         "json_logs": args.json_logs,
+        "gpu_telemetry": args.gpu_telemetry,
     }
     for key, value in cli_overrides.items():
         if value is not None:
@@ -193,6 +197,20 @@ def parse_args() -> argparse.Namespace:
     )
 
     output_group.add_argument(
+        "--gpu-telemetry",
+        dest="gpu_telemetry",
+        action="store_true",
+        default=None,
+        help="Observe GPU/VRAM around Planner, Brain, tool, summary, and async poll operations.",
+    )
+    output_group.add_argument(
+        "--no-gpu-telemetry",
+        dest="gpu_telemetry",
+        action="store_false",
+        help="Disable observe-only GPU runtime telemetry.",
+    )
+
+    output_group.add_argument(
         "--resume",
         dest="resume",
         action="store_true",
@@ -274,6 +292,13 @@ def main():
         embedding_model=str(settings["embedding_model"]),
         rag_top_k=int(settings["rag_top_k"]),
         show_raw_llm=bool(settings["raw_llm"]),
+        gpu_resource_policy=GpuResourcePolicy(
+            mode=(
+                GpuResourceMode.OBSERVE_ONLY
+                if bool(settings["gpu_telemetry"])
+                else GpuResourceMode.DISABLED
+            )
+        ),
     )
 
     print("--- CortexNode initialized ---")
@@ -281,6 +306,10 @@ def main():
     print(f"Planner Model: {settings['model_planner']}")
     print(f"Sandbox: {settings['workspace']}")
     print(f"Knowledge: {settings['knowledge_dir']}")
+    print(
+        "GPU telemetry: "
+        f"{'observe-only' if settings['gpu_telemetry'] else 'disabled'}"
+    )
     logger.info(
         "CortexNode initialized",
         extra={
@@ -291,6 +320,7 @@ def main():
             "knowledge_dir": settings["knowledge_dir"],
             "session_file": settings["session_file"],
             "rag_top_k": settings["rag_top_k"],
+            "gpu_telemetry": settings["gpu_telemetry"],
         },
     )
 

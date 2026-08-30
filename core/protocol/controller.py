@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
+from datetime import datetime, timedelta, timezone
+from uuid import NAMESPACE_URL, uuid5
+
 from .enums import (
+    AsyncJobStatus,
     BrainOutcome,
+    CancellationSource,
     ControllerDecisionType,
     ExecutionPhase,
     PlannerOutcome,
@@ -16,6 +22,7 @@ from .models import (
     ExecutionPlan,
     ExecutionStep,
     PlannerResult,
+    ToolRequest,
     ToolResult,
 )
 
@@ -27,14 +34,47 @@ class CortexController:
     It evaluates protocol inputs and returns the next legal continuation.
     """
 
-    def __init__(self, max_reasoning_steps: int):
+    def __init__(
+        self,
+        max_reasoning_steps: int,
+        *,
+        now_utc: Callable[[], datetime] | None = None,
+        async_submission_tool_names: Iterable[str] = ("run_comfy_workflow",),
+        ambiguous_submission_error_codes: Iterable[str] = (
+            "COMFY_API_ERROR",
+            "COMFY_CONNECTION_FAILED",
+            "COMFY_PROMPT_FAILED",
+        ),
+    ):
         self._max_reasoning_steps = max_reasoning_steps
+        self._now_utc = now_utc or (lambda: datetime.now(timezone.utc))
+        self._async_submission_tool_names = frozenset(async_submission_tool_names)
+        self._ambiguous_submission_error_codes = frozenset(
+            ambiguous_submission_error_codes
+        )
         
     def decide(
         self,
         controller_input: ControllerInput,
     ) -> ControllerDecision:
         self._validate(controller_input)
+
+        if controller_input.cancel_requested:
+            return self._cancel(
+                "local_async_cancellation_requested",
+                source=CancellationSource.LOCAL,
+            )
+
+        active_async_job_ids = controller_input.get_active_async_job_ids()
+        if len(active_async_job_ids) > 1:
+            return self._pause(
+                reason=(
+                    "multiple_active_async_jobs_for_step:"
+                    f"{','.join(active_async_job_ids)}"
+                ),
+                reconciliation_required=True,
+                clear_pending_tool_request=True,
+            )
 
         # print("=== CONTROLLER INPUT ===")
         # print("planner_result:", controller_input.planner_result)
@@ -172,6 +212,45 @@ class CortexController:
 
         match brain_result.outcome:
             case BrainOutcome.TOOL_REQUEST:
+                tool_request = brain_result.tool_request
+                if tool_request is None:
+                    return self._terminate("brain_tool_request_missing_payload")
+
+                if tool_request.tool_name in self._async_submission_tool_names:
+                    tool_request = self._prepare_async_submission_request(
+                        controller_input,
+                        tool_request,
+                    )
+                    active_job_ids = controller_input.get_active_async_job_ids()
+                    if active_job_ids:
+                        return self._pause(
+                            reason=(
+                                "active_async_job_prevents_submission:"
+                                f"{active_job_ids[-1]}"
+                            ),
+                            reconciliation_required=True,
+                        )
+
+                    submission_attempts = (
+                        controller_input.get_async_submission_attempt_count(
+                            submission_tool_names=self._async_submission_tool_names,
+                            ambiguous_error_codes=(
+                                self._ambiguous_submission_error_codes
+                            ),
+                        )
+                    )
+                    if (
+                        submission_attempts
+                        >= controller_input.async_policy.max_submission_attempts
+                    ):
+                        return self._pause(
+                            reason=(
+                                "async_submission_attempt_limit_reached:"
+                                f"{submission_attempts}"
+                            ),
+                            reconciliation_required=True,
+                        )
+
                 return ControllerDecision(
                         accepted_plan=self._update_active_step_status(
                             controller_input,
@@ -180,7 +259,7 @@ class CortexController:
                         decision_type=ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
                         reason="tool_request",
                         next_worker=WorkerRole.TOOL_RUNTIME,
-                        pending_tool_request=brain_result.tool_request,
+                        pending_tool_request=tool_request,
                         next_step_id=controller_input.active_step.step_id,
                     )
 
@@ -244,6 +323,220 @@ class CortexController:
         ):
             return self._terminate("tool_result_request_id_mismatch")
 
+        if (
+            pending_tool_request is not None
+            and pending_tool_request.tool_name in self._async_submission_tool_names
+            and not tool_result.success
+            and not tool_result.is_async_job
+            and (
+                tool_result.error_code is None
+                or tool_result.error_code in self._ambiguous_submission_error_codes
+            )
+        ):
+            return self._pause(
+                reason=(
+                    "ambiguous_async_submission_requires_reconciliation:"
+                    f"{pending_tool_request.tool_name}"
+                ),
+                reconciliation_required=True,
+                clear_pending_tool_request=True,
+            )
+
+        if tool_result.is_async_job:
+            async_result = self._select_async_result(
+                controller_input,
+                current_result=tool_result,
+            )
+
+            if async_result.async_job_status in {
+                AsyncJobStatus.SUBMITTED,
+                AsyncJobStatus.RUNNING,
+                AsyncJobStatus.UNKNOWN,
+            }:
+                async_job_id = async_result.async_job_id
+                if async_job_id is None:
+                    raise ValueError("Async observation requires async_job_id.")
+
+                started_at = (
+                    controller_input.get_async_job_started_at_utc(async_job_id)
+                    or async_result.async_observed_at_utc
+                    or self._now_utc()
+                )
+                started_at = self._as_utc(started_at)
+                observed_at = self._as_utc(
+                    async_result.async_observed_at_utc or self._now_utc()
+                )
+                now_utc = self._as_utc(self._now_utc())
+                deadline_utc = started_at + timedelta(
+                    seconds=controller_input.async_policy.execution_timeout_seconds,
+                )
+
+                poll_failures = (
+                    controller_input.get_consecutive_async_poll_failures(
+                        async_job_id,
+                        excluded_tool_names=self._async_submission_tool_names,
+                    )
+                )
+                is_submission_observation = bool(
+                    pending_tool_request is not None
+                    and pending_tool_request.tool_name
+                    in self._async_submission_tool_names
+                )
+                if (
+                    not async_result.success
+                    and poll_failures == 0
+                    and not is_submission_observation
+                ):
+                    poll_failures = 1
+                if poll_failures >= controller_input.async_policy.max_poll_failures:
+                    return self._pause(
+                        reason=(
+                            "async_poll_failure_budget_exhausted:"
+                            f"{poll_failures}"
+                        ),
+                        async_job_id=async_job_id,
+                        execution_deadline_utc=deadline_utc,
+                        reconciliation_required=True,
+                        clear_pending_tool_request=(pending_tool_request is not None),
+                    )
+
+                if now_utc >= deadline_utc:
+                    if observed_at < deadline_utc or not async_result.success:
+                        return self._await_async_job(
+                            controller_input,
+                            controller_input.cursor,
+                            async_result=async_result,
+                            clear_pending_tool_request=(pending_tool_request is not None),
+                            reason=(
+                                f"Final reconciliation for timed-out async job "
+                                f"{async_job_id}."
+                            ),
+                            execution_deadline_utc=deadline_utc,
+                            force_immediate=True,
+                        )
+                    return self._pause(
+                        reason="async_execution_timeout_after_reconciliation",
+                        async_job_id=async_job_id,
+                        execution_deadline_utc=deadline_utc,
+                        reconciliation_required=False,
+                        clear_pending_tool_request=(pending_tool_request is not None),
+                    )
+
+                reason = f"Awaiting async job {async_job_id}."
+                if (
+                    async_result.async_job_status == AsyncJobStatus.UNKNOWN
+                    and async_result.success
+                    and (
+                        now_utc - started_at
+                    ).total_seconds()
+                    >= controller_input.async_policy.visibility_grace_seconds
+                ):
+                    if controller_input.is_async_job_confirmed_absent(async_job_id):
+                        submission_attempts = (
+                            controller_input.get_async_submission_attempt_count(
+                                submission_tool_names=self._async_submission_tool_names,
+                                ambiguous_error_codes=(
+                                    self._ambiguous_submission_error_codes
+                                ),
+                            )
+                        )
+                        if (
+                            submission_attempts
+                            >= controller_input.async_policy.max_submission_attempts
+                        ):
+                            return self._pause(
+                                reason=(
+                                    "async_submission_absent_after_reconciliation:"
+                                    f"attempts={submission_attempts}"
+                                ),
+                                async_job_id=async_job_id,
+                                execution_deadline_utc=deadline_utc,
+                                reconciliation_required=False,
+                                clear_pending_tool_request=(
+                                    pending_tool_request is not None
+                                ),
+                            )
+                        return self._dispatch_brain(
+                            cursor=controller_input.cursor,
+                            reason=(
+                                "Async submission was not found after provider "
+                                "reconciliation; retry policy permits a new attempt."
+                            ),
+                            clear_pending_tool_request=(
+                                pending_tool_request is not None
+                            ),
+                        )
+                    reason = (
+                        f"Async job {async_job_id} remains unobserved after "
+                        "the visibility grace window."
+                    )
+                return self._await_async_job(
+                    controller_input,
+                    controller_input.cursor,
+                    async_result=async_result,
+                    clear_pending_tool_request=(pending_tool_request is not None),
+                    reason=reason,
+                    execution_deadline_utc=deadline_utc,
+                )
+
+            if async_result.async_job_status == AsyncJobStatus.COMPLETED:
+                return self._dispatch_brain(
+                    cursor=controller_input.cursor,
+                    reason="Async job completed.",
+                    clear_pending_tool_request=(pending_tool_request is not None),
+                )
+
+            if async_result.async_job_status == AsyncJobStatus.CANCELLED:
+                return self._cancel(
+                    "remote_async_job_cancelled",
+                    source=CancellationSource.PROVIDER,
+                    clear_pending_tool_request=(pending_tool_request is not None),
+                )
+
+            if async_result.async_job_status == AsyncJobStatus.FAILED:
+                return self._decide_tool_failure(
+                    controller_input,
+                    tool_result=async_result,
+                    clear_pending_tool_request=(pending_tool_request is not None),
+                )
+
+        if not tool_result.success:
+            return self._decide_tool_failure(
+                controller_input,
+                tool_result=tool_result,
+                clear_pending_tool_request=(pending_tool_request is not None),
+            )
+
+        return self._dispatch_brain(
+            cursor=controller_input.cursor,
+            reason="Tool completed.",
+            clear_pending_tool_request=(pending_tool_request is not None),
+        )
+
+    def _select_async_result(
+        self,
+        controller_input: ControllerInput,
+        *,
+        current_result: ToolResult,
+    ) -> ToolResult:
+        """Use history's monotonic view once the current observation is recorded."""
+        current_is_recorded = any(
+            record.result.request_id == current_result.request_id
+            for record in controller_input.tool_execution_history
+        )
+        if not current_is_recorded:
+            return current_result
+
+        return controller_input.get_latest_async_result() or current_result
+
+    def _decide_tool_failure(
+        self,
+        controller_input: ControllerInput,
+        *,
+        tool_result: ToolResult,
+        clear_pending_tool_request: bool,
+    ) -> ControllerDecision:
+        """Apply the existing Controller-owned retry/replan policy to a failure."""
         # Evidence-driven check: consecutive failures for the same signature
         if not tool_result.success and tool_result.signature:
             consecutive_fails = controller_input.get_consecutive_failures(tool_result.signature)
@@ -265,14 +558,69 @@ class CortexController:
                     next_worker=WorkerRole.PLANNER,
                     requires_checkpoint=True,
                     cursor=cursor,
-                    clear_pending_tool_request=(pending_tool_request is not None),
+                    clear_pending_tool_request=clear_pending_tool_request,
                 )
 
-        reason = "Tool completed." if tool_result.success else "Tool failed."
         return self._dispatch_brain(
             cursor=controller_input.cursor,
+            reason="Tool failed.",
+            clear_pending_tool_request=clear_pending_tool_request,
+        )
+
+    def _await_async_job(
+        self,
+        controller_input: ControllerInput,
+        cursor: ExecutionCursor,
+        *,
+        async_result: ToolResult,
+        clear_pending_tool_request: bool,
+        reason: str,
+        execution_deadline_utc: datetime,
+        force_immediate: bool = False,
+    ) -> ControllerDecision:
+        async_job_id = async_result.async_job_id
+        if async_job_id is None:
+            raise ValueError("Async wait requires an async_job_id.")
+
+        poll_observations = controller_input.get_async_observation_count(
+            async_job_id,
+            excluded_tool_names=self._async_submission_tool_names,
+        )
+        delay_seconds = controller_input.async_policy.poll_interval_seconds
+        for _ in range(poll_observations):
+            delay_seconds = min(
+                delay_seconds * 2,
+                controller_input.async_policy.max_poll_interval_seconds,
+            )
+            if delay_seconds == controller_input.async_policy.max_poll_interval_seconds:
+                break
+        observed_at = self._as_utc(
+            async_result.async_observed_at_utc or self._now_utc()
+        )
+        if force_immediate:
+            resume_after_utc = self._as_utc(self._now_utc())
+        else:
+            resume_after_utc = min(
+                observed_at + timedelta(seconds=delay_seconds),
+                execution_deadline_utc,
+            )
+
+        waiting_cursor = cursor.model_copy(
+            update={
+                "phase": ExecutionPhase.WAITING,
+                "current_worker": WorkerRole.CONTROLLER,
+            }
+        )
+        return ControllerDecision(
+            decision_type=ControllerDecisionType.AWAIT_ASYNC_JOB,
             reason=reason,
-            clear_pending_tool_request=(pending_tool_request is not None),
+            next_worker=WorkerRole.CONTROLLER,
+            cursor=waiting_cursor,
+            async_job_id=async_job_id,
+            resume_after_utc=resume_after_utc,
+            execution_deadline_utc=execution_deadline_utc,
+            requires_checkpoint=True,
+            clear_pending_tool_request=clear_pending_tool_request,
         )
 
     def _dispatch_planner(self, reason: str) -> ControllerDecision:
@@ -282,6 +630,24 @@ class CortexController:
             reason=reason,
             requires_checkpoint=True,
         )
+
+    def _prepare_async_submission_request(
+        self,
+        controller_input: ControllerInput,
+        tool_request: ToolRequest,
+    ) -> ToolRequest:
+        """Attach a stable provider ID before POST so ambiguous results are queryable."""
+        arguments = dict(tool_request.arguments)
+        correlation_key = (
+            f"cortex:{controller_input.identity.execution_id}:"
+            f"{controller_input.cursor.step_id or 'no-step'}:{tool_request.request_id}"
+        )
+        arguments.setdefault(
+            "prompt_id",
+            str(uuid5(NAMESPACE_URL, correlation_key)),
+        )
+        arguments.setdefault("client_id", controller_input.identity.execution_id)
+        return tool_request.model_copy(update={"arguments": arguments})
 
     def _dispatch_brain(
         self,
@@ -327,6 +693,49 @@ class CortexController:
             reason=reason,
             terminal=True,
         )
+
+    def _pause(
+        self,
+        *,
+        reason: str,
+        reconciliation_required: bool,
+        async_job_id: str | None = None,
+        execution_deadline_utc: datetime | None = None,
+        clear_pending_tool_request: bool = False,
+    ) -> ControllerDecision:
+        return ControllerDecision(
+            decision_type=ControllerDecisionType.PAUSE,
+            reason=reason,
+            next_worker=WorkerRole.CONTROLLER,
+            async_job_id=async_job_id,
+            execution_deadline_utc=execution_deadline_utc,
+            reconciliation_required=reconciliation_required,
+            requires_checkpoint=True,
+            clear_pending_tool_request=clear_pending_tool_request,
+        )
+
+    def _cancel(
+        self,
+        reason: str,
+        *,
+        source: CancellationSource,
+        clear_pending_tool_request: bool = True,
+    ) -> ControllerDecision:
+        return ControllerDecision(
+            decision_type=ControllerDecisionType.CANCEL,
+            reason=reason,
+            next_worker=WorkerRole.CONTROLLER,
+            requires_checkpoint=True,
+            clear_pending_tool_request=clear_pending_tool_request,
+            cancellation_source=source,
+            terminal=True,
+        )
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     def _find_next_executable_step(
         self,

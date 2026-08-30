@@ -2,6 +2,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 from langchain_core.tools import tool
@@ -21,10 +22,32 @@ from core.models import (
     ComfyPromptResult,
     RunWorkflowRequest,
 )
+from core.protocol.enums import AsyncJobStatus
 from tools.sandbox_paths import resolve_safe_path, resolve_workspace
 
 # Timeout in seconds for standard HTTP API calls
 DEFAULT_HTTP_TIMEOUT = 30.0
+
+
+class _ComfyHttpError(RuntimeError):
+    def __init__(self, status_code: int, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _history_async_status(status: object) -> AsyncJobStatus:
+    """Map ComfyUI history status evidence to the protocol async-job vocabulary."""
+    if not isinstance(status, dict):
+        return AsyncJobStatus.RUNNING
+
+    status_text = str(status.get("status_str", "")).strip().lower()
+    if "cancel" in status_text:
+        return AsyncJobStatus.CANCELLED
+    if any(token in status_text for token in ("error", "fail")):
+        return AsyncJobStatus.FAILED
+    if status.get("completed") is not True:
+        return AsyncJobStatus.RUNNING
+    return AsyncJobStatus.COMPLETED
 
 
 def get_comfy_tools(
@@ -54,7 +77,10 @@ def get_comfy_tools(
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as http_err:
             error_body = http_err.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"ComfyUI HTTP {http_err.code}: {error_body or http_err.reason}")
+            raise _ComfyHttpError(
+                http_err.code,
+                f"ComfyUI HTTP {http_err.code}: {error_body or http_err.reason}",
+            )
         except urllib.error.URLError as url_err:
             raise ConnectionError(f"Could not connect to ComfyUI server at {base_url}: {url_err.reason}")
 
@@ -87,9 +113,30 @@ def get_comfy_tools(
                 normalized[str_node_id] = node_data
         return normalized
 
+    def _queue_location(queue_data: object, prompt_id: str) -> str | None:
+        if not isinstance(queue_data, dict):
+            return None
+
+        for queue_name in ("queue_running", "queue_pending"):
+            items = queue_data.get(queue_name)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if isinstance(item, (list, tuple)) and len(item) > 1:
+                    candidate = item[1]
+                elif isinstance(item, dict):
+                    candidate = item.get("prompt_id") or item.get("job_id")
+                else:
+                    continue
+                if str(candidate) == prompt_id:
+                    return queue_name
+        return None
+
     @tool("run_comfy_workflow", args_schema=RunWorkflowRequest)
     def run_comfy_workflow(
-        workflow_json: Union[str, Dict[str, Any]], client_id: str = "cortex_node_agent"
+        workflow_json: Union[str, Dict[str, Any]],
+        client_id: str = "cortex_node_agent",
+        prompt_id: str | None = None,
     ) -> str:
         """Queues a prompt workflow to the local ComfyUI instance for image generation.
         
@@ -161,17 +208,39 @@ def get_comfy_tools(
             payload: Dict[str, Any] = {"prompt": parsed_prompt}
             if client_id:
                 payload["client_id"] = client_id
+            if prompt_id:
+                payload["prompt_id"] = prompt_id
 
             # Send prompt request to ComfyUI
             response_data = _http_request("prompt", data=payload, method="POST")
             prompt_id = response_data.get("prompt_id")
 
             if not prompt_id:
+                requested_prompt_id = (
+                    str(payload["prompt_id"])
+                    if payload.get("prompt_id")
+                    else None
+                )
                 return ComfyPromptResult(
                     success=False,
                     message="ComfyUI response did not contain a valid prompt_id",
+                    prompt_id=requested_prompt_id,
                     error_code=COMFY_PROMPT_FAILED,
                     error_details={"response": response_data},
+                    data=(
+                        {"submission_outcome": "ambiguous"}
+                        if requested_prompt_id
+                        else None
+                    ),
+                    is_async_job=bool(requested_prompt_id),
+                    async_job_id=requested_prompt_id,
+                    async_job_status=(
+                        AsyncJobStatus.UNKNOWN if requested_prompt_id else None
+                    ),
+                    async_terminal=False,
+                    async_observed_at_utc=(
+                        datetime.now(timezone.utc) if requested_prompt_id else None
+                    ),
                 ).to_tool_output()
 
             return ComfyPromptResult(
@@ -179,21 +248,85 @@ def get_comfy_tools(
                 message=f"Successfully queued ComfyUI workflow from {source_info} with prompt_id: {prompt_id}",
                 prompt_id=prompt_id,
                 node_errors=response_data.get("node_errors"),
+                is_async_job=True,
+                async_job_id=str(prompt_id),
+                async_job_status=AsyncJobStatus.SUBMITTED,
+                async_terminal=False,
+                async_observed_at_utc=datetime.now(timezone.utc),
             ).to_tool_output()
 
+        except _ComfyHttpError as http_err:
+            return ComfyPromptResult(
+                success=False,
+                message=str(http_err),
+                prompt_id=prompt_id,
+                error_code=(
+                    COMFY_INVALID_PAYLOAD
+                    if http_err.status_code == 400
+                    else COMFY_API_ERROR
+                ),
+                error_details={
+                    "exception_type": type(http_err).__name__,
+                    "status_code": http_err.status_code,
+                },
+                data=(
+                    {"submission_outcome": "ambiguous"}
+                    if prompt_id and http_err.status_code != 400
+                    else None
+                ),
+                is_async_job=bool(prompt_id and http_err.status_code != 400),
+                async_job_id=(prompt_id if http_err.status_code != 400 else None),
+                async_job_status=(
+                    AsyncJobStatus.UNKNOWN
+                    if prompt_id and http_err.status_code != 400
+                    else None
+                ),
+                async_terminal=False,
+                async_observed_at_utc=(
+                    datetime.now(timezone.utc)
+                    if prompt_id and http_err.status_code != 400
+                    else None
+                ),
+            ).to_tool_output()
         except ConnectionError as conn_err:
             return ComfyPromptResult(
                 success=False,
                 message=str(conn_err),
+                prompt_id=prompt_id,
                 error_code=COMFY_CONNECTION_FAILED,
                 error_details={"exception_type": "ConnectionError"},
+                data=(
+                    {"submission_outcome": "ambiguous"}
+                    if prompt_id
+                    else None
+                ),
+                is_async_job=bool(prompt_id),
+                async_job_id=prompt_id,
+                async_job_status=(AsyncJobStatus.UNKNOWN if prompt_id else None),
+                async_terminal=False,
+                async_observed_at_utc=(
+                    datetime.now(timezone.utc) if prompt_id else None
+                ),
             ).to_tool_output()
         except Exception as exc:
             return ComfyPromptResult(
                 success=False,
                 message=f"Error submitting workflow to ComfyUI: {exc}",
+                prompt_id=prompt_id,
                 error_code=COMFY_API_ERROR,
                 error_details={"exception_type": type(exc).__name__},
+                data=(
+                    {"submission_outcome": "ambiguous"}
+                    if prompt_id
+                    else None
+                ),
+                is_async_job=bool(prompt_id),
+                async_job_id=prompt_id,
+                async_job_status=(AsyncJobStatus.UNKNOWN if prompt_id else None),
+                async_terminal=False,
+                async_observed_at_utc=(
+                    datetime.now(timezone.utc) if prompt_id else None
+                ),
             ).to_tool_output()
 
     @tool("download_comfy_output_image", args_schema=ComfyDownloadImageRequest)
@@ -251,11 +384,42 @@ def get_comfy_tools(
             history_data = _http_request(endpoint, method="GET")
 
             if safe_prompt_id not in history_data:
+                queue_data = _http_request("queue", method="GET")
+                queue_location = _queue_location(queue_data, safe_prompt_id)
+                if queue_location is not None:
+                    return ComfyHistoryResult(
+                        success=True,
+                        message=(
+                            "ComfyUI job is present in "
+                            f"{queue_location} for prompt_id: {safe_prompt_id}"
+                        ),
+                        prompt_id=safe_prompt_id,
+                        completed=False,
+                        data={"provider_visibility": queue_location},
+                        status_details={"queue_location": queue_location},
+                        is_async_job=True,
+                        async_job_id=safe_prompt_id,
+                        async_job_status=AsyncJobStatus.RUNNING,
+                        async_terminal=False,
+                        async_observed_at_utc=datetime.now(timezone.utc),
+                    ).to_tool_output()
+
+                # Close the queue-to-history transition race before declaring absence.
+                history_data = _http_request(endpoint, method="GET")
+
+            if safe_prompt_id not in history_data:
                 return ComfyHistoryResult(
-                    success=False,
-                    message=f"No execution history found for prompt_id: {safe_prompt_id}",
+                    success=True,
+                    message=f"ComfyUI history is not visible yet for prompt_id: {safe_prompt_id}",
                     prompt_id=safe_prompt_id,
                     completed=False,
+                    data={"provider_visibility": "absent"},
+                    status_details={"provider_visibility": "absent"},
+                    is_async_job=True,
+                    async_job_id=safe_prompt_id,
+                    async_job_status=AsyncJobStatus.UNKNOWN,
+                    async_terminal=False,
+                    async_observed_at_utc=datetime.now(timezone.utc),
                 ).to_tool_output()
 
             item_data = history_data[safe_prompt_id]
@@ -271,22 +435,38 @@ def get_comfy_tools(
                                 extracted_filenames.append(img["filename"])
 
             primary_filename = extracted_filenames[0] if extracted_filenames else None
+            async_status = _history_async_status(status)
 
-            if extracted_filenames:
+            if async_status == AsyncJobStatus.COMPLETED and extracted_filenames:
                 files_str = ", ".join(extracted_filenames)
                 msg = f"Retrieved execution history for prompt_id: {safe_prompt_id}. Output images: [{files_str}] (Primary: {primary_filename})"
+            elif async_status == AsyncJobStatus.COMPLETED:
+                msg = f"ComfyUI workflow completed for prompt_id: {safe_prompt_id}. No output images were reported."
+            elif async_status == AsyncJobStatus.FAILED:
+                msg = f"ComfyUI workflow failed for prompt_id: {safe_prompt_id}."
+            elif async_status == AsyncJobStatus.CANCELLED:
+                msg = f"ComfyUI workflow was cancelled for prompt_id: {safe_prompt_id}."
             else:
-                msg = f"Retrieved execution history for prompt_id: {safe_prompt_id}. No output images generated yet."
+                msg = f"ComfyUI workflow is still running for prompt_id: {safe_prompt_id}."
 
             return ComfyHistoryResult(
-                success=True,
+                success=async_status not in {AsyncJobStatus.FAILED, AsyncJobStatus.CANCELLED},
                 message=msg,
                 prompt_id=safe_prompt_id,
-                completed=status.get("completed", True),
+                completed=async_status == AsyncJobStatus.COMPLETED,
                 filenames=extracted_filenames,
                 primary_filename=primary_filename,
                 outputs=outputs,
                 status_details=status,
+                is_async_job=True,
+                async_job_id=safe_prompt_id,
+                async_job_status=async_status,
+                async_terminal=async_status in {
+                    AsyncJobStatus.COMPLETED,
+                    AsyncJobStatus.FAILED,
+                    AsyncJobStatus.CANCELLED,
+                },
+                async_observed_at_utc=datetime.now(timezone.utc),
             ).to_tool_output()
 
         except ConnectionError as conn_err:
@@ -297,6 +477,11 @@ def get_comfy_tools(
                 prompt_id=safe_id,
                 error_code=COMFY_CONNECTION_FAILED,
                 error_details={"exception_type": "ConnectionError"},
+                is_async_job=bool(safe_id),
+                async_job_id=safe_id or None,
+                async_job_status=(AsyncJobStatus.UNKNOWN if safe_id else None),
+                async_terminal=False,
+                async_observed_at_utc=(datetime.now(timezone.utc) if safe_id else None),
             ).to_tool_output()
         except Exception as exc:
             safe_id = prompt_id if isinstance(prompt_id, str) else ""
@@ -309,6 +494,11 @@ def get_comfy_tools(
                     "prompt_id": safe_id,
                     "exception_type": type(exc).__name__,
                 },
+                is_async_job=bool(safe_id),
+                async_job_id=safe_id or None,
+                async_job_status=(AsyncJobStatus.UNKNOWN if safe_id else None),
+                async_terminal=False,
+                async_observed_at_utc=(datetime.now(timezone.utc) if safe_id else None),
             ).to_tool_output()
 
     return [run_comfy_workflow, download_comfy_output_image, get_comfy_history]

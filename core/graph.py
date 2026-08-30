@@ -5,8 +5,9 @@ from typing import Any, Callable
 
 from langchain_ollama import ChatOllama
 from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph
-from langgraph.graph.state import END, CompiledStateGraph
+from langgraph.graph.state import END
 from langgraph.prebuilt import ToolNode
 
 from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, FINAL_ANSWER_SYSTEM_PROMPT, MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE, STEP_COMPLETED_SYSTEM_PROMPT
@@ -14,6 +15,11 @@ from core.graph_nodes import create_graph_nodes
 from core.graph_routing import  route_after_controller
 from core.graph_runner import run_prompt
 from core.rag import WorkspaceRAG
+from core.runtime.async_poller import CheckpointedGraphApp, LocalAsyncPollingRuntime
+from core.runtime.gpu_resources import (
+    GpuResourcePolicy,
+    RuntimeGpuObserver,
+)
 from core.runtime.state_propagation import propagate_execution_state
 from core.state import AgentState
 from tools.comfy_ops import get_comfy_tools
@@ -97,9 +103,59 @@ def _invoke_state_node(node: Any, state: AgentState) -> Any:
     raise TypeError(f"State node '{getattr(node, 'name', type(node).__name__)}' is not executable")
 
 
-def _register_state_node(workflow: StateGraph, name: str, node: StateNodeCallable | Any) -> None:
+def _runtime_observation_fields(state: AgentState) -> dict[str, object]:
+    fields: dict[str, object] = {}
+
+    run_id = state.get("run_id")
+    if isinstance(run_id, str) and run_id:
+        fields["run_id"] = run_id
+
+    execution_state = state.get("execution_state")
+    protocol_visible = getattr(execution_state, "protocol_visible", None)
+    identity = getattr(protocol_visible, "identity", None)
+    cursor = getattr(protocol_visible, "cursor", None)
+    pending_tool_request = getattr(protocol_visible, "pending_tool_request", None)
+
+    execution_id = getattr(identity, "execution_id", None)
+    if isinstance(execution_id, str) and execution_id:
+        fields["execution_id"] = execution_id
+
+    step_id = getattr(cursor, "step_id", None)
+    if isinstance(step_id, str) and step_id:
+        fields["step_id"] = step_id
+
+    tool_name = getattr(pending_tool_request, "tool_name", None)
+    if isinstance(tool_name, str) and tool_name:
+        fields["tool_name"] = tool_name
+
+    controller_decision = state.get("controller_decision")
+    async_job_id = getattr(controller_decision, "async_job_id", None)
+    if isinstance(async_job_id, str) and async_job_id:
+        fields["async_job_id"] = async_job_id
+
+    return fields
+
+
+def _register_state_node(
+    workflow: StateGraph,
+    name: str,
+    node: StateNodeCallable | Any,
+    *,
+    resource_observer: RuntimeGpuObserver | None = None,
+) -> None:
     def _state_node(state: AgentState) -> Any:
-        result = _invoke_state_node(node, state)
+        if (
+            resource_observer is not None
+            and resource_observer.should_observe_graph_node(name)
+        ):
+            with resource_observer.observe_operation(
+                component="graph_node",
+                operation=name,
+                fields=_runtime_observation_fields(state),
+            ):
+                result = _invoke_state_node(node, state)
+        else:
+            result = _invoke_state_node(node, state)
         return _apply_state_propagators(state, result)
 
     workflow.add_node(name, _state_node)
@@ -133,6 +189,8 @@ def _build_tool_transport_state(state: AgentState) -> AgentState | None:
     tool_calls_copy = [dict(call) if isinstance(call, dict) else call for call in tool_calls]
 
     tool_calls_copy[0]["id"] = pending_request_id
+    tool_calls_copy[0]["name"] = pending_tool_request.tool_name
+    tool_calls_copy[0]["args"] = dict(pending_tool_request.arguments)
 
     copied_last_message = last_message.model_copy(
         update={"tool_calls": tool_calls_copy}
@@ -170,7 +228,9 @@ def build_app(
     tool_node_factory: Callable[[list[Any]], Any] = ToolNode,
     project_root: Path | None = None,
     show_raw_llm: bool = False,
-) -> CompiledStateGraph:
+    checkpointer_factory: Callable[[], Any] = InMemorySaver,
+    gpu_resource_policy: GpuResourcePolicy | None = None,
+) -> CheckpointedGraphApp:
     app_root = project_root or Path(__file__).resolve().parents[1]
     workspace_root = Path(workspace_dir).resolve()
     workspace_root_str = str(workspace_root)
@@ -217,14 +277,51 @@ def build_app(
         show_raw_llm=show_raw_llm,
     )
 
+    resource_observer = (
+        RuntimeGpuObserver(policy=gpu_resource_policy)
+        if gpu_resource_policy is not None
+        and gpu_resource_policy.telemetry_enabled
+        else None
+    )
+
     workflow = StateGraph(AgentState)
     wrapped_tool_node = _wrap_tool_node_for_protocol_request_id(tool_node_factory(tools))
-    _register_state_node(workflow, "planner", planner_node)
-    _register_state_node(workflow, "controller", controller_node)
-    _register_state_node(workflow, "brain", brain_node)
-    _register_state_node(workflow, "tools", wrapped_tool_node)
-    _register_state_node(workflow, "capture_tool_output", capture_tool_output_node)
-    _register_state_node(workflow, "summarize_memory", summarize_memory_node)
+    _register_state_node(
+        workflow,
+        "planner",
+        planner_node,
+        resource_observer=resource_observer,
+    )
+    _register_state_node(
+        workflow,
+        "controller",
+        controller_node,
+        resource_observer=resource_observer,
+    )
+    _register_state_node(
+        workflow,
+        "brain",
+        brain_node,
+        resource_observer=resource_observer,
+    )
+    _register_state_node(
+        workflow,
+        "tools",
+        wrapped_tool_node,
+        resource_observer=resource_observer,
+    )
+    _register_state_node(
+        workflow,
+        "capture_tool_output",
+        capture_tool_output_node,
+        resource_observer=resource_observer,
+    )
+    _register_state_node(
+        workflow,
+        "summarize_memory",
+        summarize_memory_node,
+        resource_observer=resource_observer,
+    )
 
     workflow.set_entry_point("planner")
 
@@ -236,4 +333,15 @@ def build_app(
     workflow.add_edge("brain", "controller")
     workflow.add_edge("summarize_memory", END)
 
-    return workflow.compile()
+    compiled_graph = workflow.compile(
+        checkpointer=checkpointer_factory(),
+    )
+    async_runtime = LocalAsyncPollingRuntime(
+        compiled_graph=compiled_graph,
+        tools=tools,
+        resource_observer=resource_observer,
+    )
+    return CheckpointedGraphApp(
+        compiled_graph=compiled_graph,
+        async_runtime=async_runtime,
+    )

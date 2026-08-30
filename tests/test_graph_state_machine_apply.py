@@ -224,3 +224,53 @@ def test_apply_clears_active_step_and_tool_request_on_termination():
     assert updated.protocol_visible.active_step is None
     assert updated.protocol_visible.pending_tool_request is None
     assert updated.protocol_visible.completed_step_ids == ("step-0",)
+
+
+def test_apply_preserves_active_step_while_awaiting_async_job():
+    step_1 = ExecutionStep(
+        step_id="step-1",
+        title="Generate image",
+        status=StepStatus.ACTIVE,
+        attempt=1,
+    )
+    plan = ExecutionPlan(
+        plan_id="plan-1",
+        revision=1,
+        objective="Generate image",
+        steps=(step_1,),
+    )
+    state = _build_state(
+        cursor=ExecutionCursor(
+            phase=ExecutionPhase.EXECUTING,
+            step_id="step-1",
+            current_worker=WorkerRole.TOOL_RUNTIME,
+        ),
+        active_plan=plan,
+        active_step=step_1,
+        pending_tool_request=ToolRequest(
+            request_id="req-1",
+            tool_name="run_comfy_workflow",
+        ),
+    )
+
+    updated = apply_controller_decision_to_state(
+        state,
+        ControllerDecision(
+            decision_type=ControllerDecisionType.AWAIT_ASYNC_JOB,
+            reason="Awaiting async job prompt-1.",
+            next_worker=WorkerRole.CONTROLLER,
+            cursor=ExecutionCursor(
+                phase=ExecutionPhase.WAITING,
+                step_id="step-1",
+                current_worker=WorkerRole.CONTROLLER,
+            ),
+            async_job_id="prompt-1",
+            requires_checkpoint=True,
+            clear_pending_tool_request=True,
+        ),
+    )
+
+    assert updated.protocol_visible.cursor.phase == ExecutionPhase.WAITING
+    assert updated.protocol_visible.cursor.current_worker == WorkerRole.CONTROLLER
+    assert updated.protocol_visible.active_step == step_1
+    assert updated.protocol_visible.pending_tool_request is None

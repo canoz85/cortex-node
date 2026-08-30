@@ -25,6 +25,7 @@ class ExecutionPhase(StrEnum):
     INITIALIZING = "initializing"
     PLANNING = "planning"
     EXECUTING = "executing"
+    WAITING = "waiting"
     REPLANNING = "replanning"
     TERMINATING = "terminating"
     COMPLETED = "completed"
@@ -62,6 +63,13 @@ class AsyncJobStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+class CancellationSource(StrEnum):
+    """Origin of an accepted execution cancellation."""
+
+    LOCAL = "local"
+    PROVIDER = "provider"
+
+
 class PlannerOutcome(StrEnum):
     EXECUTION_PLAN = "execution_plan"
     DIRECT_RESPONSE = "direct_response"
@@ -86,6 +94,7 @@ class ControllerDecisionType(StrEnum):
     DISPATCH_BRAIN = "dispatch_brain"
     DISPATCH_TOOL_RUNTIME = "dispatch_tool_runtime"
     DISPATCH_SUMMARY = "dispatch_summary"
+    AWAIT_ASYNC_JOB = "await_async_job"
     REQUEST_REPLAN = "request_replan"
 
     PAUSE = "pause"

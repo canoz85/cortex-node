@@ -2,7 +2,7 @@ from langchain_core.messages import ToolMessage
 
 from core.graph_capture import create_capture_tool_output_node
 from core.models import ToolResult as TransportToolResult
-from core.protocol.enums import ControllerDecisionType, ExecutionPhase, WorkerRole
+from core.protocol.enums import AsyncJobStatus, ControllerDecisionType, ExecutionPhase, WorkerRole
 from core.protocol.models import (
     ControllerDecision,
     ExecutionCursor,
@@ -201,3 +201,54 @@ def test_capture_keeps_cross_step_records_with_original_step_ids():
     assert len(history) == 2
     assert history[0].step_id == "s1"
     assert history[1].step_id == "s2"
+
+
+def test_capture_preserves_async_job_evidence_in_protocol_result():
+    node = create_capture_tool_output_node()
+    payload = TransportToolResult(
+        success=True,
+        message="ComfyUI workflow accepted.",
+        is_async_job=True,
+        async_job_id="prompt-1",
+        async_job_status=AsyncJobStatus.SUBMITTED,
+        async_terminal=False,
+    ).to_tool_output()
+    state = _build_state(
+        step_id="s1",
+        request_id="req-1",
+        tool_name="run_comfy_workflow",
+        arguments={"workflow_json": {"1": {}}},
+        content=payload,
+    )
+
+    update = node(state)
+    result = update["execution_state"].working.last_tool_result
+
+    assert result is not None
+    assert result.is_async_job is True
+    assert result.async_job_id == "prompt-1"
+    assert result.async_job_status == AsyncJobStatus.SUBMITTED
+    assert result.async_terminal is False
+
+
+def test_capture_does_not_count_nonterminal_async_observation_as_failure():
+    node = create_capture_tool_output_node()
+    payload = TransportToolResult(
+        success=False,
+        message="ComfyUI history is temporarily unavailable.",
+        is_async_job=True,
+        async_job_id="prompt-1",
+        async_job_status=AsyncJobStatus.UNKNOWN,
+        async_terminal=False,
+    ).to_tool_output()
+    state = _build_state(
+        step_id="s1",
+        request_id="req-1",
+        tool_name="get_comfy_history",
+        arguments={"prompt_id": "prompt-1"},
+        content=payload,
+    )
+
+    update = node(state)
+
+    assert update["execution_state"].working.repeat_fail_count == 0

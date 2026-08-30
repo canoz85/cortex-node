@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .enums import (
     AsyncJobStatus,
     BrainOutcome,
+    CancellationSource,
     ControllerDecisionType,
     EventType,
     ExecutionPhase,
@@ -70,6 +71,31 @@ class RetryMetadata(ImmutableProtocolModel):
     max_retries: int = Field(default=0, ge=0)
     last_error_code: str | None = None
     last_error_message: str | None = None
+
+
+class AsyncJobPolicy(ImmutableProtocolModel):
+    """Controller-owned limits for provider-managed asynchronous jobs."""
+
+    visibility_grace_seconds: int = Field(default=15, ge=0)
+    poll_interval_seconds: int = Field(default=5, ge=1)
+    max_poll_interval_seconds: int = Field(default=30, ge=1)
+    execution_timeout_seconds: int = Field(default=1800, ge=1)
+    max_poll_failures: int = Field(default=3, ge=1)
+    max_submission_attempts: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def validate_async_policy_limits(self) -> "AsyncJobPolicy":
+        if self.max_poll_interval_seconds < self.poll_interval_seconds:
+            raise ValueError(
+                "max_poll_interval_seconds must be greater than or equal to "
+                "poll_interval_seconds"
+            )
+        if self.execution_timeout_seconds < self.visibility_grace_seconds:
+            raise ValueError(
+                "execution_timeout_seconds must be greater than or equal to "
+                "visibility_grace_seconds"
+            )
+        return self
 
 
 class ExecutionStep(ImmutableProtocolModel):
@@ -329,6 +355,8 @@ class ControllerInput(ImmutableProtocolModel):
     brain_result: BrainResult | None = None
     tool_result: ToolResult | None = None
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
+    async_policy: AsyncJobPolicy = Field(default_factory=AsyncJobPolicy)
+    cancel_requested: bool = False
     tool_execution_history: tuple[ToolExecutionRecord, ...] = Field(default_factory=tuple)
 
     def get_step_records(self, step_id: str | None = None) -> tuple[ToolExecutionRecord, ...]:
@@ -336,6 +364,148 @@ class ControllerInput(ImmutableProtocolModel):
         if not target_step_id:
             return self.tool_execution_history
         return tuple(r for r in self.tool_execution_history if r.step_id == target_step_id)
+
+    def _latest_async_results_by_job(
+        self,
+        step_id: str | None = None,
+    ) -> tuple[ToolResult, ...]:
+        """Build a monotonic latest-result view for every provider job."""
+        latest_by_job_id: dict[str, ToolResult] = {}
+        terminal_job_ids: set[str] = set()
+        observation_order: list[str] = []
+
+        for record in self.get_step_records(step_id):
+            result = record.result
+            if not result.is_async_job or result.async_job_id is None:
+                continue
+            if result.async_job_id in terminal_job_ids:
+                continue
+
+            latest_by_job_id[result.async_job_id] = result
+            if result.async_job_id in observation_order:
+                observation_order.remove(result.async_job_id)
+            observation_order.append(result.async_job_id)
+            if result.async_terminal:
+                terminal_job_ids.add(result.async_job_id)
+
+        return tuple(latest_by_job_id[job_id] for job_id in observation_order)
+
+    def get_latest_async_result(self, step_id: str | None = None) -> ToolResult | None:
+        """Return the latest valid async observation for a step from immutable evidence."""
+        results = self._latest_async_results_by_job(step_id)
+        return results[-1] if results else None
+
+    def get_active_async_job_ids(self, step_id: str | None = None) -> tuple[str, ...]:
+        """Return every provider job whose monotonic latest state is non-terminal."""
+        return tuple(
+            result.async_job_id
+            for result in self._latest_async_results_by_job(step_id)
+            if not result.async_terminal and result.async_job_id is not None
+        )
+
+    def get_nonterminal_async_job_id(self, step_id: str | None = None) -> str | None:
+        """Return the active provider job ID for a step, if its latest observation is non-terminal."""
+        result = self.get_latest_async_result(step_id)
+        if result is None or result.async_terminal:
+            return None
+        return result.async_job_id
+
+    def has_terminal_async_result(self, job_id: str) -> bool:
+        """Report whether immutable evidence contains a terminal observation for a provider job."""
+        return any(
+            record.result.is_async_job
+            and record.result.async_job_id == job_id
+            and record.result.async_terminal
+            for record in self.tool_execution_history
+        )
+
+    def get_async_job_started_at_utc(self, job_id: str) -> datetime | None:
+        """Return the earliest recorded observation time for one provider job."""
+        observed_times = tuple(
+            record.result.async_observed_at_utc
+            for record in self.tool_execution_history
+            if record.result.is_async_job
+            and record.result.async_job_id == job_id
+            and record.result.async_observed_at_utc is not None
+        )
+        return min(observed_times) if observed_times else None
+
+    def get_async_observation_count(
+        self,
+        job_id: str,
+        *,
+        excluded_tool_names: frozenset[str] = frozenset(),
+    ) -> int:
+        """Count status observations used to derive polling backoff."""
+        return sum(
+            1
+            for record in self.tool_execution_history
+            if record.result.is_async_job
+            and record.result.async_job_id == job_id
+            and record.tool_name not in excluded_tool_names
+            and record.result.async_job_status in {
+                AsyncJobStatus.RUNNING,
+                AsyncJobStatus.UNKNOWN,
+            }
+        )
+
+    def get_consecutive_async_poll_failures(
+        self,
+        job_id: str,
+        *,
+        excluded_tool_names: frozenset[str] = frozenset(),
+    ) -> int:
+        """Count transport/status failures since the latest successful observation."""
+        count = 0
+        for record in reversed(self.tool_execution_history):
+            result = record.result
+            if not result.is_async_job or result.async_job_id != job_id:
+                continue
+            if record.tool_name in excluded_tool_names:
+                continue
+            if result.async_terminal or result.success:
+                break
+            count += 1
+        return count
+
+    def get_async_submission_attempt_count(
+        self,
+        step_id: str | None = None,
+        *,
+        submission_tool_names: frozenset[str] = frozenset(),
+        ambiguous_error_codes: frozenset[str] = frozenset(),
+    ) -> int:
+        """Count immutable submission executions for a step."""
+        return sum(
+            1
+            for record in self.get_step_records(step_id)
+            if (
+                record.tool_name in submission_tool_names
+                and (
+                    record.result.is_async_job
+                    or record.result.error_code is None
+                    or record.result.error_code in ambiguous_error_codes
+                )
+                if submission_tool_names
+                else record.result.async_job_status == AsyncJobStatus.SUBMITTED
+            )
+        )
+
+    def is_async_job_confirmed_absent(self, job_id: str) -> bool:
+        """Read normalized provider visibility without exposing raw payload access."""
+        latest = next(
+            (
+                result
+                for result in reversed(self._latest_async_results_by_job())
+                if result.async_job_id == job_id
+            ),
+            None,
+        )
+        return bool(
+            latest is not None
+            and isinstance(latest.data, dict)
+            and latest.data.get("provider_visibility") == "absent"
+        )
 
     def get_consecutive_failures(self, signature: str | None = None) -> int:
         count = 0
@@ -473,6 +643,8 @@ class ProtocolVisibleState(ImmutableProtocolModel):
     completed_step_ids: StepIdList = Field(default_factory=tuple)
     accepted_event_history: EventHistory = Field(default_factory=tuple)
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
+    async_policy: AsyncJobPolicy = Field(default_factory=AsyncJobPolicy)
+    cancellation_source: CancellationSource | None = None
     summary: ExecutionSummary | None = None
 
 
@@ -492,6 +664,7 @@ class WorkingState(ImmutableProtocolModel):
     last_tool_result: ToolResult | None = None
     tool_execution_history: tuple[ToolExecutionRecord, ...] = Field(default_factory=tuple)
     repeat_fail_count: int = 0
+    cancel_requested: bool = False
     routing_metadata: dict[str, JsonValue] = Field(default_factory=dict)
     planner_metadata: dict[str, JsonValue] = Field(default_factory=dict)
     debug_metadata: dict[str, JsonValue] = Field(default_factory=dict)
@@ -553,5 +726,11 @@ class ControllerDecision(ImmutableProtocolModel):
 
     pending_tool_request: ToolRequest | None = None
     clear_pending_tool_request: bool = False
+
+    async_job_id: str | None = None
+    resume_after_utc: datetime | None = None
+    execution_deadline_utc: datetime | None = None
+    reconciliation_required: bool = False
+    cancellation_source: CancellationSource | None = None
 
     terminal: bool = False
