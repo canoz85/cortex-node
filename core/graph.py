@@ -17,6 +17,7 @@ from core.graph_runner import run_prompt
 from core.rag import WorkspaceRAG
 from core.runtime.async_poller import CheckpointedGraphApp, LocalAsyncPollingRuntime
 from core.runtime.gpu_resources import (
+    GpuResourceCoordinator,
     GpuResourcePolicy,
     RuntimeGpuObserver,
 )
@@ -55,7 +56,14 @@ def _default_rag_factory(knowledge_root: Path, embedding_model: str, rag_top_k: 
     )
 
 
-def _default_tool_list_factory(workspace_root: str, knowledge_root: str, rag_service: WorkspaceRAG, model: str) -> list[Any]:
+def _default_tool_list_factory(
+    workspace_root: str,
+    knowledge_root: str,
+    rag_service: WorkspaceRAG,
+    model: str,
+    *,
+    resource_coordinator: GpuResourceCoordinator | None = None,
+) -> list[Any]:
     return [
         *get_file_tools(workspace_root, knowledge_dir=knowledge_root),
         *get_exec_tools(workspace_root),
@@ -65,7 +73,10 @@ def _default_tool_list_factory(workspace_root: str, knowledge_root: str, rag_ser
         *get_sap_tools(workspace_root),
         *get_scada_tools(workspace_root),
         *get_vision_tools(workspace_root),
-        *get_comfy_tools(workspace_root),
+        *get_comfy_tools(
+            workspace_root,
+            resource_coordinator=resource_coordinator,
+        ),
     ]
 
 
@@ -230,6 +241,7 @@ def build_app(
     show_raw_llm: bool = False,
     checkpointer_factory: Callable[[], Any] = InMemorySaver,
     gpu_resource_policy: GpuResourcePolicy | None = None,
+    gpu_resource_coordinator: GpuResourceCoordinator | None = None,
 ) -> CheckpointedGraphApp:
     app_root = project_root or Path(__file__).resolve().parents[1]
     workspace_root = Path(workspace_dir).resolve()
@@ -239,7 +251,26 @@ def build_app(
     rag_service = rag_factory(knowledge_root, embedding_model, rag_top_k)
     sap_system_prompt = _load_sap_system_prompt(app_root)
 
-    tools = tool_list_factory(workspace_root_str, str(knowledge_root), rag_service, model)
+    resolved_gpu_policy = gpu_resource_policy or GpuResourcePolicy()
+    resource_coordinator = gpu_resource_coordinator
+    if resource_coordinator is None and resolved_gpu_policy.handoff_enabled:
+        resource_coordinator = GpuResourceCoordinator(policy=resolved_gpu_policy)
+
+    if tool_list_factory is _default_tool_list_factory:
+        tools = _default_tool_list_factory(
+            workspace_root_str,
+            str(knowledge_root),
+            rag_service,
+            model,
+            resource_coordinator=resource_coordinator,
+        )
+    else:
+        tools = tool_list_factory(
+            workspace_root_str,
+            str(knowledge_root),
+            rag_service,
+            model,
+        )
     tools_set = {getattr(tool, "name", "") for tool in tools}
 
     # Format the available tools into a clean, scannable string block
@@ -278,9 +309,8 @@ def build_app(
     )
 
     resource_observer = (
-        RuntimeGpuObserver(policy=gpu_resource_policy)
-        if gpu_resource_policy is not None
-        and gpu_resource_policy.telemetry_enabled
+        RuntimeGpuObserver(policy=resolved_gpu_policy)
+        if resolved_gpu_policy.telemetry_enabled
         else None
     )
 
@@ -340,6 +370,7 @@ def build_app(
         compiled_graph=compiled_graph,
         tools=tools,
         resource_observer=resource_observer,
+        resource_coordinator=resource_coordinator,
     )
     return CheckpointedGraphApp(
         compiled_graph=compiled_graph,

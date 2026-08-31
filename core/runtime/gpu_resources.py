@@ -1,16 +1,20 @@
-"""Observe-only GPU resource telemetry for runtime execution boundaries.
+"""Runtime GPU telemetry and provider-local resource handoff.
 
-This module deliberately does not make Controller or protocol decisions.  It
-samples host GPU evidence and emits bounded logs so a later resource handoff
-policy can be based on measurements rather than assumptions.
+This module deliberately does not make Controller or protocol decisions.
+Telemetry remains observational, while the optional handoff coordinator owns
+only the runtime boundary between Ollama and ComfyUI.
 """
 
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import subprocess
 import threading
+import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -34,9 +38,17 @@ class GpuResourcePolicy:
     """Configuration kept outside the execution protocol and Controller."""
 
     mode: GpuResourceMode = GpuResourceMode.DISABLED
+    handoff_enabled: bool = False
     probe_timeout_seconds: float = 2.0
     sample_processes: bool = True
     max_logged_processes: int = 12
+    handoff_http_timeout_seconds: float = 5.0
+    handoff_timeout_seconds: float = 30.0
+    handoff_poll_interval_seconds: float = 1.0
+    comfy_max_active_vram_mib: int = 512
+    gpu_device_index: int = 0
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    comfy_base_url: str = "http://127.0.0.1:8188"
     observed_graph_nodes: frozenset[str] = frozenset({
         "planner",
         "brain",
@@ -50,12 +62,309 @@ class GpuResourcePolicy:
             raise ValueError("probe_timeout_seconds must be greater than zero.")
         if self.max_logged_processes < 1:
             raise ValueError("max_logged_processes must be at least one.")
+        if self.handoff_http_timeout_seconds <= 0:
+            raise ValueError("handoff_http_timeout_seconds must be greater than zero.")
+        if self.handoff_timeout_seconds <= 0:
+            raise ValueError("handoff_timeout_seconds must be greater than zero.")
+        if self.handoff_poll_interval_seconds <= 0:
+            raise ValueError("handoff_poll_interval_seconds must be greater than zero.")
+        if self.comfy_max_active_vram_mib < 0:
+            raise ValueError("comfy_max_active_vram_mib must not be negative.")
+        if self.gpu_device_index < 0:
+            raise ValueError("gpu_device_index must not be negative.")
+        if not self.ollama_base_url.strip():
+            raise ValueError("ollama_base_url must not be empty.")
+        if not self.comfy_base_url.strip():
+            raise ValueError("comfy_base_url must not be empty.")
         if not self.observed_graph_nodes:
             raise ValueError("observed_graph_nodes must not be empty.")
 
     @property
     def telemetry_enabled(self) -> bool:
         return self.mode == GpuResourceMode.OBSERVE_ONLY
+
+
+class GpuResourceHandoffError(RuntimeError):
+    """Raised when exclusive GPU ownership cannot be verified safely."""
+
+
+JsonHttpRequest = Callable[
+    [str, str, Mapping[str, object] | None, float],
+    Mapping[str, Any],
+]
+
+
+def _json_http_request(
+    url: str,
+    method: str,
+    payload: Mapping[str, object] | None,
+    timeout_seconds: float,
+) -> Mapping[str, Any]:
+    headers = {"Content-Type": "application/json"}
+    body = json.dumps(dict(payload)).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            raw_body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="ignore")
+        raise GpuResourceHandoffError(
+            f"HTTP {exc.code} from {url}: {_bounded_error(error_body or exc.reason)}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise GpuResourceHandoffError(
+            f"Could not connect to {url}: {_bounded_error(exc.reason)}"
+        ) from exc
+
+    if not raw_body.strip():
+        return {}
+    try:
+        parsed = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        raise GpuResourceHandoffError(
+            f"Invalid JSON response from {url}: {_bounded_error(exc)}"
+        ) from exc
+    if not isinstance(parsed, Mapping):
+        raise GpuResourceHandoffError(f"Expected an object response from {url}.")
+    return parsed
+
+
+class GpuResourceCoordinator:
+    """Fail-closed, single-GPU handoff between Ollama and ComfyUI.
+
+    Ollama itself remains running.  Only loaded model runners are unloaded.
+    ComfyUI likewise remains running; its models and executor cache are freed
+    after terminal provider evidence is observed.
+    """
+
+    _MIB = 1024 * 1024
+
+    def __init__(
+        self,
+        *,
+        policy: GpuResourcePolicy,
+        request_json: JsonHttpRequest = _json_http_request,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = perf_counter,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self.policy = policy
+        self._request_json = request_json
+        self._sleep = sleep
+        self._monotonic = monotonic
+        self._logger = logger or get_logger(__name__)
+        self._transition_lock = threading.Lock()
+
+    def prepare_for_comfy(self) -> None:
+        """Unload every Ollama model and verify ``/api/ps`` is empty."""
+        if not self.policy.handoff_enabled:
+            return
+
+        with self._transition_lock:
+            model_names = self._list_ollama_models()
+            self._log_handoff(
+                direction="ollama_to_comfy",
+                stage="started",
+                model_count=len(model_names),
+            )
+            for model_name in model_names:
+                self._request(
+                    self.policy.ollama_base_url,
+                    "/api/generate",
+                    method="POST",
+                    payload={
+                        "model": model_name,
+                        "prompt": "",
+                        "stream": False,
+                        "keep_alive": 0,
+                    },
+                )
+
+            self._wait_until(
+                self._ollama_is_empty,
+                description="Ollama /api/ps to become empty",
+            )
+            self._log_handoff(
+                direction="ollama_to_comfy",
+                stage="completed",
+                model_count=len(model_names),
+            )
+
+    def prepare_for_llm(self) -> None:
+        """Free ComfyUI models/cache and verify its active torch VRAM is low."""
+        if not self.policy.handoff_enabled:
+            return
+
+        with self._transition_lock:
+            self._log_handoff(
+                direction="comfy_to_ollama",
+                stage="started",
+            )
+            self._request(
+                self.policy.comfy_base_url,
+                "/free",
+                method="POST",
+                payload={"unload_models": True, "free_memory": True},
+            )
+            self._wait_until(
+                self._comfy_is_released,
+                description=(
+                    "ComfyUI active torch VRAM to fall to at most "
+                    f"{self.policy.comfy_max_active_vram_mib} MiB"
+                ),
+            )
+            self._log_handoff(
+                direction="comfy_to_ollama",
+                stage="completed",
+            )
+
+    def _request(
+        self,
+        base_url: str,
+        path: str,
+        *,
+        method: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> Mapping[str, Any]:
+        url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+        try:
+            return self._request_json(
+                url,
+                method,
+                payload,
+                self.policy.handoff_http_timeout_seconds,
+            )
+        except GpuResourceHandoffError:
+            raise
+        except Exception as exc:
+            raise GpuResourceHandoffError(
+                f"GPU resource request failed for {url}: "
+                f"{type(exc).__name__}: {_bounded_error(exc)}"
+            ) from exc
+
+    def _list_ollama_models(self) -> tuple[str, ...]:
+        payload = self._request(
+            self.policy.ollama_base_url,
+            "/api/ps",
+            method="GET",
+        )
+        raw_models = payload.get("models")
+        if not isinstance(raw_models, list):
+            raise GpuResourceHandoffError(
+                "Ollama /api/ps response is missing the models list."
+            )
+
+        model_names: list[str] = []
+        for raw_model in raw_models:
+            if not isinstance(raw_model, Mapping):
+                raise GpuResourceHandoffError(
+                    "Ollama /api/ps contains an invalid model entry."
+                )
+            raw_name = raw_model.get("name") or raw_model.get("model")
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                raise GpuResourceHandoffError(
+                    "Ollama /api/ps contains a model without a valid name."
+                )
+            if raw_name not in model_names:
+                model_names.append(raw_name)
+        return tuple(model_names)
+
+    def _ollama_is_empty(self) -> bool:
+        return not self._list_ollama_models()
+
+    def _comfy_is_released(self) -> bool:
+        payload = self._request(
+            self.policy.comfy_base_url,
+            "/system_stats",
+            method="GET",
+        )
+        raw_devices = payload.get("devices")
+        if not isinstance(raw_devices, list) or not raw_devices:
+            raise GpuResourceHandoffError(
+                "ComfyUI /system_stats response is missing GPU devices."
+            )
+
+        target_device: Mapping[str, Any] | None = None
+        for raw_device in raw_devices:
+            if not isinstance(raw_device, Mapping):
+                continue
+            if raw_device.get("index") == self.policy.gpu_device_index:
+                target_device = raw_device
+                break
+        if target_device is None:
+            raise GpuResourceHandoffError(
+                "ComfyUI /system_stats did not report configured GPU index "
+                f"{self.policy.gpu_device_index}."
+            )
+
+        torch_total = self._nonnegative_number(
+            target_device.get("torch_vram_total"),
+            "torch_vram_total",
+        )
+        torch_free = self._nonnegative_number(
+            target_device.get("torch_vram_free"),
+            "torch_vram_free",
+        )
+        if torch_free > torch_total:
+            raise GpuResourceHandoffError(
+                "ComfyUI /system_stats reports torch_vram_free above torch_vram_total."
+            )
+        active_mib = (torch_total - torch_free) / self._MIB
+        return active_mib <= self.policy.comfy_max_active_vram_mib
+
+    @staticmethod
+    def _nonnegative_number(value: object, field_name: str) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise GpuResourceHandoffError(
+                f"ComfyUI /system_stats has invalid {field_name}."
+            )
+        return float(value)
+
+    def _wait_until(
+        self,
+        predicate: Callable[[], bool],
+        *,
+        description: str,
+    ) -> None:
+        deadline = self._monotonic() + self.policy.handoff_timeout_seconds
+        last_error: GpuResourceHandoffError | None = None
+        while True:
+            try:
+                if predicate():
+                    return
+                last_error = None
+            except GpuResourceHandoffError as exc:
+                last_error = exc
+
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                detail = f" Last observation: {last_error}" if last_error else ""
+                raise GpuResourceHandoffError(
+                    f"Timed out waiting for {description}.{detail}"
+                ) from last_error
+            self._sleep(min(self.policy.handoff_poll_interval_seconds, remaining))
+
+    def _log_handoff(
+        self,
+        *,
+        direction: str,
+        stage: str,
+        model_count: int | None = None,
+    ) -> None:
+        log_event(
+            self._logger,
+            logging.INFO,
+            f"GPU resource handoff | direction={direction} stage={stage}",
+            event_name="gpu_resource_handoff",
+            direction=direction,
+            stage=stage,
+            model_count=model_count,
+        )
 
 
 @dataclass(frozen=True, slots=True)

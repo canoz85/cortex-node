@@ -345,16 +345,27 @@ def test_local_polling_resumes_existing_terminal_evidence_without_repolling():
         as_node="controller",
     )
     status_tool = FakeStatusTool(_status_output(AsyncJobStatus.COMPLETED))
+
+    class ResourceCoordinator:
+        def __init__(self):
+            self.prepare_for_llm_calls = 0
+
+        def prepare_for_llm(self):
+            self.prepare_for_llm_calls += 1
+
+    resource_coordinator = ResourceCoordinator()
     runtime = LocalAsyncPollingRuntime(
         compiled_graph=compiled_graph,
         tools=[status_tool],
         sleep=lambda _seconds: None,
         now_utc=lambda: OBSERVED_AT,
+        resource_coordinator=resource_coordinator,
     )
 
     list(runtime.poll_and_resume(config=config, decision=_await_decision()))
 
     assert status_tool.invocations == []
+    assert resource_coordinator.prepare_for_llm_calls == 1
     assert len(brain_invocations) == 1
     snapshot = compiled_graph.get_state(config)
     assert len(

@@ -24,6 +24,7 @@ DEFAULT_SETTINGS = {
     "log_level": "INFO",
     "json_logs": False,
     "gpu_telemetry": True,
+    "gpu_handoff": True,
     "session_file": ".cortex_session.json"
 }
 
@@ -67,6 +68,7 @@ def _build_settings(args: argparse.Namespace) -> dict:
         "show_summary": _env_bool("CORTEX_SHOW_SUMMARY"),
         "json_logs": _env_bool("CORTEX_JSON_LOGS"),
         "gpu_telemetry": _env_bool("CORTEX_GPU_TELEMETRY"),
+        "gpu_handoff": _env_bool("CORTEX_GPU_HANDOFF"),
     }
     for key, value in env_overrides.items():
         if value is not None:
@@ -90,6 +92,7 @@ def _build_settings(args: argparse.Namespace) -> dict:
         "log_level": args.log_level,
         "json_logs": args.json_logs,
         "gpu_telemetry": args.gpu_telemetry,
+        "gpu_handoff": args.gpu_handoff,
     }
     for key, value in cli_overrides.items():
         if value is not None:
@@ -209,6 +212,19 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable observe-only GPU runtime telemetry.",
     )
+    output_group.add_argument(
+        "--gpu-handoff",
+        dest="gpu_handoff",
+        action="store_true",
+        default=None,
+        help="Require verified Ollama/ComfyUI single-GPU handoff.",
+    )
+    output_group.add_argument(
+        "--no-gpu-handoff",
+        dest="gpu_handoff",
+        action="store_false",
+        help="Disable active Ollama/ComfyUI GPU handoff.",
+    )
 
     output_group.add_argument(
         "--resume",
@@ -297,7 +313,8 @@ def main():
                 GpuResourceMode.OBSERVE_ONLY
                 if bool(settings["gpu_telemetry"])
                 else GpuResourceMode.DISABLED
-            )
+            ),
+            handoff_enabled=bool(settings["gpu_handoff"]),
         ),
     )
 
@@ -310,6 +327,10 @@ def main():
         "GPU telemetry: "
         f"{'observe-only' if settings['gpu_telemetry'] else 'disabled'}"
     )
+    print(
+        "GPU handoff: "
+        f"{'single-GPU verified' if settings['gpu_handoff'] else 'disabled'}"
+    )
     logger.info(
         "CortexNode initialized",
         extra={
@@ -321,6 +342,7 @@ def main():
             "session_file": settings["session_file"],
             "rag_top_k": settings["rag_top_k"],
             "gpu_telemetry": settings["gpu_telemetry"],
+            "gpu_handoff": settings["gpu_handoff"],
         },
     )
 

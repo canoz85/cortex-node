@@ -3,11 +3,14 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
 from langgraph.graph import END, StateGraph
 
 from core.graph import _register_state_node
 from core.runtime.gpu_resources import (
     GpuDeviceSnapshot,
+    GpuResourceCoordinator,
+    GpuResourceHandoffError,
     GpuResourceMode,
     GpuResourcePolicy,
     GpuTelemetrySnapshot,
@@ -15,9 +18,165 @@ from core.runtime.gpu_resources import (
     RuntimeGpuObserver,
 )
 from core.state import AgentState
+from main import DEFAULT_SETTINGS
 
 
 OBSERVED_AT = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+
+
+class FakeClock:
+    def __init__(self):
+        self.value = 0.0
+
+    def monotonic(self):
+        return self.value
+
+    def sleep(self, seconds):
+        self.value += seconds
+
+
+def _comfy_stats(active_mib: int) -> dict:
+    total_mib = active_mib + 64
+    return {
+        "devices": [
+            {
+                "index": 0,
+                "torch_vram_total": total_mib * 1024 * 1024,
+                "torch_vram_free": 64 * 1024 * 1024,
+            }
+        ]
+    }
+
+
+def test_runtime_defaults_enable_verified_gpu_handoff():
+    assert DEFAULT_SETTINGS["gpu_handoff"] is True
+
+
+def test_disabled_handoff_makes_no_provider_requests():
+    def unexpected_request(*_args, **_kwargs):
+        raise AssertionError("disabled handoff must not call a provider")
+
+    coordinator = GpuResourceCoordinator(
+        policy=GpuResourcePolicy(handoff_enabled=False),
+        request_json=unexpected_request,
+    )
+
+    coordinator.prepare_for_comfy()
+    coordinator.prepare_for_llm()
+
+
+def test_coordinator_unloads_every_ollama_model_and_verifies_empty_ps():
+    calls: list[tuple[str, str, object]] = []
+    ps_responses = iter((
+        {
+            "models": [
+                {"name": "brain:latest"},
+                {"model": "planner:latest"},
+            ]
+        },
+        {"models": []},
+    ))
+
+    def request_json(url, method, payload, _timeout):
+        calls.append((url, method, payload))
+        if url.endswith("/api/ps"):
+            return next(ps_responses)
+        return {"done": True, "done_reason": "unload"}
+
+    coordinator = GpuResourceCoordinator(
+        policy=GpuResourcePolicy(handoff_enabled=True),
+        request_json=request_json,
+    )
+
+    coordinator.prepare_for_comfy()
+
+    unload_calls = [call for call in calls if call[0].endswith("/api/generate")]
+    assert [call[2]["model"] for call in unload_calls] == [
+        "brain:latest",
+        "planner:latest",
+    ]
+    assert all(call[2]["keep_alive"] == 0 for call in unload_calls)
+    assert calls[-1][0].endswith("/api/ps")
+
+
+def test_coordinator_blocks_comfy_when_ollama_does_not_unload():
+    clock = FakeClock()
+
+    def request_json(url, _method, _payload, _timeout):
+        if url.endswith("/api/ps"):
+            return {"models": [{"name": "brain:latest"}]}
+        return {"done": True}
+
+    coordinator = GpuResourceCoordinator(
+        policy=GpuResourcePolicy(
+            handoff_enabled=True,
+            handoff_timeout_seconds=2,
+            handoff_poll_interval_seconds=1,
+        ),
+        request_json=request_json,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+
+    with pytest.raises(GpuResourceHandoffError, match="Ollama /api/ps"):
+        coordinator.prepare_for_comfy()
+
+
+def test_coordinator_frees_comfy_and_verifies_active_torch_vram():
+    calls: list[tuple[str, str, object]] = []
+    stats = iter((_comfy_stats(2048), _comfy_stats(64)))
+    clock = FakeClock()
+
+    def request_json(url, method, payload, _timeout):
+        calls.append((url, method, payload))
+        if url.endswith("/system_stats"):
+            return next(stats)
+        return {}
+
+    coordinator = GpuResourceCoordinator(
+        policy=GpuResourcePolicy(
+            handoff_enabled=True,
+            comfy_max_active_vram_mib=512,
+        ),
+        request_json=request_json,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+
+    coordinator.prepare_for_llm()
+
+    assert calls[0] == (
+        "http://127.0.0.1:8188/free",
+        "POST",
+        {"unload_models": True, "free_memory": True},
+    )
+    assert [call[0] for call in calls].count(
+        "http://127.0.0.1:8188/system_stats"
+    ) == 2
+
+
+def test_coordinator_blocks_llm_when_comfy_vram_does_not_release():
+    clock = FakeClock()
+
+    def request_json(url, _method, _payload, _timeout):
+        if url.endswith("/system_stats"):
+            return _comfy_stats(4096)
+        return {}
+
+    coordinator = GpuResourceCoordinator(
+        policy=GpuResourcePolicy(
+            handoff_enabled=True,
+            handoff_timeout_seconds=2,
+            handoff_poll_interval_seconds=1,
+            comfy_max_active_vram_mib=512,
+        ),
+        request_json=request_json,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+
+    with pytest.raises(GpuResourceHandoffError, match="ComfyUI active torch VRAM"):
+        coordinator.prepare_for_llm()
 
 
 def test_nvidia_smi_probe_parses_devices_and_windows_processes():

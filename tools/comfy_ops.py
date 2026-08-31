@@ -1,32 +1,418 @@
 import json
+import math
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Mapping, Optional
 from langchain_core.tools import tool
 
 from core.error_codes import (
     COMFY_API_ERROR,
+    COMFY_CHECKPOINT_CATALOG_UNAVAILABLE,
+    COMFY_CHECKPOINT_NOT_INSTALLED,
     COMFY_CONNECTION_FAILED,
     COMFY_FILE_NOT_FOUND,
     COMFY_INVALID_PAYLOAD,
     COMFY_PROMPT_FAILED,
+    GPU_RESOURCE_HANDOFF_FAILED,
 )
 from core.models import (
     ComfyDownloadImageRequest,
     ComfyHistoryRequest,
     ComfyHistoryResult,
-    ComfyPromptRequest,
     ComfyPromptResult,
+    ComfyWorkflowParams,
     RunWorkflowRequest,
 )
 from core.protocol.enums import AsyncJobStatus
+from core.runtime.gpu_resources import (
+    GpuResourceCoordinator,
+    GpuResourceHandoffError,
+)
 from tools.sandbox_paths import resolve_safe_path, resolve_workspace
 
 # Timeout in seconds for standard HTTP API calls
 DEFAULT_HTTP_TIMEOUT = 30.0
+DEFAULT_COMFY_CHECKPOINT = (
+    "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"
+)
+_CHECKPOINT_CATALOG_ENDPOINT = "object_info/CheckpointLoaderSimple"
+
+_COMFY_NODE_TYPES: dict[str, str] = {
+    "3": "KSampler",
+    "4": "CheckpointLoaderSimple",
+    "5": "EmptyLatentImage",
+    "6": "CLIPTextEncode",
+    "7": "CLIPTextEncode",
+    "8": "VAEDecode",
+    "9": "SaveImage",
+}
+_COMFY_NODE_INPUTS: dict[str, set[str]] = {
+    "3": {
+        "cfg",
+        "denoise",
+        "latent_image",
+        "model",
+        "negative",
+        "positive",
+        "sampler_name",
+        "scheduler",
+        "seed",
+        "steps",
+    },
+    "4": {"ckpt_name"},
+    "5": {"batch_size", "height", "width"},
+    "6": {"clip", "text"},
+    "7": {"clip", "text"},
+    "8": {"samples", "vae"},
+    "9": {"filename_prefix", "images"},
+}
+
+
+class ComfyWorkflowValidationError(ValueError):
+    """Raised when a ComfyUI workflow does not match the fixed template."""
+
+
+class ComfyCheckpointCatalogError(ValueError):
+    """Raised when ComfyUI returns a malformed checkpoint catalog."""
+
+
+def parse_comfy_checkpoint_catalog(
+    payload: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Extract exact checkpoint filenames from CheckpointLoaderSimple metadata."""
+
+    if not isinstance(payload, Mapping):
+        raise ComfyCheckpointCatalogError("checkpoint catalog response must be an object")
+
+    node_info = payload.get("CheckpointLoaderSimple")
+    if not isinstance(node_info, Mapping):
+        raise ComfyCheckpointCatalogError(
+            "checkpoint catalog is missing CheckpointLoaderSimple metadata"
+        )
+
+    input_info = node_info.get("input")
+    required_inputs = (
+        input_info.get("required")
+        if isinstance(input_info, Mapping)
+        else None
+    )
+    checkpoint_spec = (
+        required_inputs.get("ckpt_name")
+        if isinstance(required_inputs, Mapping)
+        else None
+    )
+    if (
+        not isinstance(checkpoint_spec, (list, tuple))
+        or not checkpoint_spec
+        or not isinstance(checkpoint_spec[0], (list, tuple))
+    ):
+        raise ComfyCheckpointCatalogError(
+            "checkpoint catalog has an invalid ckpt_name choice specification"
+        )
+
+    checkpoint_names: list[str] = []
+    for raw_name in checkpoint_spec[0]:
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ComfyCheckpointCatalogError(
+                "checkpoint catalog contains an invalid checkpoint filename"
+            )
+        if raw_name not in checkpoint_names:
+            checkpoint_names.append(raw_name)
+
+    return tuple(checkpoint_names)
+
+
+def build_comfy_workflow(
+    params: ComfyWorkflowParams | Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Build the fixed image-generation graph from typed parameters.
+
+    The graph shape, node IDs, class types, fixed sampler settings, and all
+    connections are application-owned.  Only values represented by
+    ``ComfyWorkflowParams`` can enter the resulting workflow.
+    """
+
+    if not isinstance(params, ComfyWorkflowParams):
+        params = ComfyWorkflowParams.model_validate(params)
+
+    return {
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "cfg": params.cfg,
+                "denoise": 1,
+                "latent_image": ["5", 0],
+                "model": ["4", 0],
+                "negative": ["7", 0],
+                "positive": ["6", 0],
+                "sampler_name": "euler",
+                "scheduler": "normal",
+                "seed": params.seed,
+                "steps": params.steps,
+            },
+        },
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": params.checkpoint},
+        },
+        "5": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {
+                "batch_size": 1,
+                "height": params.height,
+                "width": params.width,
+            },
+        },
+        "6": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {
+                "clip": ["4", 1],
+                "text": params.positive_prompt,
+            },
+        },
+        "7": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {
+                "clip": ["4", 1],
+                "text": params.negative_prompt,
+            },
+        },
+        "8": {
+            "class_type": "VAEDecode",
+            "inputs": {
+                "samples": ["3", 0],
+                "vae": ["4", 2],
+            },
+        },
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {
+                "filename_prefix": params.filename_prefix,
+                "images": ["8", 0],
+            },
+        },
+    }
+
+
+def _require_mapping(value: object, path: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ComfyWorkflowValidationError(f"{path} must be an object")
+    return value
+
+
+def _require_input(
+    inputs: Mapping[str, Any],
+    node_id: str,
+    input_name: str,
+) -> Any:
+    if input_name not in inputs:
+        raise ComfyWorkflowValidationError(
+            f"Node {node_id} is missing required input '{input_name}'"
+        )
+    return inputs[input_name]
+
+
+def _require_positive_int(value: object, path: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ComfyWorkflowValidationError(f"{path} must be a positive integer")
+    return value
+
+
+def _require_positive_number(value: object, path: str) -> float | int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ComfyWorkflowValidationError(f"{path} must be positive")
+    return value
+
+
+def _require_non_blank_text(value: object, path: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ComfyWorkflowValidationError(f"{path} must be non-empty")
+    return value
+
+
+def _require_exact_reference(
+    value: object,
+    expected_node_id: str,
+    expected_output_index: int,
+    path: str,
+) -> None:
+    if value != [expected_node_id, expected_output_index]:
+        raise ComfyWorkflowValidationError(
+            f"{path} must reference [{expected_node_id}, {expected_output_index}]"
+        )
+
+
+def _validate_graph_references(
+    value: object,
+    path: str,
+    node_ids: set[str],
+) -> None:
+    """Validate every list-shaped graph reference found in input values."""
+
+    if not isinstance(value, (list, tuple)):
+        return
+
+    if len(value) == 2:
+        reference_node, output_index = value
+        if not isinstance(reference_node, str) or not reference_node:
+            raise ComfyWorkflowValidationError(
+                f"{path} graph reference node ID must be a string"
+            )
+
+        if reference_node not in node_ids:
+            raise ComfyWorkflowValidationError(
+                f"{path} references missing node {reference_node!r}"
+            )
+        if type(output_index) is not int or output_index < 0:
+            raise ComfyWorkflowValidationError(
+                f"{path} has an invalid output index {output_index!r}"
+            )
+        return
+
+    for index, item in enumerate(value):
+        _validate_graph_references(item, f"{path}[{index}]", node_ids)
+
+
+def validate_comfy_workflow(workflow: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Validate the fixed ComfyUI template before it can be submitted.
+
+    This validator intentionally fails closed.  It does not add missing nodes,
+    repair references, or infer connectivity.
+    """
+
+    workflow = _require_mapping(workflow, "workflow")
+    if any(not isinstance(node_id, str) for node_id in workflow):
+        raise ComfyWorkflowValidationError("workflow node IDs must be strings")
+    node_ids = set(workflow)
+    required_node_ids = set(_COMFY_NODE_TYPES)
+
+    missing = required_node_ids - node_ids
+    if missing:
+        raise ComfyWorkflowValidationError(
+            f"workflow is missing required node IDs: {', '.join(sorted(missing))}"
+        )
+    unexpected = node_ids - required_node_ids
+    if unexpected:
+        raise ComfyWorkflowValidationError(
+            f"workflow contains unexpected node IDs: {', '.join(sorted(unexpected))}"
+        )
+
+    nodes: dict[str, Mapping[str, Any]] = {}
+    for raw_node_id, expected_class_type in _COMFY_NODE_TYPES.items():
+        node = workflow.get(raw_node_id)
+        node_mapping = _require_mapping(node, f"workflow[{raw_node_id!r}]")
+        unexpected_node_fields = set(node_mapping) - {"class_type", "inputs"}
+        if unexpected_node_fields:
+            raise ComfyWorkflowValidationError(
+                f"Node {raw_node_id} contains unexpected fields: "
+                f"{', '.join(sorted(map(str, unexpected_node_fields)))}"
+            )
+        actual_class_type = node_mapping.get("class_type")
+        if actual_class_type != expected_class_type:
+            raise ComfyWorkflowValidationError(
+                f"Node {raw_node_id} must have class_type '{expected_class_type}'"
+            )
+        nodes[raw_node_id] = _require_mapping(
+            node_mapping.get("inputs"),
+            f"workflow[{raw_node_id!r}].inputs",
+        )
+
+        expected_inputs = _COMFY_NODE_INPUTS[raw_node_id]
+        missing_inputs = expected_inputs - set(nodes[raw_node_id])
+        if missing_inputs:
+            raise ComfyWorkflowValidationError(
+                f"Node {raw_node_id} is missing required inputs: "
+                f"{', '.join(sorted(missing_inputs))}"
+            )
+        unexpected_inputs = set(nodes[raw_node_id]) - expected_inputs
+        if unexpected_inputs:
+            raise ComfyWorkflowValidationError(
+                f"Node {raw_node_id} contains unexpected inputs: "
+                f"{', '.join(sorted(map(str, unexpected_inputs)))}"
+            )
+
+    for node_id, inputs in nodes.items():
+        for input_name, value in inputs.items():
+            _validate_graph_references(
+                value,
+                f"workflow[{node_id!r}].inputs[{input_name!r}]",
+                required_node_ids,
+            )
+
+    k_sampler = nodes["3"]
+    _require_exact_reference(k_sampler["model"], "4", 0, "Node 3 input 'model'")
+    _require_exact_reference(k_sampler["positive"], "6", 0, "Node 3 input 'positive'")
+    _require_exact_reference(k_sampler["negative"], "7", 0, "Node 3 input 'negative'")
+    _require_exact_reference(
+        k_sampler["latent_image"], "5", 0, "Node 3 input 'latent_image'"
+    )
+    if k_sampler["sampler_name"] != "euler":
+        raise ComfyWorkflowValidationError("Node 3 input 'sampler_name' must be 'euler'")
+    if k_sampler["scheduler"] != "normal":
+        raise ComfyWorkflowValidationError("Node 3 input 'scheduler' must be 'normal'")
+    if type(k_sampler["denoise"]) is not int or k_sampler["denoise"] != 1:
+        raise ComfyWorkflowValidationError("Node 3 input 'denoise' must be 1")
+    if type(k_sampler["seed"]) is not int:
+        raise ComfyWorkflowValidationError("Node 3 input 'seed' must be an integer")
+    _require_positive_int(k_sampler["steps"], "Node 3 input 'steps'")
+    _require_positive_number(k_sampler["cfg"], "Node 3 input 'cfg'")
+
+    checkpoint = _require_input(nodes["4"], "4", "ckpt_name")
+    _require_non_blank_text(checkpoint, "Node 4 input 'ckpt_name'")
+
+    latent = nodes["5"]
+    batch_size = _require_input(latent, "5", "batch_size")
+    if type(batch_size) is not int or batch_size != 1:
+        raise ComfyWorkflowValidationError("Node 5 input 'batch_size' must be 1")
+    _require_positive_int(_require_input(latent, "5", "width"), "Node 5 input 'width'")
+    _require_positive_int(_require_input(latent, "5", "height"), "Node 5 input 'height'")
+
+    positive = nodes["6"]
+    negative = nodes["7"]
+    _require_exact_reference(
+        _require_input(positive, "6", "clip"), "4", 1, "Node 6 input 'clip'"
+    )
+    _require_exact_reference(
+        _require_input(negative, "7", "clip"), "4", 1, "Node 7 input 'clip'"
+    )
+    _require_non_blank_text(
+        _require_input(positive, "6", "text"), "Node 6 input 'text'"
+    )
+    negative_text = _require_input(negative, "7", "text")
+    if not isinstance(negative_text, str):
+        raise ComfyWorkflowValidationError("Node 7 input 'text' must be a string")
+
+    _require_exact_reference(
+        _require_input(nodes["8"], "8", "samples"),
+        "3",
+        0,
+        "Node 8 input 'samples'",
+    )
+    _require_exact_reference(
+        _require_input(nodes["8"], "8", "vae"),
+        "4",
+        2,
+        "Node 8 input 'vae'",
+    )
+    _require_exact_reference(
+        _require_input(nodes["9"], "9", "images"),
+        "8",
+        0,
+        "Node 9 input 'images'",
+    )
+    _require_non_blank_text(
+        _require_input(nodes["9"], "9", "filename_prefix"),
+        "Node 9 input 'filename_prefix'",
+    )
+
+    return workflow
 
 
 class _ComfyHttpError(RuntimeError):
@@ -53,6 +439,7 @@ def _history_async_status(status: object) -> AsyncJobStatus:
 def get_comfy_tools(
     workspace_root: str,
     comfy_base_url: str = "http://127.0.0.1:8188",
+    resource_coordinator: GpuResourceCoordinator | None = None,
 ) -> list[Any]:
     """Factory function returning ComfyUI tools bound to a specific workspace root."""
     base_url = comfy_base_url.rstrip("/")
@@ -84,35 +471,6 @@ def get_comfy_tools(
         except urllib.error.URLError as url_err:
             raise ConnectionError(f"Could not connect to ComfyUI server at {base_url}: {url_err.reason}")
 
-    def _normalize_workflow(workflow: Dict[str, Any]) -> Dict[str, Any]:
-        """Ensures all node IDs and output references are strings as required by ComfyUI API."""
-        normalized = {}
-        for node_id, node_data in workflow.items():
-            # Convert Node ID keys to strings if they are not already
-            str_node_id = str(node_id)
-            if isinstance(node_data, dict):
-                new_node_data = node_data.copy()
-                if "inputs" in new_node_data and isinstance(new_node_data["inputs"], dict):
-                    new_inputs = {}
-                    for k, v in new_node_data["inputs"].items():
-                        # Convert connection reference lists like [5, 0] to ["5", 0] format
-                        if isinstance(v, list) and len(v) == 2 and isinstance(v[0], (int, str)):
-                            new_inputs[k] = [str(v[0]), v[1]]
-                        else:
-                            new_inputs[k] = v
-
-                    if new_node_data.get("class_type") == "KSampler":
-                        if "positive" not in new_inputs and "6" in workflow:
-                            new_inputs["positive"] = ["6", 0]
-                        if "negative" not in new_inputs and "7" in workflow:
-                            new_inputs["negative"] = ["7", 0]
-                            
-                    new_node_data["inputs"] = new_inputs
-                normalized[str_node_id] = new_node_data
-            else:
-                normalized[str_node_id] = node_data
-        return normalized
-
     def _queue_location(queue_data: object, prompt_id: str) -> str | None:
         if not isinstance(queue_data, dict):
             return None
@@ -134,78 +492,127 @@ def get_comfy_tools(
 
     @tool("run_comfy_workflow", args_schema=RunWorkflowRequest)
     def run_comfy_workflow(
-        workflow_json: Union[str, Dict[str, Any]],
+        positive_prompt: str,
+        seed: int,
+        steps: int,
+        cfg: float,
+        width: int,
+        height: int,
+        negative_prompt: str = "",
+        filename_prefix: str = "CortexNode",
         client_id: str = "cortex_node_agent",
         prompt_id: str | None = None,
     ) -> str:
-        """Queues a prompt workflow to the local ComfyUI instance for image generation.
-        
-        The `workflow_json` can be provided as a serialized JSON string, a raw Python dict, or a relative file path in the workspace.
-        
-        Example JSON payload structure:
-        {
-          "3": {"inputs": {"seed": 42, "steps": 20, "cfg": 7, "sampler_name": "euler", "scheduler": "normal", "denoise": 1, "model": ["4", 0], "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["5", 0]}, "class_type": "KSampler"},
-          "4": {"inputs": {"ckpt_name": "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors"}, "class_type": "CheckpointLoaderSimple"},
-          "5": {"inputs": {"width": 1024, "height": 1024, "batch_size": 1}, "class_type": "EmptyLatentImage"},
-          "6": {"inputs": {"text": "a cute cat, high quality", "clip": ["4", 1]}, "class_type": "CLIPTextEncode"},
-          "7": {"inputs": {"text": "bad quality, blurry", "clip": ["4", 1]}, "class_type": "CLIPTextEncode"},
-          "8": {"inputs": {"samples": ["3", 0], "vae": ["4", 2]}, "class_type": "VAEDecode"},
-          "9": {"inputs": {"filename_prefix": "CortexNode", "images": ["8", 0]}, "class_type": "SaveImage"}
-        }
+        """Queue an image-generation workflow built from the fixed template.
+
+        The LLM-facing contract contains only validated generation parameters.
+        Node IDs, class types, graph connectivity, and checkpoint selection are
+        application-owned.  This tool uses the fixed checkpoint
+        ``Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors`` and refuses to
+        submit if that exact filename is not installed in ComfyUI.
         """
         try:
-            parsed_prompt: Dict[str, Any] = {}
-            source_info = "raw payload"
+            params = ComfyWorkflowParams(
+                positive_prompt=positive_prompt,
+                negative_prompt=negative_prompt,
+                seed=seed,
+                steps=steps,
+                cfg=cfg,
+                width=width,
+                height=height,
+                checkpoint=DEFAULT_COMFY_CHECKPOINT,
+                filename_prefix=filename_prefix,
+            )
+            workflow = build_comfy_workflow(params)
+            validate_comfy_workflow(workflow)
+        except (TypeError, ValueError) as exc:
+            return ComfyPromptResult(
+                success=False,
+                message=f"Invalid ComfyUI workflow parameters: {exc}",
+                error_code=COMFY_INVALID_PAYLOAD,
+                error_details={"exception_type": type(exc).__name__},
+            ).to_tool_output()
 
-            # Handle dictionary directly provided by Brain LLM
-            if isinstance(workflow_json, dict):
-                parsed_prompt = workflow_json
-                source_info = "raw JSON object"
-            elif isinstance(workflow_json, str):
-                trimmed_workflow = workflow_json.strip()
-                if trimmed_workflow.startswith("{"):
-                    try:
-                        parsed_prompt = json.loads(trimmed_workflow)
-                        source_info = "raw JSON string"
-                    except json.JSONDecodeError as err:
-                        return ComfyPromptResult(
-                            success=False,
-                            message=f"Invalid JSON string in workflow payload: {err}",
-                            error_code=COMFY_INVALID_PAYLOAD,
-                            error_details={"raw_prompt": trimmed_workflow[:200]},
-                        ).to_tool_output()
-                else:
-                    # Resolve safe path inside workspace boundary if string is a file path
-                    try:
-                        target_file = resolve_safe_path(workspace, trimmed_workflow)
-                        if not target_file.exists() or not target_file.is_file():
-                            return ComfyPromptResult(
-                                success=False,
-                                message=f"Error: Workflow file does not exist in workspace: {trimmed_workflow}",
-                                error_code=COMFY_FILE_NOT_FOUND,
-                                error_details={"path": trimmed_workflow},
-                            ).to_tool_output()
+        try:
+            checkpoint_catalog = parse_comfy_checkpoint_catalog(
+                _http_request(_CHECKPOINT_CATALOG_ENDPOINT)
+            )
+        except ConnectionError as conn_err:
+            return ComfyPromptResult(
+                success=False,
+                message=(
+                    "Could not verify the required ComfyUI checkpoint before "
+                    f"submission: {conn_err}"
+                ),
+                error_code=COMFY_CHECKPOINT_CATALOG_UNAVAILABLE,
+                error_details={
+                    "exception_type": "ConnectionError",
+                    "catalog_endpoint": _CHECKPOINT_CATALOG_ENDPOINT,
+                },
+            ).to_tool_output()
+        except _ComfyHttpError as http_err:
+            return ComfyPromptResult(
+                success=False,
+                message=(
+                    "Could not read the ComfyUI checkpoint catalog before "
+                    f"submission: {http_err}"
+                ),
+                error_code=COMFY_CHECKPOINT_CATALOG_UNAVAILABLE,
+                error_details={
+                    "exception_type": type(http_err).__name__,
+                    "status_code": http_err.status_code,
+                    "catalog_endpoint": _CHECKPOINT_CATALOG_ENDPOINT,
+                },
+            ).to_tool_output()
+        except ComfyCheckpointCatalogError as catalog_err:
+            return ComfyPromptResult(
+                success=False,
+                message=f"Invalid ComfyUI checkpoint catalog: {catalog_err}",
+                error_code=COMFY_CHECKPOINT_CATALOG_UNAVAILABLE,
+                error_details={
+                    "exception_type": type(catalog_err).__name__,
+                    "catalog_endpoint": _CHECKPOINT_CATALOG_ENDPOINT,
+                },
+            ).to_tool_output()
 
-                        raw_content = target_file.read_text(encoding="utf-8")
-                        parsed_prompt = json.loads(raw_content)
-                        source_info = f"file '{trimmed_workflow}'"
-                    except Exception as file_err:
-                        return ComfyPromptResult(
-                            success=False,
-                            message=f"Error loading workflow file from workspace: {file_err}",
-                            error_code=COMFY_INVALID_PAYLOAD,
-                            error_details={"path": trimmed_workflow},
-                        ).to_tool_output()
-            else:
+        if DEFAULT_COMFY_CHECKPOINT not in checkpoint_catalog:
+            return ComfyPromptResult(
+                success=False,
+                message=(
+                    "Required ComfyUI checkpoint is not installed: "
+                    f"{DEFAULT_COMFY_CHECKPOINT}. Submission was not attempted."
+                ),
+                error_code=COMFY_CHECKPOINT_NOT_INSTALLED,
+                error_details={
+                    "required_checkpoint": DEFAULT_COMFY_CHECKPOINT,
+                    "installed_checkpoints": list(checkpoint_catalog),
+                },
+                data={
+                    "required_checkpoint": DEFAULT_COMFY_CHECKPOINT,
+                    "installed_checkpoints": list(checkpoint_catalog),
+                },
+            ).to_tool_output()
+
+        if resource_coordinator is not None:
+            try:
+                resource_coordinator.prepare_for_comfy()
+            except GpuResourceHandoffError as handoff_err:
                 return ComfyPromptResult(
                     success=False,
-                    message="Invalid workflow_json format. Expected dict, JSON string, or file path string.",
-                    error_code=COMFY_INVALID_PAYLOAD,
+                    message=(
+                        "ComfyUI submission was blocked because Ollama GPU "
+                        f"handoff could not be verified: {handoff_err}"
+                    ),
+                    error_code=GPU_RESOURCE_HANDOFF_FAILED,
+                    error_details={
+                        "exception_type": type(handoff_err).__name__,
+                        "handoff_direction": "ollama_to_comfy",
+                        "submission_attempted": False,
+                    },
                 ).to_tool_output()
 
-            parsed_prompt = _normalize_workflow(parsed_prompt)
-
-            payload: Dict[str, Any] = {"prompt": parsed_prompt}
+        try:
+            payload: Dict[str, Any] = {"prompt": workflow}
             if client_id:
                 payload["client_id"] = client_id
             if prompt_id:
@@ -245,7 +652,7 @@ def get_comfy_tools(
 
             return ComfyPromptResult(
                 success=True,
-                message=f"Successfully queued ComfyUI workflow from {source_info} with prompt_id: {prompt_id}",
+                message=f"Successfully queued validated ComfyUI workflow with prompt_id: {prompt_id}",
                 prompt_id=prompt_id,
                 node_errors=response_data.get("node_errors"),
                 is_async_job=True,
@@ -436,6 +843,46 @@ def get_comfy_tools(
 
             primary_filename = extracted_filenames[0] if extracted_filenames else None
             async_status = _history_async_status(status)
+
+            if (
+                resource_coordinator is not None
+                and async_status
+                in {
+                    AsyncJobStatus.COMPLETED,
+                    AsyncJobStatus.FAILED,
+                    AsyncJobStatus.CANCELLED,
+                }
+            ):
+                try:
+                    resource_coordinator.prepare_for_llm()
+                except GpuResourceHandoffError as handoff_err:
+                    return ComfyHistoryResult(
+                        success=False,
+                        message=(
+                            "ComfyUI reported provider-terminal status "
+                            f"{async_status.value}, but GPU handoff to Ollama "
+                            f"is not ready: {handoff_err}"
+                        ),
+                        prompt_id=safe_prompt_id,
+                        completed=False,
+                        outputs=outputs,
+                        status_details=status,
+                        error_code=GPU_RESOURCE_HANDOFF_FAILED,
+                        error_details={
+                            "exception_type": type(handoff_err).__name__,
+                            "handoff_direction": "comfy_to_ollama",
+                            "provider_terminal_status": async_status.value,
+                        },
+                        data={
+                            "resource_handoff": "pending",
+                            "provider_terminal_status": async_status.value,
+                        },
+                        is_async_job=True,
+                        async_job_id=safe_prompt_id,
+                        async_job_status=AsyncJobStatus.UNKNOWN,
+                        async_terminal=False,
+                        async_observed_at_utc=datetime.now(timezone.utc),
+                    ).to_tool_output()
 
             if async_status == AsyncJobStatus.COMPLETED and extracted_filenames:
                 files_str = ", ".join(extracted_filenames)

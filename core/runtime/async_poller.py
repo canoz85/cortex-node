@@ -24,7 +24,7 @@ from core.protocol.models import (
     ExecutionState,
     ToolRequest,
 )
-from core.runtime.gpu_resources import RuntimeGpuObserver
+from core.runtime.gpu_resources import GpuResourceCoordinator, RuntimeGpuObserver
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +118,7 @@ class LocalAsyncPollingRuntime:
         sleep: Callable[[float], None] = time.sleep,
         now_utc: Callable[[], datetime] | None = None,
         resource_observer: RuntimeGpuObserver | None = None,
+        resource_coordinator: GpuResourceCoordinator | None = None,
     ):
         self._compiled_graph = compiled_graph
         self._tools_by_name = {
@@ -129,6 +130,7 @@ class LocalAsyncPollingRuntime:
         self._sleep = sleep
         self._now_utc = now_utc or (lambda: datetime.now(timezone.utc))
         self._resource_observer = resource_observer
+        self._resource_coordinator = resource_coordinator
         self._cancel_events: dict[str, threading.Event] = {}
         self._cancel_events_lock = threading.Lock()
 
@@ -182,6 +184,15 @@ class LocalAsyncPollingRuntime:
             None,
         )
         if terminal_result is not None:
+            route = self._resolve_route(
+                execution_state=execution_state,
+                async_job_id=decision.async_job_id,
+            )
+            if (
+                self._resource_coordinator is not None
+                and route.provider == "comfyui"
+            ):
+                self._resource_coordinator.prepare_for_llm()
             restored_execution_state = execution_state.model_copy(
                 update={
                     "working": execution_state.working.model_copy(

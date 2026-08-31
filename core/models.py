@@ -1,9 +1,9 @@
 from datetime import datetime
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 import json
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from core.protocol.enums import AsyncJobStatus
 
@@ -419,13 +419,81 @@ class ComfyDownloadImageResult(ToolSerializableModel):
     message: str
     save_path: str
 
-class RunWorkflowRequest(BaseModel):
-    workflow_json: Union[str, Dict[str, Any]] = Field(
-        ..., 
-        description="ComfyUI API workflow as a serialized JSON string or direct Python dictionary mapping node IDs to inputs."
+class ComfyGenerationParams(BaseModel):
+    """LLM-safe image-generation values without workflow structure or model choice."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    positive_prompt: str = Field(
+        min_length=1,
+        description="Positive image-generation prompt.",
     )
+    negative_prompt: str = Field(
+        default="",
+        description="Optional negative image-generation prompt.",
+    )
+    seed: int = Field(description="Deterministic image-generation seed.")
+    steps: int = Field(
+        gt=0,
+        description="Number of sampling steps; must be positive.",
+    )
+    cfg: float = Field(
+        gt=0,
+        description="Classifier-free guidance scale; must be positive.",
+    )
+    width: int = Field(
+        gt=0,
+        description="Output image width in pixels; must be positive.",
+    )
+    height: int = Field(
+        gt=0,
+        description="Output image height in pixels; must be positive.",
+    )
+    filename_prefix: str = Field(
+        default="CortexNode",
+        min_length=1,
+        description="ComfyUI output filename prefix.",
+    )
+
+    @field_validator("positive_prompt", "filename_prefix")
+    @classmethod
+    def _require_non_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("seed", "steps", "cfg", "width", "height", mode="before")
+    @classmethod
+    def _reject_boolean_numbers(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be a number, not a boolean")
+        return value
+
+
+class ComfyWorkflowParams(ComfyGenerationParams):
+    """Internal typed values used to construct the fixed ComfyUI workflow.
+
+    The workflow graph itself is intentionally not part of this contract.  The
+    application owns both the template and checkpoint selection.
+    """
+
+    checkpoint: str = Field(
+        min_length=1,
+        description="Application-selected ComfyUI checkpoint filename.",
+    )
+
+    @field_validator("checkpoint")
+    @classmethod
+    def _require_non_blank_checkpoint(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+class RunWorkflowRequest(ComfyGenerationParams):
+    """LLM-facing request for queueing a fixed ComfyUI workflow template."""
+
     client_id: Optional[str] = Field(
-        default="cortex_node_agent", 
+        default="cortex_node_agent",
         description="Unique identifier for the client session."
     )
     prompt_id: Optional[str] = Field(
