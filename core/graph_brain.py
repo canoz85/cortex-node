@@ -277,7 +277,17 @@ def create_brain_node(
 
         instruction_brief: str | None = None
         execution_policy = decide_brain_execution(brain_input)
-        if execution_policy.is_final_answer:
+        if execution_policy.is_direct_response:
+            llm = brain_llm
+            system_prompt = casual_system_prompt
+            messages = _build_execution_messages(
+                system_prompt=system_prompt,
+                brain_input=brain_input,
+                retrieval_messages=(),
+                instruction_brief=None,
+            )
+
+        elif execution_policy.is_final_answer:
             llm = brain_llm
             system_prompt = final_answer_system_prompt
             messages = _build_final_answer_messages(
@@ -899,7 +909,10 @@ def create_brain_node(
             execution_context=execution_context,
         )
 
-        if execution_context.decision.is_final_answer:
+        if (
+            execution_context.decision.is_final_answer
+            or execution_context.decision.is_direct_response
+        ):
             brain_result = _build_answer_result(response)
 
         # elif execution_context.decision.is_step_completed:

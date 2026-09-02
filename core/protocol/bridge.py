@@ -780,7 +780,9 @@ def planner_result_to_legacy(result: PlannerResult) -> dict[str, Any]:
 def build_brain_input(legacy_state: LegacyState | None = None) -> BrainInput:
     """Build BrainInput contract from legacy runtime state."""
 
+    state = _state_or_empty(legacy_state)
     execution_state = build_execution_state(legacy_state)
+    controller_decision = state.get("controller_decision")
 
     return BrainInput(
         identity=execution_state.protocol_visible.identity,
@@ -791,6 +793,11 @@ def build_brain_input(legacy_state: LegacyState | None = None) -> BrainInput:
         last_tool_result=execution_state.working.last_tool_result,
         tool_execution_history=execution_state.working.tool_execution_history,
         retry=execution_state.protocol_visible.retry,
+        direct_response=(
+            controller_decision.direct_response
+            if isinstance(controller_decision, ControllerDecision)
+            else False
+        ),
     )
 
 
@@ -929,9 +936,11 @@ def controller_decision_to_legacy(decision: ControllerDecision) -> dict[str, Any
     payload: LegacyPayload = {
         "controller_decision": decision.decision_type.value,
         "decision_reason": decision.reason,
+        "execution_status": decision.execution_status.value,
         "terminal": decision.terminal,
         "requires_checkpoint": decision.requires_checkpoint,
         "requires_replan": decision.requires_replan,
+        "direct_response": decision.direct_response,
     }
 
     if decision.next_worker is not None:
@@ -940,6 +949,12 @@ def controller_decision_to_legacy(decision: ControllerDecision) -> dict[str, Any
         payload["next_step_id"] = decision.next_step_id
     if decision.cursor is not None:
         payload["cursor"] = decision.cursor.model_dump(mode="json")
+    if decision.failed_step_id is not None:
+        payload["failed_step_id"] = decision.failed_step_id
+    if decision.failure_reason is not None:
+        payload["failure_reason"] = decision.failure_reason
+    if decision.retry is not None:
+        payload["retry"] = decision.retry.model_dump(mode="json")
 
     return payload
 

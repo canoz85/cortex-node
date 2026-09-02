@@ -316,6 +316,7 @@ class BrainInput(ImmutableProtocolModel):
     last_tool_result: ToolResult | None = None
     tool_execution_history: tuple[ToolExecutionRecord, ...] = Field(default_factory=tuple)
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
+    direct_response: bool = False
 
 
 class BrainResult(ImmutableProtocolModel):
@@ -712,14 +713,19 @@ class ControllerDecision(ImmutableProtocolModel):
     accepted_plan: ExecutionPlan | None = None
     decision_type: ControllerDecisionType
     reason: str = ""
+    execution_status: ExecutionStatus = ExecutionStatus.NON_TERMINAL
 
     next_worker: WorkerRole | None = None
     cursor: ExecutionCursor | None = None
 
     # Step transition
     completed_step_id: str | None = None
+    failed_step_id: str | None = None
+    failure_reason: str | None = None
     next_step_id: str | None = None
     clear_active_step: bool = False
+    retry: RetryMetadata | None = None
+    direct_response: bool = False
 
     requires_checkpoint: bool = False
     requires_replan: bool = False
@@ -734,3 +740,37 @@ class ControllerDecision(ImmutableProtocolModel):
     cancellation_source: CancellationSource | None = None
 
     terminal: bool = False
+
+    @model_validator(mode="after")
+    def validate_terminal_status_and_cursor(self) -> "ControllerDecision":
+        terminal_phases = {
+            ExecutionPhase.COMPLETED,
+            ExecutionPhase.FAILED,
+            ExecutionPhase.CANCELLED,
+        }
+        expected_phase = {
+            ExecutionStatus.COMPLETED: ExecutionPhase.COMPLETED,
+            ExecutionStatus.FAILED: ExecutionPhase.FAILED,
+            ExecutionStatus.CANCELLED: ExecutionPhase.CANCELLED,
+        }.get(self.execution_status)
+
+        if self.terminal != (expected_phase is not None):
+            raise ValueError(
+                "terminal must agree with execution_status terminality"
+            )
+
+        if expected_phase is not None:
+            if self.cursor is None:
+                raise ValueError(
+                    "terminal ControllerDecision requires a terminal cursor"
+                )
+            if self.cursor.phase != expected_phase:
+                raise ValueError(
+                    "terminal cursor phase must agree with execution_status"
+                )
+        elif self.cursor is not None and self.cursor.phase in terminal_phases:
+            raise ValueError(
+                "non-terminal execution_status cannot carry a terminal cursor"
+            )
+
+        return self

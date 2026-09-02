@@ -252,6 +252,11 @@ def test_run_prompt_reenters_runtime_only_for_await_decision():
         decision_type=ControllerDecisionType.DISPATCH_SUMMARY,
         reason="Finished.",
         next_worker=WorkerRole.SUMMARY,
+        execution_status=ExecutionStatus.COMPLETED,
+        cursor=ExecutionCursor(
+            phase=ExecutionPhase.COMPLETED,
+            current_worker=WorkerRole.SUMMARY,
+        ),
         terminal=True,
     )
 

@@ -7,7 +7,6 @@ from core.protocol.enums import (
     BrainOutcome,
     ControllerDecisionType,
     ExecutionPhase,
-    ExecutionStatus,
     WorkerRole,
 )
 from core.protocol.models import BrainInput, ControllerDecision, ControllerInput, ExecutionPlan, ExecutionState, PlannerResult
@@ -27,6 +26,7 @@ class BrainExecutionDecision:
     reasoning: str
     has_action: bool = False
     needs_retrieval: bool = False
+    is_direct_response: bool = False
     is_final_answer: bool = False
     is_step_completed: bool = False
     instruction_brief: str = ""  
@@ -137,13 +137,7 @@ def apply_controller_decision_to_state(
     #
     # Pending tool request
     #
-    is_cancelled = decision.decision_type == ControllerDecisionType.CANCEL
-    is_terminating = (
-        decision.decision_type == ControllerDecisionType.TERMINATE
-        or decision.terminal
-    )
-
-    if decision.clear_pending_tool_request or is_terminating:
+    if decision.clear_pending_tool_request:
         pending_tool_request = None
     else:
         pending_tool_request = (
@@ -157,7 +151,7 @@ def apply_controller_decision_to_state(
     #
     active_step = None
 
-    should_clear_active_step = decision.clear_active_step or is_terminating
+    should_clear_active_step = decision.clear_active_step
 
     if should_clear_active_step:
         active_step = None
@@ -184,19 +178,6 @@ def apply_controller_decision_to_state(
                 None,
             )
 
-    synchronized_phase = cursor.phase
-    if is_cancelled:
-        synchronized_phase = ExecutionPhase.CANCELLED
-    elif is_terminating:
-        synchronized_phase = ExecutionPhase.TERMINATING
-    elif decision.decision_type == ControllerDecisionType.PAUSE:
-        synchronized_phase = ExecutionPhase.WAITING
-    elif decision.decision_type in {
-        ControllerDecisionType.DISPATCH_BRAIN,
-        ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
-    }:
-        synchronized_phase = ExecutionPhase.EXECUTING
-
     synchronized_step_id = None
     if active_step is not None:
         synchronized_step_id = active_step.step_id
@@ -205,7 +186,7 @@ def apply_controller_decision_to_state(
 
     synchronized_cursor = cursor.model_copy(
         update={
-            "phase": synchronized_phase,
+            "phase": cursor.phase,
             "current_worker": decision.next_worker or cursor.current_worker,
             "step_id": synchronized_step_id,
             "plan_revision": (
@@ -229,13 +210,11 @@ def apply_controller_decision_to_state(
             "protocol_visible": protocol_visible.model_copy(
                 update={
                     "status": (
-                        ExecutionStatus.CANCELLED
-                        if is_cancelled
-                        else protocol_visible.status
+                        decision.execution_status
                     ),
                     "cancellation_source": (
                         decision.cancellation_source
-                        if is_cancelled
+                        if decision.cancellation_source is not None
                         else protocol_visible.cancellation_source
                     ),
                     "cursor": synchronized_cursor,
@@ -243,6 +222,11 @@ def apply_controller_decision_to_state(
                     "active_step": active_step,
                     "pending_tool_request": pending_tool_request,
                     "completed_step_ids": completed_step_ids,
+                    "retry": (
+                        decision.retry
+                        if decision.retry is not None
+                        else protocol_visible.retry
+                    ),
                 }
             ),
         }
@@ -290,10 +274,14 @@ def decide_brain_execution(
     (BrainInput), not from legacy state.
     """
 
-    if brain_input.active_plan is None:
+    if brain_input.direct_response:
         return BrainExecutionDecision(
+            is_direct_response=True,
             reasoning="direct_response",
         )
+
+    if brain_input.active_plan is None:
+        return BrainExecutionDecision(reasoning="missing_execution_plan")
 
     if brain_input.active_step is None:
         return BrainExecutionDecision(

@@ -2,7 +2,7 @@
 
 - Document type: Architecture migration roadmap
 - Scope: Current runtime reconciliation and staged migration
-- Overall status: `NOT_STARTED`
+- Overall status: `IN_PROGRESS`
 - Baseline: Accepted current-runtime architecture reconciliation
 - Migration policy: Keep the runtime working after every stage and avoid a single-pass rewrite
 
@@ -75,6 +75,8 @@ All stages are initially `NOT_STARTED`.
 ## 3. Architectural Invariants
 
 These invariants govern every migration stage, including temporary compatibility work.
+
+No stage may introduce or expand a violation of these invariants. A pre-existing violation may remain only when the roadmap names it as an isolated compatibility exception, assigns its removal to a later dependent stage, and requires regression coverage at the rollback boundary. The Stage 5 scheduler-initiated async status-poll exception is removed by Stage 6 under this rule.
 
 ### 3.1 Portability Boundary
 
@@ -166,7 +168,7 @@ LangGraph checkpointing or graph traversal history must not be treated as automa
 
 | Stage | Name | Status | Independent commit boundary |
 | --- | --- | --- | --- |
-| 1 | Runtime correctness | `NOT_STARTED` | Yes |
+| 1 | Runtime correctness | `COMPLETED` | Yes |
 | 2 | Typed Brain outcomes | `NOT_STARTED` | Yes, after Stage 1 |
 | 3 | Finalization separation | `NOT_STARTED` | Yes, as 3A, 3B, and 3C |
 | 4 | Remove legacy completion code | `NOT_STARTED` | Yes |
@@ -177,7 +179,7 @@ LangGraph checkpointing or graph traversal history must not be treated as automa
 
 ## 7. Stage 1 - Runtime Correctness
 
-- Status: `NOT_STARTED`
+- Status: `COMPLETED`
 - Portability assessment: Preserves the portability constraint when lifecycle rules are implemented in Controller and protocol contracts rather than graph routes.
 
 ### Goal
@@ -560,7 +562,7 @@ Stage 4 is an independent deletion commit after its dependencies are satisfied.
 
 ### Goal
 
-Make Controller the single semantic execution-transition authority, remove protocol-visible state mutation from workers, and place invocation/dispatch responsibility in a replaceable runtime driver.
+Make Controller the semantic execution-transition authority for every dispatch migrated in this stage, remove protocol-visible state mutation from workers, and place invocation/dispatch responsibility in a replaceable runtime driver. The existing scheduler-initiated async status-poll path remains an isolated compatibility boundary until Stage 6.
 
 ### LangGraph Coupling Risk
 
@@ -571,6 +573,8 @@ The statement "Controller becomes the graph entrypoint" would incorrectly turn a
 The governing rule is:
 
 > Every worker operation must be authorized by a framework-neutral Controller decision. The runtime execution driver invokes Controller and dispatches authorized work.
+
+Stage 5 establishes this rule for normal worker dispatch and the driver boundary that Stage 6 requires. Because Stage 6 depends on Stage 5B, the existing scheduler-initiated status observation in `LocalAsyncPollingRuntime` is the sole temporary exception: it must remain isolated, behavior-pinned by parity tests, and must not gain additional semantic authority. Stage 6 removes this exception.
 
 Introduce or clarify semantic Controller commands such as:
 
@@ -631,7 +635,8 @@ No worker service or protocol/domain type depends on the driver or graph adapter
 
 - Controller tests run without LangGraph.
 - Workers cannot modify protocol-visible execution state.
-- Every worker invocation has a preceding Controller authorization.
+- Every worker invocation other than the existing scheduler-initiated async status observation has a preceding Controller authorization.
+- The temporary async-poll compatibility exception is explicitly isolated and regression-tested for removal in Stage 6.
 - Protocol decisions contain no node names.
 - Renaming adapter nodes does not alter protocol tests.
 - A minimal in-memory non-LangGraph driver executes the same lifecycle.
@@ -654,7 +659,7 @@ Do not combine topology changes with worker state-ownership changes in one rollb
 
 ### Acceptance Criteria
 
-- Controller is the single semantic transition authority.
+- Controller is the semantic transition authority for every dispatch migrated in Stage 5; the existing scheduler-initiated async status-poll adapter is the sole documented compatibility exception and is removed in Stage 6.
 - Controller is not typed or documented as a LangGraph node.
 - Graph entrypoint is an adapter choice, not a protocol guarantee.
 - Workers do not mutate protocol-visible execution state.
@@ -672,7 +677,7 @@ Stages 5A and 5B should be separate commits.
 
 ### Goal
 
-Refactor asynchronous polling so the scheduler emits a semantic wake event and Controller authorizes polling, rather than the scheduler fabricating Controller decisions or relying on graph identities.
+Move scheduler-initiated status-poll ownership behind a semantic wake event and Controller authorization, rather than allowing the scheduler to fabricate Controller decisions or rely on graph identities. Preserve the completed async lifecycle, provider-reconciliation, checkpoint-recovery, cancellation, timeout, telemetry, and resource-handoff behavior as the Stage 6 baseline; this stage changes the ownership boundary, not those behaviors.
 
 ### LangGraph Coupling Risk
 
@@ -699,12 +704,19 @@ Scheduler
   -> normalized ToolResult returns to Controller
 ```
 
+Current-baseline reconciliation:
+
+- Controller already owns `AsyncJobPolicy`, stable provider-ID allocation, wait deadlines, bounded backoff, poll-failure budgets, submission reconciliation, timeout reconciliation, and local/provider cancellation decisions. These are established inputs to Stage 6, not replacement targets.
+- `LocalAsyncPollingRuntime` currently validates the checkpointed wait decision and stale/terminal evidence, but it also constructs a poll `ToolRequest`, fabricates a `DISPATCH_TOOL_RUNTIME` `ControllerDecision`, executes the provider status tool directly, and resumes LangGraph through named nodes. This is the ownership and portability debt Stage 6 must remove.
+- The current ComfyUI path includes fail-closed Ollama/ComfyUI GPU handoff. Submission is blocked until Ollama release is verified; provider-terminal evidence does not permit LLM resumption until ComfyUI release is verified; checkpoint recovery of already-terminal evidence applies the same release gate without re-polling. This resource policy remains a runtime/provider-adapter concern and must not become protocol state or Controller policy.
+
 The scheduler must not:
 
 - refer to a graph node;
 - construct `ControllerDecision`;
 - mutate protocol state;
 - directly execute the provider poll before Controller authorization.
+- treat provider-terminal evidence as sufficient to resume an LLM while a configured runtime resource-readiness gate is still incomplete.
 
 A LangGraph-backed runtime may resume graph execution internally, but graph resume tokens and node identities remain private to the adapter.
 
@@ -726,7 +738,11 @@ The scheduler and Controller do not depend on LangGraph.
 - `core/protocol/enums.py`
 - `core/graph_runner.py`
 - `core/graph_state_machine.py`
+- `core/graph.py`
+- `core/runtime/gpu_resources.py`
+- `tools/comfy_ops.py`
 - Async polling, Controller, runtime-driver, and LangGraph-resume tests
+- ComfyUI lifecycle, GPU handoff, telemetry, and terminal-recovery tests
 
 ### Protocol Contracts Affected
 
@@ -737,6 +753,8 @@ The scheduler and Controller do not depend on LangGraph.
 - Timeout and cancellation
 - Normalized tool result
 
+GPU telemetry and provider-local resource handoff are not protocol contracts. Stage 6 may expose framework-neutral runtime/provider hooks for them, but must not add GPU state, provider process details, graph node names, or resource-routing targets to `ControllerInput`, `ControllerDecision`, protocol enums, or persistent protocol state.
+
 ### Tests Required
 
 - Scheduler tests use a fake execution-driver port, not LangGraph.
@@ -746,18 +764,21 @@ The scheduler and Controller do not depend on LangGraph.
 - Cancellation and timeout races are covered.
 - LangGraph resume behavior is tested only in adapter integration tests.
 - The same async lifecycle is demonstrated through a non-LangGraph driver.
+- Existing stable-ID, provider-visibility reconciliation, bounded-backoff, poll-failure-budget, final-timeout-reconciliation, and terminal-evidence monotonicity tests remain passing.
+- With resource handoff enabled, submission and LLM resumption remain fail-closed; terminal checkpoint recovery performs the same handoff gate without an extra provider poll.
+- Async-provider telemetry remains observational and cannot authorize, suppress, or reroute protocol transitions.
 
 ### Migration Risk
 
-High. Async timing, cancellation, stale work, and state ownership interact.
+High. Async timing, cancellation, stale work, state ownership, checkpoint recovery, and provider-local resource readiness interact.
 
 ### Dependencies
 
-Stage 5.
+Stage 5, including the Stage 5B execution-driver boundary. No additional migration stage is inserted: the completed async policy, ComfyUI lifecycle normalization, telemetry, and GPU handoff behavior are prerequisites to preserve, not stages to rerun.
 
 ### Rollback Boundary
 
-Keep the existing poller behind the same runtime interface until the new event-driven path passes parity tests. Switch implementations in a dedicated commit.
+Keep the existing poller behind the same runtime interface until the new event-driven path passes parity tests, including checkpoint recovery, cancellation/timeout, telemetry, and enabled/disabled resource-handoff cases. Switch implementations in a dedicated commit.
 
 ### Acceptance Criteria
 
@@ -766,6 +787,9 @@ Keep the existing poller behind the same runtime interface until the new event-d
 - Only Controller authorizes polling transitions.
 - Poll results are framework-neutral `ToolResult` values before reaching Controller.
 - Stale wake, timeout, and cancellation behavior is deterministic.
+- The Stage 5 async-poll compatibility exception is gone.
+- Existing async policy and provider-reconciliation behavior is unchanged.
+- Configured provider-local resource handoff gates LLM resumption on both fresh terminal observations and terminal checkpoint recovery, without leaking resource state into protocol contracts.
 
 ### Commit Independence
 
