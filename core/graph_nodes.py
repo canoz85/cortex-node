@@ -4,7 +4,7 @@ from langchain_ollama import ChatOllama
 
 from core.graph_brain import create_brain_node
 from core.graph_capture import create_capture_tool_output_node
-from core.graph_constants import ANSI_BLUE, ANSI_ITALIC, ANSI_RED, ANSI_GREEN, ANSI_YELLOW, ANSI_RESET, MAX_PSEUDO_RETRIES, RECENT_MESSAGE_WINDOW
+from core.graph_constants import ANSI_BLUE, ANSI_ITALIC, ANSI_RED, ANSI_GREEN, ANSI_YELLOW, ANSI_RESET, RECENT_MESSAGE_WINDOW
 
 from core.graph_controller import create_controller_node
 from core.graph_planner import create_planner_node
@@ -26,6 +26,7 @@ def create_graph_nodes(
     step_completed_system_prompt: str,
     tools_set: Set[str],
     show_raw_llm: bool,
+    supports_native_tool_calls: bool = True,
 ):
 
     controller_node = create_controller_node()
@@ -50,6 +51,7 @@ def create_graph_nodes(
         casual_system_prompt=casual_system_prompt,
         tools_set=tools_set,
         show_raw_llm=show_raw_llm,
+        supports_native_tool_calls=supports_native_tool_calls,
     )
 
 

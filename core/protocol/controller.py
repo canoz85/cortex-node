@@ -27,6 +27,7 @@ from .models import (
     ToolRequest,
     ToolResult,
 )
+from .completion_identity import requirement_scope, evidence_identity, plan_validation_identity, eligible_records, accepted_step, binding_for
 
 
 class CortexController:
@@ -162,6 +163,20 @@ class CortexController:
                         "Planner returned PLAN_CREATED without a plan.",
                     )
 
+                if (controller_input.completion_validation_error is not None
+                        or any(step.completion_requirement is not None for step in plan.steps)):
+                    bindings_valid = all(
+                        (binding_for(controller_input.identity, plan, step, controller_input.accepted_requirements) is not None
+                         and binding_for(controller_input.identity, plan, step, controller_input.accepted_requirements).scope_id
+                         == requirement_scope(controller_input.identity, plan, step))
+                        for step in plan.steps if step.completion_requirement is not None)
+
+                    if (not bindings_valid or controller_input.completion_validation_error is not None
+                            or controller_input.completion_validation_id != plan_validation_identity(plan)):
+                        return self._pause(controller_input.cursor,
+                            reconciliation_required=True,
+                            reason=controller_input.completion_validation_error or "completion_requirement_not_validated")
+
                 # next_step = self._find_next_pending_step(controller_input)
                 next_step = next(
                     (step for step in plan.steps if step.status == StepStatus.PENDING),
@@ -212,11 +227,25 @@ class CortexController:
 
         raise ValueError(f"Unsupported planner outcome: {planner_result.outcome}")
 
+    def _completion_permitted(self, context):
+        plan, step = self._validate_active_step(context, transition="step completion")
+        binding = binding_for(context.identity, plan, step, context.accepted_requirements)
+        if step.completion_requirement is None:
+            return binding is None
+        assessment = context.coverage_assessment
+        return (binding is not None and binding.scope_id == requirement_scope(context.identity, plan, step)
+                and assessment is not None and assessment.status == "satisfied"
+                and assessment.scope_id == binding.scope_id
+                and assessment.evidence_id == evidence_identity(eligible_records(context.identity, plan, context.tool_execution_history)))
+
     def _update_active_step_status(
         self,
         controller_input: ControllerInput,
         status: StepStatus,
     ) -> ExecutionPlan | None:
+
+        if status == StepStatus.COMPLETED and not self._completion_permitted(controller_input):
+            raise ValueError("completion coverage required")
 
         plan = controller_input.active_plan
         active_step = controller_input.active_step
@@ -267,6 +296,7 @@ class CortexController:
                 f"{transition} retry metadata does not match active step"
             )
 
+        accepted_step(plan, active_step, controller_input.cursor)
         return plan, matching_steps[0]
 
     @staticmethod
@@ -301,6 +331,11 @@ class CortexController:
             update={
                 "step_id": active_step.step_id,
                 "last_error_message": failure_reason,
+                "last_error_code": (
+                    brain_result.error_code
+                    if brain_result is not None and brain_result.error_code is not None
+                    else controller_input.retry.last_error_code
+                ),
             }
         )
 
@@ -361,6 +396,23 @@ class CortexController:
             raise RuntimeError(
                 "Controller dispatched to Brain without BrainResult."
         )
+
+        # Typed scope identifiers are authoritative; message text and suggested
+        # status have no role in deciding what happened.
+        evidence = brain_result.completion_evidence
+        result_step_ids = (
+            brain_result.step_id,
+            evidence.step_id if evidence is not None else None,
+        )
+        if any(step_id is not None for step_id in result_step_ids):
+            _, active_step = self._validate_active_step(controller_input, transition="brain outcome")
+            if any(step_id is not None and step_id != active_step.step_id for step_id in result_step_ids):
+                raise ValueError("brain outcome step does not match active step")
+
+        if brain_result.outcome in {BrainOutcome.STEP_COMPLETED, BrainOutcome.FINAL_ANSWER} and controller_input.active_step is not None:
+            if not self._completion_permitted(controller_input):
+                return self._dispatch_brain(controller_input.cursor,
+                    reason="completion_coverage_rejected", next_step_id=controller_input.active_step.step_id)
 
         match brain_result.outcome:
             case BrainOutcome.TOOL_REQUEST:
@@ -506,6 +558,15 @@ class CortexController:
 
             case BrainOutcome.STEP_FAILED:
                 return self._decide_step_failure(controller_input)
+
+            case BrainOutcome.INVALID_OUTPUT | BrainOutcome.PROVIDER_FAILURE:
+                if controller_input.active_step is not None or controller_input.cursor.step_id is not None:
+                    return self._decide_step_failure(controller_input)
+                return self._terminate(
+                    controller_input.cursor,
+                    brain_result.outcome.value,
+                    failure_reason=brain_result.message,
+                )
 
             case BrainOutcome.CONTINUE:
                 return self._dispatch_brain(cursor=controller_input.cursor, reason="continue")

@@ -23,9 +23,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Mapping, Sequence, Final
 
-from langchain_core.messages import AIMessage
 from pydantic import BaseModel
-from uuid_utils import uuid4
 
 from core import protocol
 
@@ -514,8 +512,12 @@ def _legacy_brain_result_to_model(legacy_state: LegacyState | None) -> BrainResu
     return BrainResult(
         outcome=outcome,
         message=message,
+        step_id=state.get("step_id"),
         tool_request=tool_request,
         replan_request=replan_request,
+        completion_evidence=state.get("completion_evidence"),
+        final_answer=state.get("final_answer"),
+        error_code=state.get("error_code"),
         proposed_step_status=proposed_step_status,
     )
 
@@ -792,6 +794,7 @@ def build_brain_input(legacy_state: LegacyState | None = None) -> BrainInput:
         active_step=execution_state.protocol_visible.active_step,
         last_tool_result=execution_state.working.last_tool_result,
         tool_execution_history=execution_state.working.tool_execution_history,
+        coverage_assessment=execution_state.working.coverage_assessment,
         retry=execution_state.protocol_visible.retry,
         direct_response=(
             controller_decision.direct_response
@@ -831,6 +834,8 @@ def build_controller_input(
         async_policy=protocol.async_policy,
         cancel_requested=working.cancel_requested,
         tool_execution_history=working.tool_execution_history,
+        coverage_assessment=working.coverage_assessment,
+        accepted_requirements=protocol.accepted_requirements,
     )
 
 def brain_result_to_legacy(result: BrainResult) -> dict[str, Any]:
@@ -842,6 +847,10 @@ def brain_result_to_legacy(result: BrainResult) -> dict[str, Any]:
         "tool_request": None,
         "replan_request": None,
         "proposed_step_status": None,
+        "step_id": result.step_id,
+        "completion_evidence": result.completion_evidence.model_dump(mode="json") if result.completion_evidence else None,
+        "final_answer": result.final_answer,
+        "error_code": result.error_code,
     }
 
     if result.proposed_step_status is not None:
@@ -864,22 +873,6 @@ def brain_result_to_legacy(result: BrainResult) -> dict[str, Any]:
         }
 
     return payload
-
-def build_tool_request(
-        *,
-        brain_input: BrainInput,
-        response: AIMessage,
-    ) -> ToolRequest:
-    """Build ToolRequest contract from BrainInput and AIMessage tool call response."""
-
-    tool_call = response.tool_calls[0]
-
-    return ToolRequest(
-        request_id=f"{brain_input.identity.execution_id}:tool:{uuid4().hex}",
-        tool_name=tool_call["name"],
-        arguments=tool_call.get("args", {}),
-        requested_by=WorkerRole.BRAIN,
-    )
 
 def build_tool_input(legacy_state: LegacyState | None = None,) -> ToolInput:
     """Build ToolInput contract from legacy runtime state."""
@@ -1065,7 +1058,6 @@ __all__ = [
     "build_planner_input",
     "build_controller_input",
     "build_tool_input",
-    "build_tool_request",
     "brain_result_to_legacy",
     "tool_result_to_legacy",
     "legacy_tool_result_to_model",

@@ -76,8 +76,8 @@ class PlannerOutcome(StrEnum):
     CLARIFICATION_REQUIRED = "clarification_required"
     FAILED = "failed"
 
-class BrainOutcome(StrEnum):
-    """Step-scoped outcomes produced by BrainResult."""
+class BrainOutcomeKind(StrEnum):
+    """Framework-neutral Brain result discriminants."""
 
     CONTINUE = "continue"
     TOOL_REQUEST = "tool_request"
@@ -85,6 +85,16 @@ class BrainOutcome(StrEnum):
     STEP_COMPLETED = "step_completed"
     STEP_FAILED = "step_failed"
     FINAL_ANSWER = "final_answer"
+    INVALID_OUTPUT = "invalid_output"
+    PROVIDER_FAILURE = "provider_failure"
+
+    # Keep the Stage 1 wire values and enum names compatible.
+    TOOL_REQUESTED = TOOL_REQUEST
+    REPLAN_REQUESTED = REPLAN_REQUEST
+    FINAL_ANSWER_READY = FINAL_ANSWER
+
+
+BrainOutcome = BrainOutcomeKind
 
 
 class ControllerDecisionType(StrEnum):

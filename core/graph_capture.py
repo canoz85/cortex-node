@@ -295,6 +295,9 @@ def create_capture_tool_output_node():
         )
 
         tool_execution_record = ToolExecutionRecord(
+            execution_id=execution_state.protocol_visible.identity.execution_id,
+            plan_id=execution_state.protocol_visible.active_plan.plan_id if execution_state.protocol_visible.active_plan else None,
+            plan_revision=execution_state.protocol_visible.active_plan.revision if execution_state.protocol_visible.active_plan else None,
             step_id=active_step.step_id if active_step is not None else "",
             tool_name=decision.pending_tool_request.tool_name,
             arguments=decision.pending_tool_request.arguments,

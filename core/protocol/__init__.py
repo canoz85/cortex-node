@@ -3,7 +3,7 @@
 # Enums
 from .enums import (
     AsyncJobStatus,
-    BrainOutcome,
+    BrainOutcomeKind,
     CancellationSource,
     ControllerDecisionType,
     EventType,
@@ -17,7 +17,11 @@ from .enums import (
 from .models import (
     AsyncJobPolicy,
     BrainInput,
+    BrainOutcome,
     BrainResult,
+    BrainUsage,
+    FinalAnswerDraft,
+    StepCompletionEvidence,
     ControllerInput,
     PlannerInput,
     PlannerResult,
@@ -49,7 +53,7 @@ from .converters import (
 __all__ = [
     # Enums
     "AsyncJobStatus",
-    "BrainOutcome",
+    "BrainOutcomeKind",
     "CancellationSource",
     "ControllerDecisionType",
     "EventType",
@@ -61,7 +65,11 @@ __all__ = [
     # Models
     "AsyncJobPolicy",
     "BrainInput",
+    "BrainOutcome",
     "BrainResult",
+    "BrainUsage",
+    "FinalAnswerDraft",
+    "StepCompletionEvidence",
     "ControllerInput",
     "PlannerInput",
     "PlannerResult",

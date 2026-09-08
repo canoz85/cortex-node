@@ -88,7 +88,7 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
 
 
     @tool("read_file", args_schema=ReadFileRequest)
-    def read_file(path: str, offset: int = 0, limit: int = 4000) -> str:
+    def read_file(path: str, offset: int = 0, limit: int = 10000) -> str:
         """Read a UTF-8 text file from inside the sandbox workspace with offset and limit support."""
         try:
             request = ReadFileRequest(path=path, offset=offset, limit=limit)

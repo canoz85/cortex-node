@@ -104,7 +104,7 @@ def _execution_state_with_step(step_id: str) -> ExecutionState:
     )
 
 
-def test_tool_completed_messages_include_structured_tool_progress(monkeypatch):
+def test_tool_result_keeps_active_step_worker_and_cumulative_evidence(monkeypatch):
     tool_history = (
         ToolExecutionRecord(
             step_id="s1",
@@ -173,10 +173,10 @@ def test_tool_completed_messages_include_structured_tool_progress(monkeypatch):
 
     brain_node(state)
 
-    assert len(brain_llm.invocations) == 1
-    rendered_messages = [str(getattr(m, "content", "")) for m in brain_llm.invocations[0]]
-    assert any("Tool execution progress (structured):" in content for content in rendered_messages)
-    assert len(tool_brain_llm.invocations) == 0
+    assert len(tool_brain_llm.invocations) == 1
+    rendered_messages = [str(getattr(m, "content", "")) for m in tool_brain_llm.invocations[0]]
+    assert any("Execution evidence v1:" in content for content in rendered_messages)
+    assert len(brain_llm.invocations) == 0
 
 
 def test_normal_execution_messages_include_structured_tool_progress(monkeypatch):
@@ -243,4 +243,4 @@ def test_normal_execution_messages_include_structured_tool_progress(monkeypatch)
 
     assert len(tool_brain_llm.invocations) == 1
     rendered_messages = [str(getattr(m, "content", "")) for m in tool_brain_llm.invocations[0]]
-    assert any("Tool execution progress (structured):" in content for content in rendered_messages)
+    assert any("Execution evidence v1:" in content for content in rendered_messages)

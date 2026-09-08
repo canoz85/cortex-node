@@ -6,15 +6,15 @@ remaining independent from current runtime orchestration modules.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue as DomainJsonValue, model_validator
 
 from .enums import (
     AsyncJobStatus,
-    BrainOutcome,
+    BrainOutcomeKind,
     CancellationSource,
     ControllerDecisionType,
     EventType,
@@ -98,6 +98,41 @@ class AsyncJobPolicy(ImmutableProtocolModel):
         return self
 
 
+class CoverageRequirement(ImmutableProtocolModel):
+    provider_id: str = Field(min_length=1)
+    specification: dict[str, DomainJsonValue] = Field(default_factory=dict)
+
+
+class AcceptedRequirement(ImmutableProtocolModel):
+    execution_id: str
+    plan_id: str
+    plan_revision: int
+    step_id: str
+    scope_id: str
+    provider_id: str
+    provider_version: str
+    specification_json: str
+
+
+class ResolvedCoverage(ImmutableProtocolModel):
+    """Authoritative membership, committed once for a requirement scope."""
+
+    scope_id: str
+    provider_version: str
+    required_item_ids: tuple[str, ...]
+    source_evidence_ids: tuple[str, ...] = ()
+    evidence_id: str = ""
+
+
+class CoverageAssessment(ImmutableProtocolModel):
+    scope_id: str
+    evidence_id: str
+    status: Literal["unresolved", "missing", "satisfied", "error", "stale"]
+    satisfied_item_ids: tuple[str, ...] = ()
+    missing_item_ids: tuple[str, ...] = ()
+    reason: str = ""
+
+
 class ExecutionStep(ImmutableProtocolModel):
     """Typed representation of a single step in an execution plan.
 
@@ -111,6 +146,7 @@ class ExecutionStep(ImmutableProtocolModel):
     title: str = Field(min_length=1)
     description: str = ""
     primary_tool: str | None = None
+    completion_requirement: CoverageRequirement | None = None
 
     status: StepStatus = StepStatus.PENDING
     attempt: int = Field(default=0, ge=0)
@@ -165,7 +201,7 @@ class ToolRequest(ImmutableProtocolModel):
 
     request_id: str = Field(min_length=1)
     tool_name: str = Field(min_length=1)
-    arguments: dict[str, Any] = Field(default_factory=dict)
+    arguments: dict[str, DomainJsonValue] = Field(default_factory=dict)
     requested_by: WorkerRole = WorkerRole.BRAIN
 
 
@@ -243,7 +279,7 @@ class ToolResult(ImmutableProtocolModel):
     success: bool
     message: str
     rendered_output: str = ""
-    data: JsonValue = None
+    data: DomainJsonValue = None
     error_code: str | None = None
     integrity: ContentIntegrity = Field(default_factory=ContentIntegrity)
     pagination: PaginationMetadata | None = None
@@ -276,10 +312,13 @@ class ToolResult(ImmutableProtocolModel):
 
 
 class ToolExecutionRecord(ImmutableProtocolModel):
+    execution_id: str | None = None
+    plan_id: str | None = None
+    plan_revision: int | None = None
     step_id: str
 
     tool_name: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
+    arguments: dict[str, DomainJsonValue] = Field(default_factory=dict)
     result: ToolResult
     artifacts: tuple[ArtifactRecord, ...] = Field(default_factory=tuple)
 
@@ -317,9 +356,31 @@ class BrainInput(ImmutableProtocolModel):
     tool_execution_history: tuple[ToolExecutionRecord, ...] = Field(default_factory=tuple)
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
     direct_response: bool = False
+    coverage_assessment: CoverageAssessment | None = None
 
 
-class BrainResult(ImmutableProtocolModel):
+class StepCompletionEvidence(ImmutableProtocolModel):
+    """Brain's step-scoped claim; Controller alone accepts completion."""
+
+    step_id: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    tool_request_ids: tuple[str, ...] = Field(default_factory=tuple)
+
+
+class FinalAnswerDraft(ImmutableProtocolModel):
+    """Temporary Brain-owned final answer during Stage 2."""
+
+    text: str = Field(min_length=1)
+
+
+class BrainUsage(ImmutableProtocolModel):
+    """Optional accounting values, never provider metadata or lifecycle signals."""
+
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+
+
+class BrainOutcome(ImmutableProtocolModel):
     """Typed outcome contract emitted by brain runtime realization.
 
     Protocol purpose: represent step-scoped outcome categories.
@@ -328,12 +389,44 @@ class BrainResult(ImmutableProtocolModel):
     Visibility: Protocol-visible exchange object.
     """
 
-    outcome: BrainOutcome
+    outcome: BrainOutcomeKind
     message: str = ""
+    step_id: str | None = None
     tool_request: ToolRequest | None = None
     replan_request: ReplanRequest | None = None
+    completion_evidence: StepCompletionEvidence | None = None
+    final_answer_draft: FinalAnswerDraft | None = None
+    error_code: str | None = None
+    usage: BrainUsage = Field(default_factory=BrainUsage)
+    # Stage 1 compatibility fields. Text and proposed status never select an outcome.
     final_answer: str | None = None
     proposed_step_status: StepStatus | None = None
+
+    @property
+    def kind(self) -> BrainOutcomeKind:
+        return self.outcome
+
+    @model_validator(mode="after")
+    def validate_payload_kinds(self) -> "BrainOutcome":
+        for payload, kind in (
+            (self.tool_request, BrainOutcomeKind.TOOL_REQUESTED),
+            (self.replan_request, BrainOutcomeKind.REPLAN_REQUESTED),
+            (self.completion_evidence, BrainOutcomeKind.STEP_COMPLETED),
+            (self.final_answer_draft, BrainOutcomeKind.FINAL_ANSWER_READY),
+            (self.final_answer, BrainOutcomeKind.FINAL_ANSWER_READY),
+        ):
+            if payload is not None and self.outcome != kind:
+                raise ValueError("Brain payload does not match outcome kind")
+        if self.final_answer_draft is not None:
+            if self.final_answer is not None and self.final_answer != self.final_answer_draft.text:
+                raise ValueError("conflicting final answer payloads")
+            object.__setattr__(self, "final_answer", self.final_answer_draft.text)
+        elif self.final_answer is not None:
+            object.__setattr__(self, "final_answer_draft", FinalAnswerDraft(text=self.final_answer))
+        return self
+
+
+BrainResult = BrainOutcome
 
 
 class ControllerInput(ImmutableProtocolModel):
@@ -358,6 +451,10 @@ class ControllerInput(ImmutableProtocolModel):
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
     async_policy: AsyncJobPolicy = Field(default_factory=AsyncJobPolicy)
     cancel_requested: bool = False
+    coverage_assessment: CoverageAssessment | None = None
+    accepted_requirements: tuple[AcceptedRequirement, ...] = ()
+    completion_validation_id: str | None = None
+    completion_validation_error: str | None = None
     tool_execution_history: tuple[ToolExecutionRecord, ...] = Field(default_factory=tuple)
 
     def get_step_records(self, step_id: str | None = None) -> tuple[ToolExecutionRecord, ...]:
@@ -647,6 +744,8 @@ class ProtocolVisibleState(ImmutableProtocolModel):
     async_policy: AsyncJobPolicy = Field(default_factory=AsyncJobPolicy)
     cancellation_source: CancellationSource | None = None
     summary: ExecutionSummary | None = None
+    accepted_requirements: tuple[AcceptedRequirement, ...] = ()
+    resolved_coverages: tuple[ResolvedCoverage, ...] = ()
 
 
 class WorkingState(ImmutableProtocolModel):
@@ -665,6 +764,7 @@ class WorkingState(ImmutableProtocolModel):
     last_tool_result: ToolResult | None = None
     tool_execution_history: tuple[ToolExecutionRecord, ...] = Field(default_factory=tuple)
     repeat_fail_count: int = 0
+    coverage_assessment: CoverageAssessment | None = None
     cancel_requested: bool = False
     routing_metadata: dict[str, JsonValue] = Field(default_factory=dict)
     planner_metadata: dict[str, JsonValue] = Field(default_factory=dict)

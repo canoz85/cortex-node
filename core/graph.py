@@ -12,6 +12,7 @@ from langgraph.prebuilt import ToolNode
 
 from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, FINAL_ANSWER_SYSTEM_PROMPT, MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE, STEP_COMPLETED_SYSTEM_PROMPT
 from core.graph_nodes import create_graph_nodes
+from core.brain_provider import text_tool_definitions
 from core.graph_routing import  route_after_controller
 from core.graph_runner import run_prompt
 from core.rag import WorkspaceRAG
@@ -242,6 +243,7 @@ def build_app(
     checkpointer_factory: Callable[[], Any] = InMemorySaver,
     gpu_resource_policy: GpuResourcePolicy | None = None,
     gpu_resource_coordinator: GpuResourceCoordinator | None = None,
+    supports_native_tool_calls: bool = True,
 ) -> CheckpointedGraphApp:
     app_root = project_root or Path(__file__).resolve().parents[1]
     workspace_root = Path(workspace_dir).resolve()
@@ -275,6 +277,8 @@ def build_app(
 
     # Format the available tools into a clean, scannable string block
     tools_list_str = "\n".join([f"- {name}" for name in sorted(tools_set) if name])
+    if not supports_native_tool_calls:
+        tools_list_str = text_tool_definitions(tools)
 
     agent_system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         model=model,
@@ -291,7 +295,9 @@ def build_app(
 
     planner_llm = chat_model_factory(model_planner, 0)
     brain_llm = chat_model_factory(model, 0)
-    tool_brain_llm = chat_model_factory(model, 0).bind_tools(tools)
+    tool_brain_llm = chat_model_factory(model, 0)
+    if supports_native_tool_calls:
+        tool_brain_llm = tool_brain_llm.bind_tools(tools)
 
     controller_node, planner_node, brain_node, capture_tool_output_node, summarize_memory_node = graph_nodes_factory(
         brain_llm=brain_llm,
@@ -306,6 +312,7 @@ def build_app(
         sap_system_prompt=sap_system_prompt,
         tools_set=tools_set,
         show_raw_llm=show_raw_llm,
+        supports_native_tool_calls=supports_native_tool_calls,
     )
 
     resource_observer = (

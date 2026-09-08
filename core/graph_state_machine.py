@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from enum import Enum
 
 from langgraph.graph import END
 
@@ -9,7 +8,7 @@ from core.protocol.enums import (
     ExecutionPhase,
     WorkerRole,
 )
-from core.protocol.models import BrainInput, ControllerDecision, ControllerInput, ExecutionPlan, ExecutionState, PlannerResult
+from core.protocol.models import ControllerDecision, ControllerInput, ExecutionState
 
 from core.graph_constants import MAX_REASONING_STEPS
 from core.state import AgentState
@@ -18,30 +17,6 @@ from core.state import AgentState
 @dataclass(frozen=True)
 class TransitionDecision:
     next_node: str
-    reason: str
-
-
-@dataclass(frozen=True)
-class BrainExecutionDecision:
-    reasoning: str
-    has_action: bool = False
-    needs_retrieval: bool = False
-    is_direct_response: bool = False
-    is_final_answer: bool = False
-    is_step_completed: bool = False
-    instruction_brief: str = ""  
-
-class ActionRecoveryKind(Enum):
-    UNCHANGED = "unchanged"
-    RECOVERED_ACTION = "recovered_action"
-    GENERIC_JSON_FINALIZATION = "generic_json_finalization"
-    PSEUDO_TOOL_FALLBACK = "pseudo_tool_fallback"
-    RETRY_EMPTY = "retry_empty"
-
-
-@dataclass(frozen=True)
-class ActionRecoveryDecision:
-    kind: ActionRecoveryKind
     reason: str
 
 
@@ -262,120 +237,3 @@ def decide_after_brain(
     return TransitionDecision(next_node=END, reason="finalize_turn")
     #commented for now..
     #return TransitionDecision(next_node="summarize_memory", reason="finalize_turn")
-
-
-def decide_brain_execution(
-    brain_input: BrainInput,
-) -> BrainExecutionDecision:
-    """
-    Decide whether the Brain should execute tools or respond directly.
-
-    The Brain operates entirely from the protocol contract
-    (BrainInput), not from legacy state.
-    """
-
-    if brain_input.direct_response:
-        return BrainExecutionDecision(
-            is_direct_response=True,
-            reasoning="direct_response",
-        )
-
-    if brain_input.active_plan is None:
-        return BrainExecutionDecision(reasoning="missing_execution_plan")
-
-    if brain_input.active_step is None:
-        return BrainExecutionDecision(
-            is_final_answer=True,
-            reasoning="final_answer",
-        )
-
-    # if brain_input.last_tool_result is not None:
-    #     return BrainExecutionDecision(
-    #         has_action=True,
-    #         is_step_completed=True,
-    #         reasoning="tool_result",
-    #         instruction_brief=_build_brain_execution_brief(brain_input)
-    #     )
-
-    return BrainExecutionDecision(
-        has_action=True,
-        reasoning="execution_plan",
-        instruction_brief=_build_brain_execution_brief(brain_input),
-    )
-
-
-def _build_brain_execution_brief(
-    brain_input: BrainInput,
-) -> str:
-    """
-    Build the execution instructions passed to the Brain LLM.
-
-    The planner owns the plan.
-    The controller owns progression through the plan.
-    The Brain only performs the current step.
-    """
-
-    plan = brain_input.active_plan
-    current_step = brain_input.active_step
-
-    if plan is None or not plan.steps:
-        return ""
-
-    lines: list[str] = [
-        "Execution plan:",
-    ]
-
-    for index, step in enumerate(plan.steps, start=1):
-        marker = ">>" if current_step and step.step_id == current_step.step_id else "  "
-
-        lines.append(
-            f"{marker} {index}. {step.title} – {step.description}"
-        )
-
-        if current_step and step.step_id == current_step.step_id: # means marker is ">>"
-            break
-
-    rendered = "\n".join(lines)
-
-    if len(rendered) > 2000:
-        rendered = rendered[:2000] + "..."
-
-    return rendered
-
-
-def decide_action_recovery(
-    *,
-    action_required: bool,
-    recovered_action_response_exists: bool,
-    pseudo_tool_response_detected: bool,
-    generic_json_tool_response_detected: bool,
-    response_is_empty: bool,
-) -> ActionRecoveryDecision:
-    if action_required and recovered_action_response_exists:
-        return ActionRecoveryDecision(
-            kind=ActionRecoveryKind.RECOVERED_ACTION,
-            reason="recoverable_action_response",
-        )
-
-    if action_required and generic_json_tool_response_detected:
-        return ActionRecoveryDecision(
-            kind=ActionRecoveryKind.GENERIC_JSON_FINALIZATION,
-            reason="generic_json_tool_response",
-        )
-
-    if action_required and pseudo_tool_response_detected:
-        return ActionRecoveryDecision(
-            kind=ActionRecoveryKind.PSEUDO_TOOL_FALLBACK,
-            reason="unrecoverable_pseudo_tool_response",
-        )
-
-    if response_is_empty:
-        return ActionRecoveryDecision(
-            kind=ActionRecoveryKind.RETRY_EMPTY,
-            reason="empty_response",
-        )
-
-    return ActionRecoveryDecision(
-        kind=ActionRecoveryKind.UNCHANGED,
-        reason="no_recovery_needed",
-    )

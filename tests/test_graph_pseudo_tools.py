@@ -1,6 +1,18 @@
 from langchain_core.messages import AIMessage
 
-from core.graph_pseudo_tools import recover_pseudo_tool_response
+from core.brain_normalization import normalize_brain_output
+from core.protocol.enums import BrainOutcomeKind
+from core.protocol.models import BrainInput, ExecutionIdentity, ExecutionCursor, ExecutionContext, ExecutionPlan, ExecutionStep
+
+
+def recover_pseudo_tool_response(message, tools):
+    step = ExecutionStep(step_id="s1", title="Write the file")
+    return normalize_brain_output(message, BrainInput(
+        identity=ExecutionIdentity(execution_id="test", protocol_version="1.0"),
+        cursor=ExecutionCursor(step_id="s1"),
+        context=ExecutionContext(user_request="write file"),
+        active_plan=ExecutionPlan(plan_id="p1", steps=(step,)), active_step=step,
+    ), tools, allow_text_tool_calls=True)
 
 
 def test_recover_pseudo_tool_response_recovers_fenced_json_with_nested_arguments_and_multiline_content():
@@ -20,8 +32,8 @@ def test_recover_pseudo_tool_response_recovers_fenced_json_with_nested_arguments
 
     recovered = recover_pseudo_tool_response(message, {"write_file", "read_file", "list_files"})
 
-    assert len(recovered.tool_calls) == 1
-    call = recovered.tool_calls[0]
+    assert recovered.kind == BrainOutcomeKind.TOOL_REQUESTED
+    call = {"name": recovered.tool_request.tool_name, "args": recovered.tool_request.arguments}
     assert call["name"] == "write_file"
     assert call["args"]["path"] == "workspace/advanced_sensor.py"
     assert "validate_data" in call["args"]["content"]
@@ -47,13 +59,13 @@ def test_recover_pseudo_tool_response_recovers_tool_calls_wrapper_shape():
 
     recovered = recover_pseudo_tool_response(message, {"write_file", "read_file", "list_files"})
 
-    assert len(recovered.tool_calls) == 1
-    call = recovered.tool_calls[0]
+    assert recovered.kind == BrainOutcomeKind.TOOL_REQUESTED
+    call = {"name": recovered.tool_request.tool_name, "args": recovered.tool_request.arguments}
     assert call["name"] == "read_file"
     assert call["args"] == {"path": "workspace/dummy.json"}
 
 
-def test_recover_pseudo_tool_response_relaxed_write_file_recovery_with_unescaped_quotes():
+def test_normalizer_rejects_unescaped_quotes_without_repairing_file_content():
     message = AIMessage(
         content=(
             "```json\n"
@@ -71,15 +83,11 @@ def test_recover_pseudo_tool_response_relaxed_write_file_recovery_with_unescaped
 
     recovered = recover_pseudo_tool_response(message, {"write_file", "read_file", "list_files"})
 
-    assert len(recovered.tool_calls) == 1
-    call = recovered.tool_calls[0]
-    assert call["name"] == "write_file"
-    assert call["args"]["path"] == "workspace/advanced_sensor.py"
-    assert call["args"]["overwrite"] is True
-    assert 'print("hello")' in call["args"]["content"]
+    assert recovered.kind == BrainOutcomeKind.INVALID_OUTPUT
+    assert recovered.tool_request is None
 
 
-def test_recover_pseudo_tool_response_relaxed_write_file_recovery_without_closing_fence():
+def test_normalizer_rejects_unclosed_fence_without_salvaging_a_partial_output():
     message = AIMessage(
         content=(
             "```json\n"
@@ -95,8 +103,5 @@ def test_recover_pseudo_tool_response_relaxed_write_file_recovery_without_closin
 
     recovered = recover_pseudo_tool_response(message, {"write_file", "read_file", "list_files"})
 
-    assert len(recovered.tool_calls) == 1
-    call = recovered.tool_calls[0]
-    assert call["name"] == "write_file"
-    assert call["args"]["path"] == "workspace/advanced_sensor.py"
-    assert "partial but usable" in call["args"]["content"]
+    assert recovered.kind == BrainOutcomeKind.INVALID_OUTPUT
+    assert recovered.tool_request is None

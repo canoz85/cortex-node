@@ -38,9 +38,6 @@ class ToolSerializableModel(BaseModel):
             content = data_dict.get("content")
         if isinstance(content, str):
             path_label = str(payload.get("path", "") or data_dict.get("path", "") or "file")
-            # max_chars = 4000
-            # if len(content) > max_chars:
-            #     return f"Contents of {path_label}:\n{content[:max_chars]}\n\n...[truncated]"
             return f"Contents of {path_label}:\n{content}"
 
         if {"prompt_tokens", "completion_tokens", "total_tokens"}.issubset(data_dict.keys()):
@@ -314,7 +311,7 @@ class ReadFileRequest(BaseModel):
 
     path: str = Field(min_length=1, description="Relative path to the file inside the workspace.")
     offset: int = Field(default=0, ge=0, description="Character offset to start reading from.")
-    limit: int = Field(default=4000, gt=0, description="Maximum number of characters to read.")
+    limit: int = Field(default=10000, gt=0, description="Maximum number of characters to read.")
 
 
 class ReadFileResult(ToolSerializableModel):

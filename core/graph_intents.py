@@ -29,7 +29,8 @@ Analyze the user's input and categorize it into exactly ONE route and ONE domain
 
 ROUTE DEFINITIONS:
 - "action": State-changing operations, writing/modifying files, running Python code, or executing system tasks.
-- "info": Read-only operations requiring tools (e.g., reading files, searching RAG/knowledge, checking Git status, querying SAP/SCADA).
+- "info": Read-only operations requiring tools, including current runtime/system
+  state, files, knowledge retrieval, Git status, SAP/SCADA queries, etc.
 - "conversation": Questions that can be answered directly using internal LLM knowledge WITHOUT calling any tools (e.g., explanations, coding assistance, chit-chat).
 - "clarify_domain": The request is too ambiguous or critical information is missing to decide safely.
 
@@ -40,13 +41,19 @@ DOMAIN DEFINITIONS:
 
 DECISION RULES:
 1. Direct answers without tools -> "conversation".
-2. If the user explicitly asks to run, write, or execute something -> "action".
-3. If the user asks to inspect, read, or search existing data -> "info".
-4. Do not infer tool usage from simple verbs like "find", "check", or "calculate" unless tool/workspace execution is explicitly required.
+2. "conversation" is valid only when all information required to answer is already
+   provided by the user or available from stable internal knowledge. If the answer
+   depends on current, live, runtime, environment, or system state, use a tool-based route.
+3. If the user explicitly asks to run, write, or execute something -> "action".
+4. If the user asks to inspect, read, search, or obtain current runtime/system data
+   without changing state -> "info".
+5. Do not infer tool usage from verbs like "find", "check", or "calculate" alone.
+   Tool usage is required only when the requested answer depends on information
+   unavailable without a configured capability.
 
 OUTPUT REQUIREMENTS:
 Return a JSON object with the following fields:
-- "route": One of "action", "info", "conversation", "clarify".
+- "route": One of "action", "info", "conversation", "clarify_domain".
 - "domain": One of "workspace", "sap", "general".
 - "confidence": Float between 0.0 and 1.0.
 - "enforced": Boolean (true if safety rules or explicit user instructions force this route).

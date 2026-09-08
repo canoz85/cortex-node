@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.protocol.models import BrainOutcome
+from core.protocol.enums import BrainOutcome
 from core.logging.node_update import NodeUpdate
 
 from .console import (
