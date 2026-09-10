@@ -122,6 +122,79 @@ def _tool_outcome(calls, brain_input: BrainInput, allowed_tools: set[str]) -> Br
     )
 
 
+def _native_call(call) -> tuple[str, dict]:
+    if not isinstance(call, dict):
+        raise InvalidBrainOutput("invalid_tool_call")
+    if "function" in call:
+        _only_fields(call, {"id", "type", "function"})
+        call = call["function"]
+        if not isinstance(call, dict):
+            raise InvalidBrainOutput("invalid_tool_function")
+    _only_fields(call, {"id", "type", "name", "arguments", "args"})
+    name = _text(call.get("name"), "tool_name")
+    if "arguments" in call and "args" in call:
+        raise InvalidBrainOutput("ambiguous_tool_arguments")
+    arguments = call.get("arguments", call.get("args", {}))
+    if isinstance(arguments, str):
+        arguments = _json(arguments)
+    if not isinstance(arguments, dict):
+        raise InvalidBrainOutput("tool_arguments_must_be_object")
+    return name, arguments
+
+
+def _native_outcome(
+    calls, brain_input: BrainInput, allowed_tools: set[str], *,
+    evidence_snapshot: EvidenceSnapshot | None = None,
+) -> BrainOutcome:
+    if not isinstance(calls, (list, tuple)) or len(calls) != 1:
+        raise InvalidBrainOutput("exactly_one_tool_call_required")
+    if brain_input.direct_response or brain_input.active_step is None:
+        raise InvalidBrainOutput("native_call_requires_active_step")
+    name, arguments = _native_call(calls[0])
+    if name in allowed_tools:
+        return _tool_outcome(calls, brain_input, allowed_tools)
+    step_id = brain_input.active_step.step_id
+    if name == "brain_step_completed":
+        _only_fields(arguments, {"message", "evidence_refs"})
+        summary = _text(arguments.get("message"), "message")
+        refs = arguments.get("evidence_refs")
+        if not isinstance(refs, list) or any(not isinstance(item, str) for item in refs):
+            raise InvalidBrainOutput("invalid_evidence_refs")
+        if evidence_snapshot is not None and evidence_snapshot.scope != evidence_scope(brain_input):
+            raise InvalidBrainOutput("evidence_snapshot_scope_mismatch")
+        bindings = dict(evidence_snapshot.bindings) if evidence_snapshot is not None else {}
+        if set(refs) - bindings.keys():
+            raise InvalidBrainOutput("unknown_step_evidence")
+        ids = tuple(bindings[ref] for ref in refs)
+        return BrainOutcome(
+            outcome=Kind.STEP_COMPLETED, step_id=step_id, message=summary,
+            completion_evidence=StepCompletionEvidence(
+                step_id=step_id, summary=summary, tool_request_ids=ids,
+            ),
+            proposed_step_status=StepStatus.COMPLETED,
+        )
+    if name == "brain_step_failed":
+        _only_fields(arguments, {"message"})
+        return BrainOutcome(
+            outcome=Kind.STEP_FAILED, step_id=step_id,
+            message=_text(arguments.get("message"), "message"),
+            proposed_step_status=StepStatus.FAILED,
+        )
+    if name == "brain_replan_requested":
+        _only_fields(arguments, {"reason", "constraints"})
+        reason = _text(arguments.get("reason"), "reason")
+        constraints = arguments.get("constraints")
+        if not isinstance(constraints, list) or any(not isinstance(item, str) for item in constraints):
+            raise InvalidBrainOutput("invalid_replan_constraints")
+        return BrainOutcome(
+            outcome=Kind.REPLAN_REQUESTED, step_id=step_id, message=reason,
+            replan_request=ReplanRequest(
+                reason=reason, failed_step_id=step_id, constraints=tuple(constraints),
+            ),
+        )
+    raise InvalidBrainOutput("unknown_tool")
+
+
 def _structured(
     payload, brain_input: BrainInput, allowed_tools: set[str], *, allow_text_tool_calls: bool,
     evidence_snapshot: EvidenceSnapshot | None = None,
@@ -154,6 +227,8 @@ def _structured(
         if "step_id" in payload:
             _step_id(payload, brain_input)
         return _tool_outcome([payload.get("tool")], brain_input, allowed_tools)
+    if kind in {Kind.STEP_COMPLETED, Kind.STEP_FAILED, Kind.REPLAN_REQUESTED} and not allow_text_tool_calls:
+        raise InvalidBrainOutput("native_lifecycle_call_required")
     if kind == Kind.FINAL_ANSWER_READY:
         _only_fields(payload, {"kind", "answer"})
         if not brain_input.direct_response and not (
@@ -301,9 +376,9 @@ def normalize_brain_output(
         # LangChain may mirror the original native calls in additional_kwargs.
         # Accept the mirror only if both representations normalize identically.
         if native and encoded_native:
-            left = _tool_outcome(native, brain_input, allowed_tools)
-            right = _tool_outcome(encoded_native, brain_input, allowed_tools)
-            if left.tool_request != right.tool_request:
+            left = _native_outcome(native, brain_input, allowed_tools, evidence_snapshot=evidence_snapshot)
+            right = _native_outcome(encoded_native, brain_input, allowed_tools, evidence_snapshot=evidence_snapshot)
+            if left != right:
                 raise InvalidBrainOutput("conflicting_native_tool_calls")
         calls = native or encoded_native
         content = raw if isinstance(raw, str) else _field(raw, "content", "")
@@ -311,7 +386,9 @@ def normalize_brain_output(
             text = _content_text("" if content is None else content).strip()
             if text.startswith(("{", "[", "```")) or re.match(r"^[A-Za-z_]\w*\s*\(", text):
                 raise InvalidBrainOutput("ambiguous_native_and_structured_output")
-            return _tool_outcome(calls, brain_input, allowed_tools)
+            return _native_outcome(
+                calls, brain_input, allowed_tools, evidence_snapshot=evidence_snapshot,
+            )
         return _text_outcome(
             _content_text(content), brain_input, allowed_tools, allow_text_tool_calls=allow_text_tool_calls,
             evidence_snapshot=evidence_snapshot,

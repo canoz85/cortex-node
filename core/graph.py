@@ -12,7 +12,7 @@ from langgraph.prebuilt import ToolNode
 
 from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, FINAL_ANSWER_SYSTEM_PROMPT, MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE, STEP_COMPLETED_SYSTEM_PROMPT
 from core.graph_nodes import create_graph_nodes
-from core.brain_provider import text_tool_definitions
+from core.brain_provider import native_brain_tools, text_tool_definitions
 from core.graph_routing import  route_after_controller
 from core.graph_runner import run_prompt
 from core.rag import WorkspaceRAG
@@ -297,7 +297,7 @@ def build_app(
     brain_llm = chat_model_factory(model, 0)
     tool_brain_llm = chat_model_factory(model, 0)
     if supports_native_tool_calls:
-        tool_brain_llm = tool_brain_llm.bind_tools(tools)
+        tool_brain_llm = tool_brain_llm.bind_tools(native_brain_tools(tools))
 
     controller_node, planner_node, brain_node, capture_tool_output_node, summarize_memory_node = graph_nodes_factory(
         brain_llm=brain_llm,

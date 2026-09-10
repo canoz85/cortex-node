@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from core.brain import BrainMessage, BrainService, build_brain_output_protocol, _build_execution_messages
 from core.brain_normalization import normalize_brain_output, normalize_brain_usage
-from core.brain_provider import LangChainBrainProvider
+from core.brain_provider import LIFECYCLE_ACTION_SCHEMAS, LangChainBrainProvider
 from core.graph_constants import SYSTEM_PROMPT_TEMPLATE, FINAL_ANSWER_SYSTEM_PROMPT, CASUAL_SYSTEM_PROMPT_TEMPLATE
 from core.protocol.controller import CortexController
 from core.protocol.enums import BrainOutcomeKind as Kind, ControllerDecisionType as Decision, ExecutionPhase, ExecutionStatus, StepStatus
@@ -204,6 +204,10 @@ def completion(refs):
     return {"kind": "STEP_COMPLETED", "step_id": "s1", "message": "Done", "evidence_refs": refs}
 
 
+def native_action(name, arguments):
+    return AIMessage(content="", tool_calls=[{"name": name, "args": arguments, "id": "lifecycle-1"}])
+
+
 @pytest.mark.parametrize("representation", ["text", "mapping", "structured", "blocks"])
 @pytest.mark.parametrize("success", [True, False])
 def test_valid_evidence_ref_resolves_to_domain_id(representation, success):
@@ -338,7 +342,7 @@ def test_provider_resolves_captured_refs_without_rebuilding_mutated_history():
             # Deliberately bypass the frozen model to simulate a hostile state
             # replacement while the provider call is in flight.
             object.__setattr__(context, "tool_execution_history", (replacement,))
-            return AIMessage(content=json.dumps(completion([ref])))
+            return native_action("brain_step_completed", {"message": "Done", "evidence_refs": [ref]})
 
     model = MutatingModel()
     provider = LangChainBrainProvider(brain_llm=model, tool_brain_llm=model, tools_set={"read_file"})
@@ -437,7 +441,7 @@ class FakeModel:
     (ValueError("structured output validation failed"), Kind.PROVIDER_FAILURE),
     (AIMessage(content=""), Kind.INVALID_OUTPUT),
     (AIMessage(content='{"kind":"STEP_COMPLETED",'), Kind.INVALID_OUTPUT),
-    (AIMessage(content='{"kind":"STEP_COMPLETED","step_id":"s1","message":"Done"}'), Kind.STEP_COMPLETED),
+    (native_action("brain_step_completed", {"message": "Done", "evidence_refs": []}), Kind.STEP_COMPLETED),
 ])
 def test_provider_invocation_has_one_normalization_path_and_no_hidden_retries(reply, kind):
     model = FakeModel(reply)
@@ -498,9 +502,9 @@ def test_execution_prompt_supplies_step_evidence_and_capability_without_auto_com
     contract = messages[-1].content
     examples = [json.loads(line) for line in contract.splitlines() if line.startswith("{")]
     kinds = [example["kind"] for example in examples]
-    expected = {"STEP_COMPLETED", "STEP_FAILED", "REPLAN_REQUESTED"}
-    if not supports_native_tool_calls:
-        expected.add("TOOL_REQUESTED")
+    expected = set() if supports_native_tool_calls else {
+        "STEP_COMPLETED", "STEP_FAILED", "REPLAN_REQUESTED", "TOOL_REQUESTED",
+    }
     assert set(kinds) == expected
     assert len(kinds) == len(expected)
     assert "fix.txt" not in contract and "list_files" not in contract
@@ -540,8 +544,12 @@ def test_tool_output_schema_cannot_redefine_model_facing_completion_contract(sup
     assert messages[-1].type == "system"
     assert contract.startswith("BRAIN OUTCOME CONTRACT:")
     assert "tool_request_ids" not in contract
-    example = next(line for line in contract.splitlines() if line.startswith('{"kind":"STEP_COMPLETED"'))
-    assert set(json.loads(example)) == {"kind", "step_id", "message", "evidence_refs"}
+    if supports_native_tool_calls:
+        assert "brain_step_completed" in contract
+        assert '{"kind":"STEP_COMPLETED"' not in contract
+    else:
+        example = next(line for line in contract.splitlines() if line.startswith('{"kind":"STEP_COMPLETED"'))
+        assert set(json.loads(example)) == {"kind", "step_id", "message", "evidence_refs"}
 
 
 @pytest.mark.parametrize("supports_native_tool_calls", [True, False])
@@ -564,7 +572,8 @@ def test_service_instructs_one_tool_mechanism_and_provider_returns_the_domain_re
     assert result.tool_request.arguments == {"path": "a.py"}
     assert len(model.calls) == 1
     if supports_native_tool_calls:
-        assert "Tool format: one native tool call" in prompt
+        assert "Return exactly one native call" in prompt
+        assert "brain_step_completed" in prompt
         assert '"kind":"TOOL_REQUESTED"' not in prompt
     else:
         assert "Tool format: JSON" in prompt
@@ -603,20 +612,87 @@ def test_text_tool_requests_require_explicit_non_native_provider_configuration(r
     assert len(text_model.calls) == 1
 
 
-@pytest.mark.parametrize("supports_native_tool_calls", [True, False])
 @pytest.mark.parametrize(("payload", "kind", "context"), [
     ({"kind": "STEP_COMPLETED", "step_id": "s1", "message": "Read all"}, Kind.STEP_COMPLETED, brain_input()),
     ({"kind": "STEP_FAILED", "step_id": "s1", "message": "No access"}, Kind.STEP_FAILED, brain_input()),
     ({"kind": "REPLAN_REQUESTED", "step_id": "s1", "reason": "Path changed"}, Kind.REPLAN_REQUESTED, brain_input()),
     ({"kind": "FINAL_ANSWER_READY", "answer": "Done"}, Kind.FINAL_ANSWER_READY, brain_input(final=True)),
 ])
-def test_non_tool_json_outcomes_work_with_either_provider_capability(supports_native_tool_calls, payload, kind, context):
+def test_non_tool_json_outcomes_remain_for_non_native_compatibility(payload, kind, context):
     model = FakeModel(AIMessage(content=json.dumps(payload)))
     provider = LangChainBrainProvider(
         brain_llm=model, tool_brain_llm=model, tools_set={"read_file"},
-        supports_native_tool_calls=supports_native_tool_calls,
+        supports_native_tool_calls=False,
     )
     assert provider.generate(context, (), tools_enabled=context.active_step is not None).kind == kind
+
+
+@pytest.mark.parametrize(("name", "arguments", "kind"), [
+    ("brain_step_completed", {"message": "line one\nline two", "evidence_refs": []}, Kind.STEP_COMPLETED),
+    ("brain_step_failed", {"message": "cannot continue"}, Kind.STEP_FAILED),
+    ("brain_replan_requested", {"reason": "path moved", "constraints": ["use the new path"]}, Kind.REPLAN_REQUESTED),
+])
+def test_reserved_native_lifecycle_actions_derive_active_step(name, arguments, kind):
+    result = normalize_brain_output(native_action(name, arguments), brain_input(), {"read_file"})
+    assert result.kind == kind
+    assert result.step_id == "s1"
+    assert result.tool_request is None
+    if kind == Kind.STEP_COMPLETED:
+        assert result.message == "line one\nline two"
+
+
+def test_native_lifecycle_evidence_refs_are_strictly_validated():
+    context = evidence_context()
+    payload, snapshot = evidence_prompt(context)
+    ref = payload["current_attempts"][0]["evidence_ref"]
+    accepted = normalize_brain_output(
+        native_action("brain_step_completed", {"message": "done", "evidence_refs": [ref]}),
+        context, {"read_file"}, evidence_snapshot=snapshot,
+    )
+    assert accepted.completion_evidence.tool_request_ids == ("req1",)
+    rejected = normalize_brain_output(
+        native_action("brain_step_completed", {"message": "done", "evidence_refs": ["invented"]}),
+        context, {"read_file"}, evidence_snapshot=snapshot,
+    )
+    assert rejected.error_code == "unknown_step_evidence"
+
+
+@pytest.mark.parametrize("raw", [
+    native_action("unknown_response_action", {}),
+    AIMessage(content="", tool_calls=[
+        {"name": "read_file", "args": {}, "id": "one"},
+        {"name": "brain_step_failed", "args": {"message": "failed"}, "id": "two"},
+    ]),
+    AIMessage(
+        content='{"kind":"STEP_COMPLETED"}',
+        tool_calls=[{"name": "brain_step_completed", "args": {"message": "done", "evidence_refs": []}, "id": "one"}],
+    ),
+    native_action("brain_step_failed", {"message": "failed", "unexpected": True}),
+])
+def test_reserved_native_actions_reject_unknown_multiple_ambiguous_or_extra_fields(raw):
+    assert normalize_brain_output(raw, brain_input(), {"read_file"}).kind == Kind.INVALID_OUTPUT
+
+
+def test_native_mode_rejects_text_lifecycle_while_compatibility_mode_retains_it():
+    raw = AIMessage(content=json.dumps(completion([])))
+    assert normalize_brain_output(raw, brain_input(), {"read_file"}).error_code == "native_lifecycle_call_required"
+    assert normalize_brain_output(
+        raw, brain_input(), {"read_file"}, allow_text_tool_calls=True,
+    ).kind == Kind.STEP_COMPLETED
+
+
+def test_legacy_malformed_multiline_json_remains_rejected_in_compatibility_mode():
+    raw = '```json\n{"kind":"STEP_COMPLETED","step_id":"s1","message":"line one\nline two","evidence_refs":[]}\n```'
+    result = normalize_brain_output(raw, brain_input(), {"read_file"}, allow_text_tool_calls=True)
+    assert result.kind == Kind.INVALID_OUTPUT
+    assert result.error_code == "malformed_model_output"
+
+
+def test_lifecycle_action_schemas_do_not_expose_step_id():
+    assert {schema["function"]["name"] for schema in LIFECYCLE_ACTION_SCHEMAS} == {
+        "brain_step_completed", "brain_step_failed", "brain_replan_requested",
+    }
+    assert all("step_id" not in schema["function"]["parameters"]["properties"] for schema in LIFECYCLE_ACTION_SCHEMAS)
 
 
 @pytest.mark.parametrize("supports_native_tool_calls", [True, False])

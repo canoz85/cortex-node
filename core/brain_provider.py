@@ -11,6 +11,68 @@ from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import BrainInput, BrainOutcome
 
 
+LIFECYCLE_ACTION_SCHEMAS = (
+    {
+        "type": "function",
+        "function": {
+            "name": "brain_step_completed",
+            "description": "Report that the active execution step is complete.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "Concise step-local completion summary."},
+                    "evidence_refs": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Evidence references from the visible current attempts.",
+                    },
+                },
+                "required": ["message", "evidence_refs"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "brain_step_failed",
+            "description": "Report that the active execution step failed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "Concise step-local failure reason."},
+                },
+                "required": ["message"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "brain_replan_requested",
+            "description": "Request replanning because the active step or plan cannot proceed safely.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string", "description": "Concise reason replanning is required."},
+                    "constraints": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Constraints the replacement plan must respect.",
+                    },
+                },
+                "required": ["reason", "constraints"],
+                "additionalProperties": False,
+            },
+        },
+    },
+)
+
+
+def native_brain_tools(executable_tools) -> list:
+    """Return executable tools plus non-executable provider response actions."""
+    return [*executable_tools, *LIFECYCLE_ACTION_SCHEMAS]
+
+
 def text_tool_definitions(tools) -> str:
     """Expose tool schemas to models that cannot receive native tool bindings."""
     return json.dumps(

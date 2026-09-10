@@ -7,6 +7,8 @@ from core.graph_capture import create_capture_tool_output_node
 from core.graph_constants import ANSI_BLUE, ANSI_ITALIC, ANSI_RED, ANSI_GREEN, ANSI_YELLOW, ANSI_RESET, RECENT_MESSAGE_WINDOW
 
 from core.graph_controller import create_controller_node
+from core.completion import CompletionService
+from core.completion_providers.filesystem import FileReadCollectionProvider, PROVIDER_ID
 from core.graph_planner import create_planner_node
 from core.graph_summarize import create_summarize_memory_node
 
@@ -29,7 +31,9 @@ def create_graph_nodes(
     supports_native_tool_calls: bool = True,
 ):
 
-    controller_node = create_controller_node()
+    controller_node = create_controller_node(completion_service=CompletionService({
+        PROVIDER_ID: FileReadCollectionProvider(),
+    }))
     
     planner_node = create_planner_node(
         planner_llm=planner_llm,

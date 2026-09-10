@@ -20,21 +20,23 @@ def build_brain_output_protocol(*, supports_native_tool_calls: bool, tools_enabl
             'Answer format: natural user-facing text.\n'
             'Tools are disabled.\n'
         )
-    outcomes = """Outcome formats:
-{"kind":"STEP_COMPLETED","step_id":"active-id","message":"completion summary","evidence_refs":[]}
-{"kind":"STEP_FAILED","step_id":"active-id","message":"failure reason"}
-{"kind":"REPLAN_REQUESTED","step_id":"active-id","reason":"reason","constraints":[]}
-step_id identifies the supplied step. evidence_refs contains the selected current_attempts
-evidence_ref values from this prompt, or [] when no tool evidence is cited.
-"""
     if supports_native_tool_calls:
-        tool_protocol = "Tool format: one native tool call using the available tool schema.\n"
-    else:
-        tool_protocol = (
+        return BRAIN_OUTPUT_PROTOCOL + (
+            "Return exactly one native call: either an executable tool or one of "
+            "brain_step_completed, brain_step_failed, brain_replan_requested.\n"
+            "Lifecycle actions describe only the active step. evidence_refs must contain only "
+            "evidence_ref values from visible current_attempts, or [].\n"
+        )
+    return BRAIN_OUTPUT_PROTOCOL + (
+        "Outcome formats:\n"
+        '{"kind":"STEP_COMPLETED","step_id":"active-id","message":"completion summary","evidence_refs":[]}\n'
+        '{"kind":"STEP_FAILED","step_id":"active-id","message":"failure reason"}\n'
+        '{"kind":"REPLAN_REQUESTED","step_id":"active-id","reason":"reason","constraints":[]}\n'
+        "step_id identifies the supplied step. evidence_refs contains the selected current_attempts\n"
+        "evidence_ref values from this prompt, or [] when no tool evidence is cited.\n"
             'Tool format: JSON using the available tool schema.\n'
             '{"kind":"TOOL_REQUESTED","tool":{"name":"available_tool_name","arguments":{}}}\n'
-        )
-    return BRAIN_OUTPUT_PROTOCOL + outcomes + tool_protocol
+    )
 
 
 @dataclass(frozen=True)

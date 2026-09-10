@@ -131,7 +131,25 @@ def _extract_artifact_records(
     )
 
 
-def _normalize_transport_payload(raw_content: str) -> NormalizedToolPayload:
+def _structured_result_data(unwrapped: dict, tool_name: str):
+    """Preserve known file-result fields without inventing absent evidence.
+
+    Existing data envelopes take precedence, including explicit null values.
+    This is capture only: downstream consumers must validate evidence semantics.
+    """
+    if "data" in unwrapped:
+        return unwrapped["data"]
+    fields = {
+        "list_files": ("path", "entries", "is_file"),
+        "read_file": (
+            "path", "content", "total_chars", "offset", "read_chars", "is_truncated",
+        ),
+    }.get(tool_name, ())
+    data = {field: unwrapped[field] for field in fields if field in unwrapped}
+    return data or None
+
+
+def _normalize_transport_payload(raw_content: str, *, tool_name: str = "") -> NormalizedToolPayload:
     parsed = parse_tool_result(raw_content)
     unwrapped = unwrap_tool_output(raw_content)
     integrity, pagination = _extract_integrity_and_pagination(raw_content, unwrapped)
@@ -147,7 +165,7 @@ def _normalize_transport_payload(raw_content: str) -> NormalizedToolPayload:
         return NormalizedToolPayload(
             success=success,
             message=str(unwrapped.get("message", "")),
-            data=unwrapped.get("data"),
+            data=_structured_result_data(unwrapped, tool_name),
             rendered_output=rendered_output,
             error_code=unwrapped.get("error_code"),
             integrity=integrity,
@@ -213,7 +231,7 @@ def _build_tool_result(
     raw_content: str,
     request: ToolRequest,
 ) -> ToolResult:
-    payload = _normalize_transport_payload(raw_content)
+    payload = _normalize_transport_payload(raw_content, tool_name=request.tool_name)
 
     signature = build_tool_signature(request)
 

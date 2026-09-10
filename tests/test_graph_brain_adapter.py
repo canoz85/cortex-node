@@ -115,6 +115,7 @@ def test_prompt_examples_are_complete_json_envelopes(kind):
 def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct, supports_native_tool_calls):
     calls = []
     tool_calls = []
+    tool_node_bindings = []
     snapshots = []
     bindings = []
 
@@ -139,6 +140,15 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
                     return AIMessage(content='{"name":"read_file","arguments":{"path":"a.py"}}')
                 evidence = next(message.content for message in messages if message.content.startswith("Execution evidence v1:"))
                 payload = json.loads(evidence.split("\n", 1)[1])
+                if supports_native_tool_calls:
+                    return AIMessage(content="", tool_calls=[{
+                        "name": "brain_step_completed",
+                        "args": {
+                            "message": "File read",
+                            "evidence_refs": [payload["current_attempts"][0]["evidence_ref"]],
+                        },
+                        "id": "native-completion-id",
+                    }])
                 return AIMessage(content=json.dumps({
                     "kind": "STEP_COMPLETED", "step_id": "s1", "message": "File read",
                     "evidence_refs": [payload["current_attempts"][0]["evidence_ref"]],
@@ -173,6 +183,7 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
         return observe_controller, planner, brain, create_capture_tool_output_node(), lambda _state: {}
 
     def tool_factory(_tools):
+        tool_node_bindings.extend(_tools)
         def invoke(state):
             request = state["execution_state"].protocol_visible.pending_tool_request
             transported = state["messages"][-1].tool_calls[0]
@@ -209,10 +220,17 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
         [False] if direct else [supports_native_tool_calls, supports_native_tool_calls, False]
     )
     assert len(bindings) == (1 if supports_native_tool_calls else 0)
+    assert tool_node_bindings == [read_file]
+    if supports_native_tool_calls:
+        assert bindings[0][0] is read_file
+        assert {item["function"]["name"] for item in bindings[0][1:]} == {
+            "brain_step_completed", "brain_step_failed", "brain_replan_requested",
+        }
     assert all("BRAIN OUTCOME CONTRACT" in prompt for _, prompt in calls)
     if not direct:
         if supports_native_tool_calls:
-            assert "Tool format: one native tool call" in calls[0][1]
+            assert "Return exactly one native call" in calls[0][1]
+            assert "brain_step_completed" in calls[0][1]
             assert '"kind":"TOOL_REQUESTED"' not in calls[0][1]
         else:
             assert "Tool format: JSON" in calls[0][1]
