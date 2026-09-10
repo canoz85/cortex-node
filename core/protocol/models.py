@@ -683,6 +683,33 @@ class ExecutionSummary(ImmutableProtocolModel):
     failed_step_ids: StepIdList = Field(default_factory=tuple)
 
 
+class FinalizationRequest(ImmutableProtocolModel):
+    """Accepted terminal facts supplied to the framework-neutral Finalizer."""
+
+    identity: ExecutionIdentity
+    status: ExecutionStatus
+    accepted_plan: ExecutionPlan | None = None
+    completed_step_ids: StepIdList = Field(default_factory=tuple)
+    terminal_reason: str = ""
+    direct_response: bool = False
+    cancellation_source: CancellationSource | None = None
+
+    @model_validator(mode="after")
+    def validate_terminal_status(self) -> "FinalizationRequest":
+        if self.status == ExecutionStatus.NON_TERMINAL:
+            raise ValueError("Finalization requires a terminal execution status")
+        if self.direct_response and self.accepted_plan is not None:
+            raise ValueError("Direct-response finalization cannot contain an accepted plan")
+        return self
+
+
+class FinalizationResult(ImmutableProtocolModel):
+    """Finalizer output; live final-answer ownership remains with Brain in Stage 3A."""
+
+    execution_summary: ExecutionSummary
+    final_answer: str | None = None
+
+
 class EventRecord(ImmutableProtocolModel):
     """Append-only accepted event record for replay and compliance reconstruction.
 
