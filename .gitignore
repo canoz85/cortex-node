@@ -25,6 +25,7 @@ dist/
 .env
 .env.*
 *.local
+.cortex_session.json
 
 # Logs and runtime files
 *.log
@@ -42,5 +43,4 @@ benchmarks/results/*.md
 Thumbs.db
 
 # Agent sandbox output (keep only README tracked)
-workspace/*
-!workspace/README.md
+workspace/
