@@ -169,13 +169,17 @@ LangGraph checkpointing or graph traversal history must not be treated as automa
 | Stage | Name | Status | Independent commit boundary |
 | --- | --- | --- | --- |
 | 1 | Runtime correctness | `COMPLETED` | Yes |
-| 2 | Typed Brain outcomes | `NOT_STARTED` | Yes, after Stage 1 |
+| 2 | Typed Brain outcomes | `COMPLETED` | Yes, after Stage 1 |
 | 3 | Finalization separation | `NOT_STARTED` | Yes, as 3A, 3B, and 3C |
-| 4 | Remove legacy completion code | `NOT_STARTED` | Yes |
-| 5 | Controller authority cleanup | `NOT_STARTED` | Yes, as 5A and 5B |
-| 6 | Async ownership | `NOT_STARTED` | Yes, after Stage 5 |
+| 4 | Remove legacy completion code | `IN_PROGRESS` | Yes |
+| 5 | Controller authority cleanup | `IN_PROGRESS` | Yes, as 5A and 5B |
+| 6 | Async ownership | `IN_PROGRESS` | Yes, after Stage 5 |
 | 7 | Documentation reconciliation | `NOT_STARTED` | Yes, documentation-only |
 | 8 | Compliance hardening decision | `NOT_STARTED` | Decision only; implementation requires a separate roadmap |
+
+Stages 1 and 2 are completed. Stage 3A is the next ordered migration stage.
+Later stages contain accepted implementation progress but remain subject to
+their original acceptance criteria and dependency order.
 
 ## 7. Stage 1 - Runtime Correctness
 
@@ -267,8 +271,12 @@ Stage 1 can and should be committed independently.
 
 ## 8. Stage 2 - Typed Brain Outcomes
 
-- Status: `NOT_STARTED`
+- Status: `COMPLETED`
 - Portability assessment: Preserves the portability constraint when model/provider outputs are normalized before crossing the Brain service boundary.
+
+The accepted implementation combines native executable tool calls with reserved
+native lifecycle response actions, normalized into framework-neutral
+`BrainOutcome` values before crossing the Brain service boundary.
 
 ### Goal
 
@@ -483,7 +491,7 @@ Stages 3A, 3B, and 3C should be separate commits.
 
 ## 10. Stage 4 - Remove Legacy Completion Code
 
-- Status: `NOT_STARTED`
+- Status: `IN_PROGRESS`
 - Portability assessment: Fully preserves the portability constraint.
 
 ### Goal
@@ -505,7 +513,17 @@ Remove:
 - unreachable routes;
 - tests that assert obsolete graph-specific behavior.
 
-Retain completion semantics only in typed `BrainOutcome` values and Controller validation.
+The legacy machinery to remove is limited to the old YES/NO Step Completion
+Checker, textual completion control-flow parsing, stale completion builders and
+wiring, and unreachable legacy branches.
+
+The deterministic completion infrastructure is not legacy machinery. Retain
+typed Brain completion proposals, Controller completion authority,
+structured and scoped execution evidence, `CompletionService`, completion
+requirements and providers, and deterministic evidence-based validation. A
+Brain `STEP_COMPLETED` outcome is a proposal; deterministic completion
+validation may supply additional evidence or coverage validation before the
+Controller authorizes the transition.
 
 ### Intended Dependency Direction
 
@@ -557,7 +575,7 @@ Stage 4 is an independent deletion commit after its dependencies are satisfied.
 
 ## 11. Stage 5 - Controller Authority Cleanup
 
-- Status: `NOT_STARTED`
+- Status: `IN_PROGRESS`
 - Portability assessment: Preserves the portability constraint only with Controller defined as semantic authority rather than a graph node or graph entrypoint.
 
 ### Goal
@@ -672,7 +690,7 @@ Stages 5A and 5B should be separate commits.
 
 ## 12. Stage 6 - Async Ownership
 
-- Status: `NOT_STARTED`
+- Status: `IN_PROGRESS`
 - Portability assessment: Preserves the portability constraint when the scheduler targets a framework-neutral runtime port rather than a graph node.
 
 ### Goal
