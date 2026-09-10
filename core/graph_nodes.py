@@ -7,6 +7,8 @@ from core.graph_capture import create_capture_tool_output_node
 from core.graph_constants import ANSI_BLUE, ANSI_ITALIC, ANSI_RED, ANSI_GREEN, ANSI_YELLOW, ANSI_RESET, RECENT_MESSAGE_WINDOW
 
 from core.graph_controller import create_controller_node
+from core.finalizer import Finalizer
+from core.finalizer_provider import LangChainFinalAnswerRenderer
 from core.completion import CompletionService
 from core.completion_providers.filesystem import FileReadCollectionProvider, PROVIDER_ID
 from core.graph_planner import create_planner_node
@@ -31,9 +33,15 @@ def create_graph_nodes(
     supports_native_tool_calls: bool = True,
 ):
 
-    controller_node = create_controller_node(completion_service=CompletionService({
-        PROVIDER_ID: FileReadCollectionProvider(),
-    }))
+    controller_node = create_controller_node(
+        completion_service=CompletionService({
+            PROVIDER_ID: FileReadCollectionProvider(),
+        }),
+        finalizer=Finalizer(answer_renderer=LangChainFinalAnswerRenderer(
+            llm=brain_llm,
+            system_prompt=final_answer_system_prompt,
+        )),
+    )
     
     planner_node = create_planner_node(
         planner_llm=planner_llm,

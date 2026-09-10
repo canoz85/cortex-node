@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
 from core.brain import build_brain_output_protocol
+from core.finalizer import Finalizer
 from core.graph import build_app
 from core.graph_brain import create_brain_node
 from core.graph_capture import create_capture_tool_output_node
@@ -161,7 +162,13 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
         return "unused"
 
     def graph_nodes_factory(**kwargs):
-        controller = create_controller_node()
+        class Renderer:
+            def render(self, _request, _summary):
+                return "File contents reported"
+
+        controller = create_controller_node(
+            finalizer=Finalizer(answer_renderer=Renderer()),
+        )
 
         def observe_controller(state):
             snapshots.append(state)
@@ -217,7 +224,7 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
     assert result["messages"][-1].content == "File contents reported"
     assert len(tool_calls) == (0 if direct else 1)
     assert [enabled for enabled, _ in calls] == (
-        [False] if direct else [supports_native_tool_calls, supports_native_tool_calls, False]
+        [] if direct else [supports_native_tool_calls, supports_native_tool_calls]
     )
     assert len(bindings) == (1 if supports_native_tool_calls else 0)
     assert tool_node_bindings == [read_file]
@@ -237,7 +244,7 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
             assert '"kind":"TOOL_REQUESTED"' in calls[0][1]
             assert '"parameters"' in calls[0][1]
             assert '"path"' in calls[0][1]
-        assert "Execution evidence (structured):" in calls[-1][1]
+        assert "Execution evidence v1:" in calls[-1][1]
         completion_outcome = next(state["brain_result"] for state in snapshots if state.get("brain_result") and state["brain_result"].completion_evidence is not None)
         assert completion_outcome.completion_evidence.tool_request_ids == (tool_calls[0].request_id,)
         assert protocol.completed_step_ids == ("s1",)

@@ -688,7 +688,9 @@ class FinalizationRequest(ImmutableProtocolModel):
 
     identity: ExecutionIdentity
     status: ExecutionStatus
+    context: "ExecutionContext"
     accepted_plan: ExecutionPlan | None = None
+    tool_execution_history: tuple[ToolExecutionRecord, ...] = Field(default_factory=tuple)
     completed_step_ids: StepIdList = Field(default_factory=tuple)
     terminal_reason: str = ""
     direct_response: bool = False
@@ -704,10 +706,11 @@ class FinalizationRequest(ImmutableProtocolModel):
 
 
 class FinalizationResult(ImmutableProtocolModel):
-    """Finalizer output; live final-answer ownership remains with Brain in Stage 3A."""
+    """Authoritative finalization output produced after terminal authorization."""
 
     execution_summary: ExecutionSummary
-    final_answer: str | None = None
+    final_answer: str = Field(min_length=1)
+    final_answer_error: str | None = None
 
 
 class EventRecord(ImmutableProtocolModel):

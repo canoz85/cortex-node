@@ -1,4 +1,6 @@
-"""Framework-neutral deterministic execution finalization."""
+"""Framework-neutral execution finalization application service."""
+
+from typing import Protocol
 
 from core.protocol.enums import StepStatus
 from core.protocol.models import (
@@ -50,13 +52,54 @@ class ExecutionSummaryBuilder:
         )
 
 
-class Finalizer:
-    """Stage 3A application service; it is not connected to live routing."""
+class FinalAnswerRenderer(Protocol):
+    """Framework-neutral port for rendering the user-facing final answer."""
 
-    def __init__(self, summary_builder: ExecutionSummaryBuilder | None = None):
+    def render(
+        self,
+        request: FinalizationRequest,
+        summary: ExecutionSummary,
+    ) -> str:
+        ...
+
+
+class SummaryFinalAnswerRenderer:
+    """Deterministic renderer used when no model-backed adapter is configured."""
+
+    def render(
+        self,
+        request: FinalizationRequest,
+        summary: ExecutionSummary,
+    ) -> str:
+        return summary.summary_text
+
+
+class Finalizer:
+    """Produce the authoritative summary and answer after terminal authorization."""
+
+    _RENDER_FAILURE_ANSWER = "Execution finished, but the final answer could not be rendered."
+
+    def __init__(
+        self,
+        summary_builder: ExecutionSummaryBuilder | None = None,
+        answer_renderer: FinalAnswerRenderer | None = None,
+    ):
         self._summary_builder = summary_builder or ExecutionSummaryBuilder()
+        self._answer_renderer = answer_renderer or SummaryFinalAnswerRenderer()
 
     def finalize(self, request: FinalizationRequest) -> FinalizationResult:
+        summary = self._summary_builder.build(request)
+        try:
+            final_answer = self._answer_renderer.render(request, summary).strip()
+            if not final_answer:
+                raise ValueError("Final answer renderer returned empty content")
+        except Exception as exc:
+            return FinalizationResult(
+                execution_summary=summary,
+                final_answer=self._RENDER_FAILURE_ANSWER,
+                final_answer_error=f"{type(exc).__name__}: {exc}",
+            )
         return FinalizationResult(
-            execution_summary=self._summary_builder.build(request),
+            execution_summary=summary,
+            final_answer=final_answer,
         )

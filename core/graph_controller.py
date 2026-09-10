@@ -1,4 +1,5 @@
 from __future__ import annotations
+from langchain_core.messages import AIMessage
 from core.protocol.controller import CortexController
 from core.finalizer import Finalizer
 
@@ -6,7 +7,7 @@ from core.graph_constants import MAX_REASONING_STEPS
 from core.graph_state_machine import apply_controller_decision_to_state
 from core.protocol.bridge import build_controller_input
 from core.protocol.enums import WorkerRole, BrainOutcome, ExecutionStatus
-from core.protocol.models import ControllerDecision, ExecutionState, FinalizationRequest
+from core.protocol.models import ControllerDecision, ControllerInput, ExecutionState, FinalizationRequest
 from core.state import AgentState
 from core.completion import CompletionService
 from core.protocol.completion_identity import accepted_step
@@ -15,13 +16,13 @@ from core.protocol.completion_identity import accepted_step
 def create_controller_node(
     controller: CortexController | None = None,
     completion_service: CompletionService | None = None,
-    shadow_finalizer: Finalizer | None = None,
+    finalizer: Finalizer | None = None,
 ):
     completion_service = completion_service or CompletionService()
     controller = controller or CortexController(
         max_reasoning_steps=MAX_REASONING_STEPS,
     )
-    shadow_finalizer = shadow_finalizer or Finalizer()
+    finalizer = finalizer or Finalizer()
 
     def controller_node(state: AgentState):
         """
@@ -95,11 +96,6 @@ def create_controller_node(
         }
 
         brain_result = controller_input.brain_result
-        if (
-            brain_result is not None
-            and brain_result.outcome == BrainOutcome.FINAL_ANSWER
-        ):
-            update["final_answer"] = brain_result.final_answer
 
         if controller_input.brain_result is not None:
             update["brain_result"] = None
@@ -109,9 +105,10 @@ def create_controller_node(
 
         if decision.terminal:
             previous_decision = state.get("controller_decision")
-            request = _build_shadow_finalization_request(
+            request = _build_finalization_request(
                 execution_state=execution_state,
                 decision=decision,
+                controller_input=controller_input,
                 previous_decision=(
                     previous_decision
                     if isinstance(previous_decision, ControllerDecision)
@@ -120,20 +117,31 @@ def create_controller_node(
                 brain_result=brain_result,
             )
             try:
-                shadow_result = shadow_finalizer.finalize(request)
-                update["shadow_finalization_result"] = shadow_result
-                update["shadow_finalization_error"] = ""
+                result = finalizer.finalize(request)
+                execution_state = execution_state.model_copy(update={
+                    "protocol_visible": execution_state.protocol_visible.model_copy(update={
+                        "summary": result.execution_summary,
+                    }),
+                })
+                update["execution_state"] = execution_state
+                update["finalization_result"] = result
+                update["finalization_error"] = result.final_answer_error or ""
+                update["final_answer"] = result.final_answer
+                update["messages"] = [AIMessage(content=result.final_answer)]
                 print(
-                    "[shadow-finalizer] "
+                    "[finalizer] "
                     f"execution_id={request.identity.execution_id} "
                     f"status={request.status.value} "
-                    f"summary={shadow_result.execution_summary.model_dump(mode='json')}"
+                    f"summary={result.execution_summary.model_dump(mode='json')}"
                 )
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
-                update["shadow_finalization_error"] = error
+                final_answer = "Execution finished, but finalization failed."
+                update["finalization_error"] = error
+                update["final_answer"] = final_answer
+                update["messages"] = [AIMessage(content=final_answer)]
                 print(
-                    "[shadow-finalizer] "
+                    "[finalizer] "
                     f"execution_id={request.identity.execution_id} error={error}"
                 )
 
@@ -157,14 +165,15 @@ def create_controller_node(
     return controller_node
 
 
-def _build_shadow_finalization_request(
+def _build_finalization_request(
     *,
     execution_state: ExecutionState,
     decision: ControllerDecision,
+    controller_input: ControllerInput,
     previous_decision: ControllerDecision | None,
     brain_result,
 ) -> FinalizationRequest:
-    """Translate an already-authorized terminal transition into shadow facts."""
+    """Translate an already-authorized terminal transition into finalization facts."""
 
     protocol = execution_state.protocol_visible
     direct_response = bool(
@@ -178,7 +187,9 @@ def _build_shadow_finalization_request(
     return FinalizationRequest(
         identity=protocol.identity,
         status=protocol.status,
+        context=controller_input.context,
         accepted_plan=protocol.active_plan,
+        tool_execution_history=controller_input.tool_execution_history,
         completed_step_ids=protocol.completed_step_ids,
         terminal_reason=decision.failure_reason or decision.reason,
         direct_response=direct_response,

@@ -729,15 +729,13 @@ class Provider:
     supports_native_tool_calls = True
 
     def generate(self, brain_input, messages, *, tools_enabled):
-        assert not tools_enabled
-        assert all(isinstance(message, BrainMessage) for message in messages)
-        return BrainOutcome(outcome=BrainOutcomeKind.FINAL_ANSWER_READY, final_answer_draft=FinalAnswerDraft(text="Hello"))
+        raise AssertionError("Brain provider must not render final answers")
 value = BrainInput(identity=ExecutionIdentity(execution_id="plain", protocol_version="1"), cursor=ExecutionCursor(), context=ExecutionContext(user_request="hi"), direct_response=True)
 service = BrainService(provider=Provider(), agent_system_prompt="active", final_answer_system_prompt="final", casual_system_prompt="casual")
 outcome = service.run(value)
 decision = CortexController(24).decide(ControllerInput(identity=value.identity, cursor=value.cursor, context=value.context, brain_result=outcome))
 assert decision.execution_status == ExecutionStatus.COMPLETED
-assert outcome.final_answer == "Hello"
+assert outcome.final_answer is None
 '''
     result = subprocess.run([sys.executable, "-c", script], cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -746,7 +744,7 @@ assert outcome.final_answer == "Hello"
 @pytest.mark.parametrize("direct", [False, True])
 @pytest.mark.parametrize("supports_native_tool_calls", [False, True])
 @pytest.mark.parametrize("representation", ["natural", "valid_json", "malformed_json"])
-def test_answer_representation_and_strict_boundary(direct, supports_native_tool_calls, representation):
+def test_brain_does_not_invoke_provider_or_construct_answer_in_finalization_modes(direct, supports_native_tool_calls, representation):
     answer = "Files under `.`:\n\n- fix.txt\n- notes.txt\n"
     if representation == "natural":
         response = answer
@@ -765,16 +763,9 @@ def test_answer_representation_and_strict_boundary(direct, supports_native_tool_
         final_answer_system_prompt=FINAL_ANSWER_SYSTEM_PROMPT,
         casual_system_prompt=CASUAL_SYSTEM_PROMPT_TEMPLATE,
     ).run(brain_input(direct=direct, final=not direct))
-    assert len(model.calls) == 1
-    prompt = "\n".join(message.content for message in model.calls[0])
-    assert "natural user-facing text" in prompt
-    assert "FINAL_ANSWER_READY" not in prompt
-    assert not any(line.startswith('{"kind":') for line in prompt.splitlines())
-    if representation == "malformed_json":
-        assert result.kind == Kind.INVALID_OUTPUT
-        assert result.error_code == "malformed_model_output"
-        assert result.final_answer_draft is None
-    else:
-        assert result.kind == Kind.FINAL_ANSWER_READY
-        assert result.final_answer_draft.text == answer
+    assert model.calls == []
+    assert result.kind == Kind.FINAL_ANSWER_READY
+    assert result.final_answer_draft is None
+    assert result.final_answer is None
+    assert result.message == "Finalization requested."
     assert normalize(answer, brain_input()).error_code == "expected_structured_outcome"

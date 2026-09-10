@@ -46,6 +46,6 @@ class AgentState(TypedDict, total=False):
     async_job_policy: AsyncJobPolicy
     execution_state: ExecutionState
     controller_decision: ControllerDecision
-    shadow_finalization_result: FinalizationResult
-    shadow_finalization_error: str
+    finalization_result: FinalizationResult
+    finalization_error: str
 

@@ -1,4 +1,4 @@
-"""Framework-neutral Brain service. Final-answer generation stays here in Stage 2."""
+"""Framework-neutral Brain execution-reasoning service."""
 
 import json
 from collections.abc import Sequence
@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from core.brain_evidence import EvidenceSnapshot
+from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import BrainInput, BrainOutcome
 
 
@@ -68,23 +69,25 @@ class BrainService:
         self.casual_system_prompt = casual_system_prompt
 
     def run(self, brain_input: BrainInput) -> BrainOutcome:
+        if brain_input.direct_response or (
+            brain_input.active_plan is not None and brain_input.active_step is None
+        ):
+            return BrainOutcome(
+                outcome=BrainOutcomeKind.FINAL_ANSWER_READY,
+                message="Finalization requested.",
+            )
         tools_enabled = bool(not brain_input.direct_response and brain_input.active_step is not None)
         output_protocol = build_brain_output_protocol(
             supports_native_tool_calls=self.provider.supports_native_tool_calls,
             tools_enabled=tools_enabled,
         )
-        if not brain_input.direct_response and brain_input.active_plan is not None and brain_input.active_step is None:
-            messages = _build_final_answer_messages(
-                system_prompt=self.final_answer_system_prompt, brain_input=brain_input,
-            )
-        else:
-            messages = _build_execution_messages(
-                system_prompt=self.agent_system_prompt if tools_enabled else self.casual_system_prompt,
-                brain_input=brain_input,
-                retrieval_messages=(),
-                output_protocol=output_protocol,
-                instruction_brief=_build_brain_execution_brief(brain_input) if tools_enabled else None,
-            )
+        messages = _build_execution_messages(
+            system_prompt=self.agent_system_prompt if tools_enabled else self.casual_system_prompt,
+            brain_input=brain_input,
+            retrieval_messages=(),
+            output_protocol=output_protocol,
+            instruction_brief=_build_brain_execution_brief(brain_input) if tools_enabled else None,
+        )
         messages.append(BrainMessage(role="system", content=output_protocol))
         return self.provider.generate(brain_input, tuple(messages), tools_enabled=tools_enabled)
 

@@ -41,7 +41,7 @@ def _brain_node(monkeypatch, *, direct_response: bool):
     )
 
 
-def test_explicit_direct_response_context_produces_existing_final_answer_outcome(
+def test_explicit_direct_response_context_requests_finalization_without_answer(
     monkeypatch,
 ):
     result = _brain_node(monkeypatch, direct_response=True)(
@@ -49,7 +49,8 @@ def test_explicit_direct_response_context_produces_existing_final_answer_outcome
     )
 
     assert result["brain_result"].outcome == BrainOutcome.FINAL_ANSWER
-    assert result["brain_result"].final_answer == "ordinary direct reply"
+    assert result["brain_result"].final_answer is None
+    assert result["messages"][0].content == "Finalization requested."
 
 
 def test_absence_of_plan_alone_does_not_claim_final_answer(monkeypatch):
