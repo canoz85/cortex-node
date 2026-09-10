@@ -1,5 +1,7 @@
 from core.finalizer import Finalizer
 from core.graph_controller import create_controller_node
+from core.logging.node_update import extract_node_update
+from core.logging.renderer import render_node_update
 from core.graph_routing import route_after_controller
 from core.protocol.enums import (
     BrainOutcomeKind,
@@ -62,7 +64,7 @@ class ObservingFinalizer:
         return Finalizer(answer_renderer=Renderer()).finalize(request)
 
 
-def test_authorized_success_finalizer_owns_answer_summary_and_preserves_route():
+def test_authorized_success_finalizer_owns_answer_summary_and_preserves_route(capsys):
     observer = ObservingFinalizer()
     state = _state(
         execution_state=_completed_plan_state(),
@@ -84,6 +86,14 @@ def test_authorized_success_finalizer_owns_answer_summary_and_preserves_route():
     assert update["messages"][0].content == "Finalizer answer"
     assert route_after_controller(update) == "__end__"
     assert update["execution_state"].protocol_visible.status == ExecutionStatus.COMPLETED
+    render_node_update(extract_node_update(
+        from_node="brain",
+        to_node="controller",
+        value=update,
+    ))
+    presentation = capsys.readouterr().out
+    assert "[finalizer]" in presentation
+    assert "[brain]" not in presentation
 
 
 def test_failed_terminal_transition_is_finalized_from_controller_facts():

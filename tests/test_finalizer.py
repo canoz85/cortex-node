@@ -166,16 +166,15 @@ def test_langchain_renderer_is_an_outward_adapter_over_framework_neutral_facts()
     )
     result = Finalizer(answer_renderer=LangChainFinalAnswerRenderer(
         llm=model,
-        system_prompt="Render accepted facts only.",
     )).finalize(request)
 
     assert result.final_answer == "Rendered by Finalizer"
     assert result.final_answer_error is None
     assert len(model.calls) == 1
     rendered = "\n".join(message.content for message in model.calls[0])
-    assert "Render accepted facts only." in rendered
     assert "Complete the request" in rendered
     assert '"execution_id": "stage-3a"' in rendered
+    assert "BRAIN OUTCOME CONTRACT" not in rendered
 
 
 def test_finalizer_contract_runs_with_graph_provider_and_memory_imports_blocked():

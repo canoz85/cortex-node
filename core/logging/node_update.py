@@ -19,6 +19,7 @@ from core.protocol.enums import BrainOutcome
 from core.protocol.models import (
     PlannerResult,
     BrainResult,
+    FinalizationResult,
     ToolResult,
 )
 
@@ -72,6 +73,7 @@ class NodeUpdate:
     planner_result: PlannerResult | None = None
     brain_result: BrainResult | None = None
     tool_result: ToolResult | None = None
+    finalization_result: FinalizationResult | None = None
 
     ai_message: BaseMessage | None = None
 
@@ -102,6 +104,7 @@ def extract_node_update(
     planner_result = value.get("planner_result")
     brain_result = value.get("brain_result")
     tool_result=None
+    finalization_result = value.get("finalization_result")
     
     # ToolResult is produced by capture_tool_output only.
     if to_node == "capture_tool_output" and execution_state is not None:
@@ -125,6 +128,11 @@ def extract_node_update(
         planner_result=planner_result,
         brain_result=brain_result,
         tool_result=tool_result,
+        finalization_result=(
+            finalization_result
+            if isinstance(finalization_result, FinalizationResult)
+            else None
+        ),
         ai_message=ai_message,
         rolling_summary=str(value.get("rolling_summary") or ""),
         has_summary_update=has_summary_update,

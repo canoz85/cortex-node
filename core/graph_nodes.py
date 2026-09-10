@@ -39,7 +39,6 @@ def create_graph_nodes(
         }),
         finalizer=Finalizer(answer_renderer=LangChainFinalAnswerRenderer(
             llm=brain_llm,
-            system_prompt=final_answer_system_prompt,
         )),
     )
     

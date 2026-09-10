@@ -36,6 +36,16 @@ def render_node_update(node_update: NodeUpdate) -> None:
         _render_tool_result(node_update)
         return
 
+    if node_update.finalization_result is not None:
+        _render_ai_text(node_update, label="finalizer")
+        return
+
+    if (
+        node_update.brain_result is not None
+        and node_update.brain_result.outcome == BrainOutcome.FINAL_ANSWER
+    ):
+        return
+
     if node_update.ai_message is not None:
         _render_ai_text(node_update)
 
@@ -70,13 +80,13 @@ def _render_tool_result(node_update: NodeUpdate) -> None:
     print()
 
 
-def _render_ai_text(node_update: NodeUpdate) -> None:
+def _render_ai_text(node_update: NodeUpdate, *, label: str = "brain") -> None:
 
     text = format_ai_message(node_update.ai_message)
 
     if not text:
         return
 
-    print(f"\n{ANSI_LIGHT_BLUE}[brain]{ANSI_RESET}")
+    print(f"\n{ANSI_LIGHT_BLUE}[{label}]{ANSI_RESET}")
     print(f"{ANSI_LIGHT_BLUE}{text}{ANSI_RESET}")
     print()
