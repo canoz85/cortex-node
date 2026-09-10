@@ -1,10 +1,12 @@
 from __future__ import annotations
 from core.protocol.controller import CortexController
+from core.finalizer import Finalizer
 
 from core.graph_constants import MAX_REASONING_STEPS
 from core.graph_state_machine import apply_controller_decision_to_state
 from core.protocol.bridge import build_controller_input
-from core.protocol.enums import WorkerRole, BrainOutcome
+from core.protocol.enums import WorkerRole, BrainOutcome, ExecutionStatus
+from core.protocol.models import ControllerDecision, ExecutionState, FinalizationRequest
 from core.state import AgentState
 from core.completion import CompletionService
 from core.protocol.completion_identity import accepted_step
@@ -13,11 +15,13 @@ from core.protocol.completion_identity import accepted_step
 def create_controller_node(
     controller: CortexController | None = None,
     completion_service: CompletionService | None = None,
+    shadow_finalizer: Finalizer | None = None,
 ):
     completion_service = completion_service or CompletionService()
     controller = controller or CortexController(
         max_reasoning_steps=MAX_REASONING_STEPS,
     )
+    shadow_finalizer = shadow_finalizer or Finalizer()
 
     def controller_node(state: AgentState):
         """
@@ -103,6 +107,36 @@ def create_controller_node(
         if controller_input.planner_result is not None:
             update["planner_result"] = None
 
+        if decision.terminal:
+            previous_decision = state.get("controller_decision")
+            request = _build_shadow_finalization_request(
+                execution_state=execution_state,
+                decision=decision,
+                previous_decision=(
+                    previous_decision
+                    if isinstance(previous_decision, ControllerDecision)
+                    else None
+                ),
+                brain_result=brain_result,
+            )
+            try:
+                shadow_result = shadow_finalizer.finalize(request)
+                update["shadow_finalization_result"] = shadow_result
+                update["shadow_finalization_error"] = ""
+                print(
+                    "[shadow-finalizer] "
+                    f"execution_id={request.identity.execution_id} "
+                    f"status={request.status.value} "
+                    f"summary={shadow_result.execution_summary.model_dump(mode='json')}"
+                )
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                update["shadow_finalization_error"] = error
+                print(
+                    "[shadow-finalizer] "
+                    f"execution_id={request.identity.execution_id} error={error}"
+                )
+
 
         # print("\n====CONTROLLER====:")
         # print("current_worker:", execution_state.protocol_visible.cursor.current_worker)
@@ -121,3 +155,32 @@ def create_controller_node(
         return update
 
     return controller_node
+
+
+def _build_shadow_finalization_request(
+    *,
+    execution_state: ExecutionState,
+    decision: ControllerDecision,
+    previous_decision: ControllerDecision | None,
+    brain_result,
+) -> FinalizationRequest:
+    """Translate an already-authorized terminal transition into shadow facts."""
+
+    protocol = execution_state.protocol_visible
+    direct_response = bool(
+        decision.execution_status == ExecutionStatus.COMPLETED
+        and protocol.active_plan is None
+        and brain_result is not None
+        and brain_result.outcome == BrainOutcome.FINAL_ANSWER
+        and previous_decision is not None
+        and previous_decision.direct_response
+    )
+    return FinalizationRequest(
+        identity=protocol.identity,
+        status=protocol.status,
+        accepted_plan=protocol.active_plan,
+        completed_step_ids=protocol.completed_step_ids,
+        terminal_reason=decision.failure_reason or decision.reason,
+        direct_response=direct_response,
+        cancellation_source=protocol.cancellation_source,
+    )
