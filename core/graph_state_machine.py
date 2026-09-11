@@ -1,23 +1,10 @@
-from dataclasses import dataclass
-
 from langgraph.graph import END
 
 from core.protocol.enums import (
-    BrainOutcome,
     ControllerDecisionType,
-    ExecutionPhase,
-    WorkerRole,
 )
-from core.protocol.models import ControllerDecision, ControllerInput, ExecutionState
-
-from core.graph_constants import MAX_REASONING_STEPS
+from core.protocol.models import ControllerDecision, ExecutionState
 from core.state import AgentState
-
-
-@dataclass(frozen=True)
-class TransitionDecision:
-    next_node: str
-    reason: str
 
 
 def get_controller_decision(state: AgentState) -> ControllerDecision | None:
@@ -66,6 +53,7 @@ def map_controller_decision(
     raise ValueError(
         f"Unsupported controller decision: {decision.decision_type}"
     )
+
 
 def apply_controller_decision_to_state(
     execution_state: ExecutionState,
@@ -176,7 +164,6 @@ def apply_controller_decision_to_state(
             ),
         }
     )
-
     #
     # Return updated immutable state
     #
@@ -206,34 +193,3 @@ def apply_controller_decision_to_state(
             ),
         }
     )
-
-def decide_after_brain(
-    state: AgentState,
-    *,
-    controller_input: ControllerInput | None = None,
-) -> TransitionDecision:
-    history = state.get("messages", [])
-    if not history:
-        return TransitionDecision(next_node=END, reason="empty_history")
-
-    protocol_steps = (
-        controller_input.cursor.controller_iteration
-        if controller_input is not None
-        else None
-    )
-    steps = protocol_steps if protocol_steps is not None else state.get("steps", 0)
-
-    if steps >= MAX_REASONING_STEPS:
-        return TransitionDecision(next_node=END, reason="max_steps")
-
-    if controller_input is not None and controller_input.brain_result is not None:
-        if controller_input.brain_result.outcome == BrainOutcome.TOOL_REQUEST:
-            return TransitionDecision(next_node="tools", reason="protocol_tool_request")
-
-    last_message = history[-1]
-    if getattr(last_message, "tool_calls", None):
-        return TransitionDecision(next_node="tools", reason="tool_calls_present")
-
-    return TransitionDecision(next_node=END, reason="finalize_turn")
-    #commented for now..
-    #return TransitionDecision(next_node="summarize_memory", reason="finalize_turn")

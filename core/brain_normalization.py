@@ -16,7 +16,7 @@ from pydantic import BaseModel, ValidationError
 from core.brain_evidence import EvidenceSnapshot, evidence_scope
 from core.protocol.enums import BrainOutcomeKind as Kind, StepStatus
 from core.protocol.models import (
-    BrainInput, BrainOutcome, BrainUsage, FinalAnswerDraft, ReplanRequest,
+    BrainInput, BrainOutcome, BrainUsage, ReplanRequest,
     StepCompletionEvidence, ToolRequest,
 )
 
@@ -230,14 +230,7 @@ def _structured(
     if kind in {Kind.STEP_COMPLETED, Kind.STEP_FAILED, Kind.REPLAN_REQUESTED} and not allow_text_tool_calls:
         raise InvalidBrainOutput("native_lifecycle_call_required")
     if kind == Kind.FINAL_ANSWER_READY:
-        _only_fields(payload, {"kind", "answer"})
-        if not brain_input.direct_response and not (
-            brain_input.active_plan is not None and brain_input.active_step is None
-        ):
-            raise InvalidBrainOutput("final_answer_requires_final_answer_context")
-        return BrainOutcome(
-            outcome=kind, final_answer_draft=FinalAnswerDraft(text=_text(payload.get("answer"), "answer")),
-        )
+        raise InvalidBrainOutput("brain_final_answer_unsupported")
     if kind == Kind.STEP_COMPLETED:
         _only_fields(payload, {"kind", "step_id", "message", "evidence_refs"})
         step_id = _step_id(payload, brain_input)
@@ -315,13 +308,6 @@ def _text_outcome(
         has_contract_fields = isinstance(payload, dict) and bool(
             payload.keys() & {"kind", "tool_calls", "name", "function"}
         )
-        if not has_contract_fields and (
-            brain_input.direct_response
-            or (brain_input.active_plan is not None and brain_input.active_step is None)
-        ):
-            # A JSON-formatted answer is still answer content in an explicitly
-            # authorized answer mode; arbitrary data cannot request lifecycle.
-            return BrainOutcome(outcome=Kind.FINAL_ANSWER_READY, final_answer_draft=FinalAnswerDraft(text=text))
         return _structured(payload, brain_input, allowed_tools, allow_text_tool_calls=allow_text_tool_calls, evidence_snapshot=evidence_snapshot)
     # Preserve complete keyword-only function text from non-tool-capable models.
     # Never search within prose or guess arguments from a partial call.
@@ -337,8 +323,6 @@ def _text_outcome(
                 raise InvalidBrainOutput("ambiguous_function_arguments")
             args[keyword.arg] = ast.literal_eval(keyword.value)
         return _tool_outcome([{"name": expression.func.id, "args": args}], brain_input, allowed_tools)
-    if brain_input.direct_response or (brain_input.active_plan is not None and brain_input.active_step is None):
-        return BrainOutcome(outcome=Kind.FINAL_ANSWER_READY, final_answer_draft=FinalAnswerDraft(text=text))
     if brain_input.active_plan is None:
         # Preserve Stage 1's missing-plan classification, independently of text.
         return BrainOutcome(outcome=Kind.STEP_FAILED, message=text, error_code="missing_execution_plan")

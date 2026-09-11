@@ -20,7 +20,6 @@ from core.protocol.models import (
     ExecutionPlan,
     ExecutionState,
     ExecutionStep,
-    FinalAnswerDraft,
     PlannerResult,
     ProtocolVisibleState,
     RetryMetadata,
@@ -164,12 +163,11 @@ def test_finalizer_failure_is_observable_and_never_falls_back_to_brain_answer():
         execution_state=_completed_plan_state(),
         brain_result=BrainOutcome(
             outcome=BrainOutcomeKind.FINAL_ANSWER,
-            final_answer_draft=FinalAnswerDraft(text="Forbidden Brain fallback"),
+            message="Finalization requested.",
         ),
     ))
 
     assert update["final_answer"] == "Execution finished, but finalization failed."
-    assert update["final_answer"] != "Forbidden Brain fallback"
     assert "shadow unavailable" in update["finalization_error"]
     assert "finalization_result" not in update
     assert update["execution_state"].protocol_visible.status == ExecutionStatus.COMPLETED

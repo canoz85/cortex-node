@@ -32,7 +32,7 @@ def setup():
             tools_set={"list_files", "read_file"},
         ),
         agent_system_prompt="Execute the active step",
-        final_answer_system_prompt="Summarize", casual_system_prompt="Converse",
+        casual_system_prompt="Converse",
     )
     steps = (
         ExecutionStep(step_id="s1", title="Inspect workspace", description="Use list_files"),
@@ -94,12 +94,13 @@ def test_step_transition_rebuilds_authority_and_preserves_evidence_as_data():
 
 
 @pytest.mark.parametrize("mode", ["direct", "final"])
-def test_non_execution_modes_preserve_normal_user_message(mode):
+def test_non_execution_modes_bypass_brain_provider_and_request_finalization(mode):
     service, model, context = setup()
     context = context.model_copy(update={"active_step": None, "direct_response": mode == "direct"})
-    service.run(context)
-    assert [m.content for m in model.calls[-1] if isinstance(m, HumanMessage)] == [context.context.user_request]
-    assert not any(m.content.startswith("Contextual request") for m in model.calls[-1])
+    result = service.run(context)
+    assert model.calls == []
+    assert result.kind == BrainOutcomeKind.FINAL_ANSWER_READY
+    assert result.message == "Finalization requested."
 
 
 def test_complex_step_can_request_multiple_tools_across_invocations():

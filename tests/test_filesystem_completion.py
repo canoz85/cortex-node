@@ -330,8 +330,8 @@ def test_composition_registers_versioned_provider(monkeypatch):
         monkeypatch.setattr(graph_nodes, name, Mock())
     graph_nodes.create_graph_nodes(
         brain_llm=None, tool_brain_llm=None, planner_llm=None, rag_service=None,
-        rag_top_k=0, agent_system_prompt="", final_answer_system_prompt="",
-        casual_system_prompt="", sap_system_prompt=None, step_completed_system_prompt="",
+        rag_top_k=0, agent_system_prompt="",
+        casual_system_prompt="", sap_system_prompt=None,
         tools_set=set(), show_raw_llm=False,
     )
     service = factory.call_args.kwargs["completion_service"]

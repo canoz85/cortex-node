@@ -12,7 +12,6 @@ from core.state import AgentState
 
 def create_brain_node(
     *, brain_llm, tool_brain_llm, agent_system_prompt: str,
-    final_answer_system_prompt: str, step_completed_system_prompt: str,
     casual_system_prompt: str, tools_set: set[str], show_raw_llm: bool,
     brain_service: BrainService | None = None,
     supports_native_tool_calls: bool = True,
@@ -26,7 +25,6 @@ def create_brain_node(
             supports_native_tool_calls=supports_native_tool_calls,
         ),
         agent_system_prompt=agent_system_prompt,
-        final_answer_system_prompt=final_answer_system_prompt,
         casual_system_prompt=casual_system_prompt,
     )
 
@@ -42,7 +40,7 @@ def create_brain_node(
         # sees exactly the domain request Controller will accept, with the same ID.
         request = outcome.tool_request
         response = AIMessage(
-            content=outcome.final_answer or outcome.message,
+            content=outcome.message,
             tool_calls=[{
                 "name": request.tool_name, "args": request.arguments,
                 "id": request.request_id, "type": "tool_call",

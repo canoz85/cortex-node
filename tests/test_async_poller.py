@@ -168,7 +168,6 @@ def _compiled_resume_graph(brain_invocations: list[ExecutionState]):
             "brain_result": BrainResult(
                 outcome=BrainOutcome.FINAL_ANSWER,
                 message="Finished.",
-                final_answer="Finished.",
             ),
             "execution_state": consumed_execution_state,
         }
@@ -543,7 +542,6 @@ def test_build_app_runs_submission_await_poll_capture_and_resume_end_to_end():
                 "brain_result": BrainResult(
                     outcome=BrainOutcome.FINAL_ANSWER,
                     message="Finished.",
-                    final_answer="Finished.",
                 ),
                 "execution_state": consumed_state,
                 "messages": [AIMessage(content="Finished.")],
@@ -593,4 +591,6 @@ def test_build_app_runs_submission_await_poll_capture_and_resume_end_to_end():
     assert submission_calls == ["submitted"]
     assert brain_calls == ["submit", "after-evidence"]
     assert isinstance(history[-1], AIMessage)
-    assert history[-1].content == "Finished."
+    assert history[-1].content != "Finished."
+    assert "Completed steps: step-1." in history[-1].content
+    assert "Terminal reason: final_answer" in history[-1].content

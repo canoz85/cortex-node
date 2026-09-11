@@ -427,7 +427,7 @@ def test_retried_step_can_complete_and_next_step_can_proceed(retry_next_step):
 
     terminal = _apply_worker_result(
         finished,
-        brain_result=BrainResult(outcome=BrainOutcome.FINAL_ANSWER, final_answer="Done"),
+        brain_result=BrainResult(outcome=BrainOutcome.FINAL_ANSWER),
     )
     assert terminal.protocol_visible.status == ExecutionStatus.COMPLETED
     assert terminal.protocol_visible.cursor.phase == ExecutionPhase.COMPLETED

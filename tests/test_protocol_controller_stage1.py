@@ -100,7 +100,6 @@ def test_direct_response_context_is_explicit_and_final_answer_completes():
             cursor=direct.cursor,
             brain_result=BrainResult(
                 outcome=BrainOutcome.FINAL_ANSWER,
-                final_answer="Done.",
             ),
         )
     )
@@ -127,7 +126,6 @@ def test_final_answer_after_completed_plan_does_not_require_active_step():
                 ),
                 "brain_result": BrainResult(
                     outcome=BrainOutcome.FINAL_ANSWER,
-                    final_answer="Done.",
                 ),
             }
         )

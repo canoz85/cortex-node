@@ -33,8 +33,6 @@ def _brain_node(monkeypatch, *, direct_response: bool):
         brain_llm=FakeLLM("ordinary direct reply"),
         tool_brain_llm=FakeLLM("unused"),
         agent_system_prompt="agent",
-        final_answer_system_prompt="final",
-        step_completed_system_prompt="step",
         casual_system_prompt="casual",
         tools_set=set(),
         show_raw_llm=False,
@@ -49,7 +47,7 @@ def test_explicit_direct_response_context_requests_finalization_without_answer(
     )
 
     assert result["brain_result"].outcome == BrainOutcome.FINAL_ANSWER
-    assert result["brain_result"].final_answer is None
+    assert not hasattr(result["brain_result"], "final_answer")
     assert result["messages"][0].content == "Finalization requested."
 
 

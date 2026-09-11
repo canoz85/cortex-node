@@ -310,7 +310,7 @@ def test_revision_evidence_filter_and_retry_accumulation():
 def test_final_answer_cannot_bypass_coverage():
     ctx = context()
     ctx = ctx.model_copy(update={"brain_result": BrainOutcome(
-        outcome=BrainOutcomeKind.FINAL_ANSWER_READY, final_answer="Done")})
+        outcome=BrainOutcomeKind.FINAL_ANSWER_READY)})
     assert CortexController(20).decide(ctx).completed_step_id is None
     provider = FakeProvider()
     provider.satisfied = ("a", "b")

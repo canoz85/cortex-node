@@ -367,12 +367,6 @@ class StepCompletionEvidence(ImmutableProtocolModel):
     tool_request_ids: tuple[str, ...] = Field(default_factory=tuple)
 
 
-class FinalAnswerDraft(ImmutableProtocolModel):
-    """Temporary Brain-owned final answer during Stage 2."""
-
-    text: str = Field(min_length=1)
-
-
 class BrainUsage(ImmutableProtocolModel):
     """Optional accounting values, never provider metadata or lifecycle signals."""
 
@@ -395,11 +389,9 @@ class BrainOutcome(ImmutableProtocolModel):
     tool_request: ToolRequest | None = None
     replan_request: ReplanRequest | None = None
     completion_evidence: StepCompletionEvidence | None = None
-    final_answer_draft: FinalAnswerDraft | None = None
     error_code: str | None = None
     usage: BrainUsage = Field(default_factory=BrainUsage)
-    # Stage 1 compatibility fields. Text and proposed status never select an outcome.
-    final_answer: str | None = None
+    # Proposed status never selects an outcome.
     proposed_step_status: StepStatus | None = None
 
     @property
@@ -412,17 +404,9 @@ class BrainOutcome(ImmutableProtocolModel):
             (self.tool_request, BrainOutcomeKind.TOOL_REQUESTED),
             (self.replan_request, BrainOutcomeKind.REPLAN_REQUESTED),
             (self.completion_evidence, BrainOutcomeKind.STEP_COMPLETED),
-            (self.final_answer_draft, BrainOutcomeKind.FINAL_ANSWER_READY),
-            (self.final_answer, BrainOutcomeKind.FINAL_ANSWER_READY),
         ):
             if payload is not None and self.outcome != kind:
                 raise ValueError("Brain payload does not match outcome kind")
-        if self.final_answer_draft is not None:
-            if self.final_answer is not None and self.final_answer != self.final_answer_draft.text:
-                raise ValueError("conflicting final answer payloads")
-            object.__setattr__(self, "final_answer", self.final_answer_draft.text)
-        elif self.final_answer is not None:
-            object.__setattr__(self, "final_answer_draft", FinalAnswerDraft(text=self.final_answer))
         return self
 
 

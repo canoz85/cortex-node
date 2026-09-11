@@ -516,7 +516,6 @@ def _legacy_brain_result_to_model(legacy_state: LegacyState | None) -> BrainResu
         tool_request=tool_request,
         replan_request=replan_request,
         completion_evidence=state.get("completion_evidence"),
-        final_answer=state.get("final_answer"),
         error_code=state.get("error_code"),
         proposed_step_status=proposed_step_status,
     )
@@ -849,7 +848,6 @@ def brain_result_to_legacy(result: BrainResult) -> dict[str, Any]:
         "proposed_step_status": None,
         "step_id": result.step_id,
         "completion_evidence": result.completion_evidence.model_dump(mode="json") if result.completion_evidence else None,
-        "final_answer": result.final_answer,
         "error_code": result.error_code,
     }
 

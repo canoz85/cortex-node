@@ -12,10 +12,7 @@ from core.finalizer import Finalizer
 from core.graph import build_app
 from core.graph_brain import create_brain_node
 from core.graph_capture import create_capture_tool_output_node
-from core.graph_constants import (
-    CASUAL_SYSTEM_PROMPT_TEMPLATE, FINAL_ANSWER_SYSTEM_PROMPT,
-    STEP_COMPLETED_SYSTEM_PROMPT, SYSTEM_PROMPT_TEMPLATE,
-)
+from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, SYSTEM_PROMPT_TEMPLATE
 from core.graph_controller import create_controller_node
 from core.models import ToolResult as TransportToolResult
 from core.protocol.bridge import (
@@ -25,7 +22,7 @@ from core.protocol.bridge import (
 from core.protocol.enums import BrainOutcomeKind as Kind, ExecutionPhase, ExecutionStatus, PlannerOutcome, StepStatus
 from core.protocol.models import (
     BrainOutcome, BrainUsage, ExecutionCursor, ExecutionIdentity, ExecutionPlan,
-    ExecutionState, ExecutionStep, FinalAnswerDraft, PlannerResult, ProtocolVisibleState,
+    ExecutionState, ExecutionStep, PlannerResult, ProtocolVisibleState,
     RetryMetadata, StepCompletionEvidence, ToolRequest, ToolResult, WorkingState,
 )
 
@@ -45,8 +42,7 @@ def execution_state():
 def node(**kwargs):
     return create_brain_node(
         brain_llm=None, tool_brain_llm=None, agent_system_prompt="active",
-        final_answer_system_prompt="final", casual_system_prompt="casual",
-        step_completed_system_prompt="checker", tools_set={"read_file"},
+        casual_system_prompt="casual", tools_set={"read_file"},
         show_raw_llm=False, **kwargs,
     )
 
@@ -81,7 +77,7 @@ def test_adapter_only_translates_input_output_and_consumed_tool_evidence():
 
 @pytest.mark.parametrize("outcome", [
     BrainOutcome(outcome=Kind.STEP_COMPLETED, step_id="s1", completion_evidence=StepCompletionEvidence(step_id="s1", summary="Read")),
-    BrainOutcome(outcome=Kind.FINAL_ANSWER_READY, final_answer_draft=FinalAnswerDraft(text="Done")),
+    BrainOutcome(outcome=Kind.FINAL_ANSWER_READY, message="Finalization requested."),
     BrainOutcome(outcome=Kind.INVALID_OUTPUT, error_code="invalid", message="Bad output"),
 ])
 def test_bridge_preserves_typed_payloads_without_reparsing_messages(outcome):
@@ -94,11 +90,9 @@ def test_bridge_preserves_typed_payloads_without_reparsing_messages(outcome):
 
 
 def test_all_brain_prompts_align_with_the_outcome_contract():
-    for prompt in (
-        SYSTEM_PROMPT_TEMPLATE, CASUAL_SYSTEM_PROMPT_TEMPLATE,
-        FINAL_ANSWER_SYSTEM_PROMPT, STEP_COMPLETED_SYSTEM_PROMPT,
-    ):
-        assert "BRAIN OUTCOME CONTRACT" in prompt
+    assert "Output capability is specified" not in SYSTEM_PROMPT_TEMPLATE
+    assert "BRAIN OUTCOME CONTRACT" in CASUAL_SYSTEM_PROMPT_TEMPLATE
+    for prompt in (SYSTEM_PROMPT_TEMPLATE, CASUAL_SYSTEM_PROMPT_TEMPLATE):
         assert "STEP COMPLETED" not in prompt
         assert "STEP FAILED" not in prompt
         assert "starting with" not in prompt
@@ -183,8 +177,8 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
             )}
 
         brain = create_brain_node(**{name: kwargs[name] for name in (
-            "brain_llm", "tool_brain_llm", "agent_system_prompt", "final_answer_system_prompt",
-            "step_completed_system_prompt", "casual_system_prompt", "tools_set", "show_raw_llm",
+            "brain_llm", "tool_brain_llm", "agent_system_prompt",
+            "casual_system_prompt", "tools_set", "show_raw_llm",
             "supports_native_tool_calls",
         )})
         return observe_controller, planner, brain, create_capture_tool_output_node(), lambda _state: {}
