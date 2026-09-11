@@ -355,7 +355,7 @@ def build_app(
         resource_observer=resource_observer,
     )
 
-    workflow.set_entry_point("planner")
+    workflow.set_entry_point("controller")
 
     workflow.add_edge("planner", "controller")
     workflow.add_conditional_edges("controller", route_after_controller)

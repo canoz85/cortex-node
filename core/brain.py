@@ -23,9 +23,15 @@ def build_brain_output_protocol(*, supports_native_tool_calls: bool, tools_enabl
             'Tools are disabled.\n'
         )
     if supports_native_tool_calls:
-        return BRAIN_OUTPUT_PROTOCOL + (
+        return (
+            "BRAIN OUTCOME CONTRACT:\n"
             "Return exactly one native call: either an executable tool or one of "
             "brain_step_completed, brain_step_failed, brain_replan_requested.\n"
+            "These lifecycle actions are provided native tools, just like the executable tools. "
+            "Invoke brain_step_completed for STEP_COMPLETED, brain_step_failed for STEP_FAILED, "
+            "or brain_replan_requested for REPLAN_REQUESTED.\n"
+            "Put the selected tool's arguments in the native tool call. Leave content empty. "
+            "Do not return an outcome object or write a tool name and arguments as text.\n"
             "Lifecycle actions describe only the active step. evidence_refs must contain only "
             "evidence_ref values from visible current_attempts, or [].\n"
         )
@@ -88,7 +94,10 @@ class BrainService:
             output_protocol=output_protocol,
             instruction_brief=_build_brain_execution_brief(brain_input) if tools_enabled else None,
         )
-        messages.append(BrainMessage(role="system", content=output_protocol))
+        # The Controller-issued active step is the task turn, after policy and
+        # contextual data. Never put the overall user request in that position.
+        messages.insert(len(messages) - 1 if tools_enabled else len(messages),
+                        BrainMessage(role="system", content=output_protocol))
         return self.provider.generate(brain_input, tuple(messages), tools_enabled=tools_enabled)
 
 
@@ -379,9 +388,14 @@ def _build_execution_messages(
 ) -> list[BrainMessage]:
     """Build the message list used for tool execution and action-required turns."""
 
+    executing = brain_input.active_step is not None and not brain_input.direct_response
+    task_message = (
+        BrainMessage(role="human", content=instruction_brief or _build_brain_execution_brief(brain_input))
+        if executing else None
+    )
     pre_messages = _build_context_messages(
         system_prompt=system_prompt,
-        instruction_brief=instruction_brief,
+        instruction_brief=None if executing else instruction_brief,
         retrieval_messages=retrieval_messages,
         user_request=(
             "" if brain_input.active_step is not None and not brain_input.direct_response
@@ -408,7 +422,10 @@ def _build_execution_messages(
     pre_messages.extend(
         _build_step_progress_messages(
             brain_input=brain_input,
-            prompt_context=json.dumps([(message.role, message.content) for message in pre_messages]) + output_protocol,
+            prompt_context=json.dumps([
+                (message.role, message.content)
+                for message in [*pre_messages, *([task_message] if task_message else [])]
+            ]) + output_protocol,
         )
     )
 
@@ -422,6 +439,8 @@ def _build_execution_messages(
                 role="system", content=tools_heading.lstrip("\n") + capabilities,
             ))
 
+    if task_message is not None:
+        pre_messages.append(task_message)
     return pre_messages
 
 
@@ -444,6 +463,10 @@ def _build_brain_execution_brief(
         "title": current_step.title,
         "description": current_step.description,
     }
+    if current_step.primary_tool is not None:
+        # A planning hint, not an exclusive capability set. Supporting tools
+        # remain available when the active objective genuinely requires them.
+        payload["primary_tool"] = current_step.primary_tool
     if current_step.completion_requirement is not None:
         payload["completion_requirement"] = current_step.completion_requirement.model_dump(mode="json")
     return "Active step:\n" + json.dumps(payload, ensure_ascii=True)

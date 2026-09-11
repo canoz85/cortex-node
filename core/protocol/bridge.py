@@ -40,6 +40,7 @@ from .enums import (
     EventType,
     ExecutionPhase,
     ExecutionStatus,
+    PlanningOperation,
     StepStatus,
     WorkerRole,
 )
@@ -50,6 +51,7 @@ from .models import (
     ContentIntegrity,
     ControllerInput,
     PlannerInput,
+    PlanningRequest,
     PlannerResult,
     ControllerDecision,
     EventRecord,
@@ -741,21 +743,26 @@ def build_execution_plan(
     return _build_active_plan(state, resolved_identity)
 
 
-def build_planner_input(legacy_state: LegacyState | None = None) -> PlannerInput:
-    """Build PlannerInput contract from legacy runtime state."""
-
-    execution_state = build_execution_state(legacy_state)
-
-    return PlannerInput(
-        identity=execution_state.protocol_visible.identity,
-        context=build_execution_context(
-            legacy_state,
-            role=WorkerRole.PLANNER,
-        ),
-        active_plan=execution_state.protocol_visible.active_plan,
-        completed_step_ids=execution_state.protocol_visible.completed_step_ids,
-        retry=execution_state.protocol_visible.retry,
-    )
+def build_planner_input(legacy_state: LegacyState | None = None) -> PlanningRequest:
+    """Read an existing Controller authorization; never synthesize planning mode."""
+    protocol = build_execution_state(legacy_state).protocol_visible
+    request = protocol.planning_request
+    if request is None:
+        raise ValueError("Planner requires a Controller-authorized PlanningRequest")
+    if (protocol.status != ExecutionStatus.NON_TERMINAL
+            or protocol.cursor.current_worker != WorkerRole.PLANNER
+            or request.identity != protocol.identity
+            or request.sequence != protocol.planning_sequence):
+        raise ValueError("PlanningRequest is not authorized for this execution cursor")
+    if request.operation == PlanningOperation.CREATE:
+        if protocol.active_plan is not None or protocol.cursor.phase != ExecutionPhase.PLANNING:
+            raise ValueError("CREATE request cannot revise an accepted plan")
+    elif (protocol.active_plan is None
+          or request.base_plan_id != protocol.active_plan.plan_id
+          or request.base_revision != protocol.active_plan.revision
+          or protocol.cursor.phase != ExecutionPhase.REPLANNING):
+        raise ValueError("REVISE request base revision does not match accepted plan")
+    return request.model_copy(deep=True)
 
 def planner_result_to_legacy(result: PlannerResult) -> dict[str, Any]:
     """Translate PlannerResult into a legacy-friendly dictionary payload."""
@@ -835,6 +842,9 @@ def build_controller_input(
         tool_execution_history=working.tool_execution_history,
         coverage_assessment=working.coverage_assessment,
         accepted_requirements=protocol.accepted_requirements,
+        planning_request=protocol.planning_request,
+        planning_sequence=protocol.planning_sequence,
+        completed_step_ids=protocol.completed_step_ids,
     )
 
 def brain_result_to_legacy(result: BrainResult) -> dict[str, Any]:

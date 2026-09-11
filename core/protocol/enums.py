@@ -70,6 +70,16 @@ class CancellationSource(StrEnum):
     PROVIDER = "provider"
 
 
+class PlanningOperation(StrEnum):
+    CREATE = "create"
+    REVISE = "revise"
+
+
+class ReplanTrigger(StrEnum):
+    BRAIN_REQUESTED = "brain_requested"
+    REPEATED_TOOL_FAILURE = "repeated_tool_failure"
+
+
 class PlannerOutcome(StrEnum):
     EXECUTION_PLAN = "execution_plan"
     DIRECT_RESPONSE = "direct_response"

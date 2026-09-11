@@ -6,8 +6,8 @@ It is not a structured proposal contract and must not gain repair heuristics.
 
 import re
 
-from core.protocol.enums import PlannerOutcome, StepStatus
-from core.protocol.models import ExecutionPlan, ExecutionStep, PlannerInput, PlannerResult
+from core.protocol.enums import PlannerOutcome, StepStatus, PlanningOperation
+from core.protocol.models import ExecutionPlan, ExecutionStep, PlanningRequest, PlannerResult
 
 
 DIRECT_RESPONSE_ROUTES = frozenset({"conversation", "clarify_domain"})
@@ -51,7 +51,7 @@ def _legacy_execution_steps(text: str) -> tuple[ExecutionStep, ...]:
 
 
 def normalize_planner_output(
-    content: object, planner_input: PlannerInput, *, route: str, confidence: float,
+    content: object, planner_input: PlanningRequest, *, route: str, confidence: float,
 ) -> PlannerResult:
     """Convert current provider content to the existing result, without state writes."""
     try:
@@ -65,10 +65,10 @@ def normalize_planner_output(
         # Preserve the previous provider-content conversion, not a new prose format.
         text = str(content)
         steps = _legacy_execution_steps(text)
-        active_plan = planner_input.active_plan
+        revising = planner_input.operation == PlanningOperation.REVISE
         plan = ExecutionPlan(
-            plan_id=active_plan.plan_id if active_plan else f"{planner_input.identity.execution_id}:plan",
-            revision=active_plan.revision + 1 if active_plan else 1,
+            plan_id=planner_input.base_plan_id if revising else f"{planner_input.identity.execution_id}:plan",
+            revision=planner_input.base_revision + 1 if revising else 1,
             objective=text,
             steps=steps,
         )

@@ -8,7 +8,18 @@ from core.graph_planner import create_planner_node
 from core.protocol.enums import PlannerOutcome
 from core.protocol.models import (
     ExecutionCursor, ExecutionIdentity, ExecutionState, PlannerResult, ProtocolVisibleState,
+    PlanningCapabilities,
 )
+from core.protocol.controller import CortexController
+from core.protocol.bridge import build_controller_input, build_execution_state
+from core.graph_state_machine import apply_controller_decision_to_state
+
+
+def authorize(state):
+    controller = CortexController(max_reasoning_steps=24, planning_capabilities=PlanningCapabilities(
+        available_tools=("list_files", "write_file", "query_abap_table", "agent_info", "current_time", "token_usage")))
+    decision = controller.decide(build_controller_input(state))
+    return {**state, "execution_state": apply_controller_decision_to_state(build_execution_state(state), decision)}
 
 
 class DummyPlannerLLM:
@@ -42,8 +53,9 @@ class DummyRAG:
 
 
 def make_node(llm, rag):
-    return create_planner_node(planner_llm=llm, router_llm=llm, rag_service=rag,
+    node = create_planner_node(planner_llm=llm, router_llm=llm, rag_service=rag,
                                rag_top_k=4, tools_set={"list_files", "write_file", "query_abap_table"})
+    return lambda state: node(authorize(state))
 
 
 def test_current_numbered_plan_and_retrieval():
@@ -118,7 +130,7 @@ def test_adapter_delegates_and_preserves_execution_state():
     before = state["execution_state"].model_dump(mode="json")
     node = create_planner_node(planner_service=FakeService(), rag_service=DummyRAG(),
                                rag_top_k=4, tools_set=set())
-    update = node(state)
+    update = node(authorize(state))
     assert update["planner_result"] is expected
     assert len(calls) == 1
     assert calls[0].identity == state["execution_state"].protocol_visible.identity
@@ -158,7 +170,7 @@ def test_router_provider_exception_is_failed_not_direct_response():
 def test_missing_router_retains_direct_fallback():
     llm, rag = DummyPlannerLLM("unused"), DummyRAG()
     node = create_planner_node(planner_llm=llm, rag_service=rag, rag_top_k=4, tools_set=set())
-    assert node({"messages": [HumanMessage(content="inspect")]})["planner_result"].outcome == PlannerOutcome.DIRECT_RESPONSE
+    assert node(authorize({"messages": [HumanMessage(content="inspect")]}))["planner_result"].outcome == PlannerOutcome.DIRECT_RESPONSE
     assert llm.invocations == []
 
 

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing_extensions import Literal
 
 from core.logging_utils import get_logger
+from core.planner_debug import log_planner
 
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -89,6 +90,7 @@ def _llm_route_decision(
     llm,
     *,
     propagate_errors: bool = False,
+    show_raw_llm: bool = False,
 ) -> RoutingDecision | None:
 
     try:
@@ -96,6 +98,8 @@ def _llm_route_decision(
             RouterDecisionSchema,
             method="json_schema",
         )
+        log_planner("router][system", PLANNER_ROUTER_PROMPT, enabled=show_raw_llm)
+        log_planner("router][human", user_text, enabled=show_raw_llm)
         payload = structured_router.invoke(
             [
                 SystemMessage(content=PLANNER_ROUTER_PROMPT),
@@ -103,6 +107,11 @@ def _llm_route_decision(
             ]
         )
 
+        if show_raw_llm:
+            log_planner("router][structured", {
+                key: getattr(payload, key, None)
+                for key in ("route", "domain", "confidence", "enforced", "reason")
+            })
         route = str(payload.route).strip()
         domain = str(payload.domain).strip().lower()
         confidence = float(payload.confidence)
@@ -169,6 +178,7 @@ def planner_routing_decision(
     router_llm: ChatOllama | None = None,
     *,
     propagate_errors: bool = False,
+    show_raw_llm: bool = False,
 ) -> RoutingDecision:
 
     text = (user_text or "").strip()
@@ -234,6 +244,7 @@ def planner_routing_decision(
             user_text=text,
             llm=router_llm,
             propagate_errors=propagate_errors,
+            show_raw_llm=show_raw_llm,
         )
 
     return _arbiter_route(

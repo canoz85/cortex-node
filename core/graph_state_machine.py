@@ -181,6 +181,14 @@ def apply_controller_decision_to_state(
                     ),
                     "cursor": synchronized_cursor,
                     "active_plan": active_plan,
+                    "planning_request": (
+                        None if decision.clear_planning_request or decision.terminal
+                        else decision.planning_request or protocol_visible.planning_request
+                    ),
+                    "planning_sequence": (
+                        decision.planning_request.sequence if decision.planning_request
+                        else protocol_visible.planning_sequence
+                    ),
                     "active_step": active_step,
                     "pending_tool_request": pending_tool_request,
                     "completed_step_ids": completed_step_ids,
@@ -191,5 +199,7 @@ def apply_controller_decision_to_state(
                     ),
                 }
             ),
+            "working": execution_state.working.model_copy(update={"last_tool_result": None})
+            if decision.consume_tool_result else execution_state.working,
         }
     )

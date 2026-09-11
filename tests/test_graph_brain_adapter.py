@@ -245,7 +245,7 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
         assert protocol.retry.retry_count == 0
         assert protocol.active_plan.steps[0].status == StepStatus.COMPLETED
     assert app.builder.edges == {
-        ("__start__", "planner"), ("planner", "controller"), ("brain", "controller"),
+        ("__start__", "controller"), ("planner", "controller"), ("brain", "controller"),
         ("tools", "capture_tool_output"), ("capture_tool_output", "controller"), ("summarize_memory", "__end__"),
     }
     assert set(app.builder.branches) == {"controller"}

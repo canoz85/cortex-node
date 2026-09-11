@@ -10,6 +10,8 @@ from .enums import (
     ExecutionPhase,
     ExecutionStatus,
     StepStatus,
+    PlanningOperation,
+    ReplanTrigger,
     WorkerRole,
 )
 
@@ -25,6 +27,8 @@ from .models import (
     StepCompletionEvidence,
     ControllerInput,
     PlannerInput,
+    PlanningRequest,
+    PlanningCapabilities,
     PlannerResult,
     CheckpointState,
     ControllerDecision,
@@ -61,6 +65,8 @@ __all__ = [
     "ExecutionPhase",
     "ExecutionStatus",
     "StepStatus",
+    "PlanningOperation",
+    "ReplanTrigger",
     "WorkerRole",
 
     # Models
@@ -74,6 +80,8 @@ __all__ = [
     "StepCompletionEvidence",
     "ControllerInput",
     "PlannerInput",
+    "PlanningRequest",
+    "PlanningCapabilities",
     "PlannerResult",
     "CheckpointState",
     "ControllerDecision",

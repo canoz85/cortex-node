@@ -16,6 +16,7 @@ from core.protocol.models import (
     ExecutionContext,
     ExecutionCursor,
     ExecutionIdentity,
+    ExecutionPlan,
     ExecutionStep,
     ToolExecutionRecord,
     ToolRequest,
@@ -44,6 +45,7 @@ def _controller_input(status: AsyncJobStatus) -> ControllerInput:
         ),
         context=ExecutionContext(user_request="Generate an image", role=WorkerRole.CONTROLLER),
         active_step=ExecutionStep(step_id="step-1", title="Generate image"),
+        active_plan=ExecutionPlan(plan_id="async-plan", steps=(ExecutionStep(step_id="step-1", title="Generate image"),)),
         pending_tool_request=request,
         tool_result=ToolResult(
             request_id="req-1",

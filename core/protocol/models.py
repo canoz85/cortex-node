@@ -21,6 +21,8 @@ from .enums import (
     ExecutionPhase,
     ExecutionStatus,
     PlannerOutcome,
+    PlanningOperation,
+    ReplanTrigger,
     StepStatus,
     WorkerRole,
 )
@@ -440,6 +442,9 @@ class ControllerInput(ImmutableProtocolModel):
     completion_validation_id: str | None = None
     completion_validation_error: str | None = None
     tool_execution_history: tuple[ToolExecutionRecord, ...] = Field(default_factory=tuple)
+    planning_request: PlanningRequest | None = None
+    planning_sequence: int = Field(default=0, ge=0)
+    completed_step_ids: StepIdList = ()
 
     def get_step_records(self, step_id: str | None = None) -> tuple[ToolExecutionRecord, ...]:
         target_step_id = step_id or (self.active_step.step_id if self.active_step else None)
@@ -621,6 +626,63 @@ class ControllerInput(ImmutableProtocolModel):
         return False
 
 
+class PlanningCapabilities(ImmutableProtocolModel):
+    """Controller-supplied capability ceiling, distinct from model suggestions."""
+
+    available_tools: tuple[str, ...] = ()
+    unavailable_tools: tuple[str, ...] = ()
+    constraints: ConstraintList = ()
+
+    @model_validator(mode="after")
+    def disjoint_tools(self):
+        if set(self.available_tools) & set(self.unavailable_tools):
+            raise ValueError("available and unavailable tools must be disjoint")
+        return self
+
+
+class PlanningRequest(ImmutableProtocolModel):
+    """Durable Controller authorization. Snapshots never authorize execution.
+
+    Evidence is serialized JSON to avoid sharing mutable result dictionaries.
+    """
+
+    request_id: str = Field(min_length=1)
+    identity: ExecutionIdentity
+    operation: PlanningOperation
+    context: ExecutionContext
+    capabilities: PlanningCapabilities
+    sequence: int = Field(ge=1)
+    created_at_utc: datetime
+    base_plan: ExecutionPlan | None = None
+    base_plan_id: str | None = None
+    base_revision: int | None = Field(default=None, ge=1)
+    completed_step_ids: StepIdList = ()
+    completed_steps: ExecutionStepList = ()
+    interrupted_step: ExecutionStep | None = None
+    trigger: ReplanTrigger | None = None
+    reason: str = ""
+    suggested_constraints: ConstraintList = ()
+    evidence_json: tuple[str, ...] = ()
+    failure_json: str | None = None
+    retry: RetryMetadata = Field(default_factory=RetryMetadata)
+
+    @model_validator(mode="after")
+    def validate_operation(self):
+        if self.created_at_utc.tzinfo is None:
+            raise ValueError("planning request creation time must be timezone aware")
+        if self.operation == PlanningOperation.CREATE:
+            if any((self.base_plan, self.base_plan_id, self.base_revision,
+                    self.completed_step_ids, self.completed_steps, self.interrupted_step,
+                    self.trigger, self.reason, self.suggested_constraints,
+                    self.evidence_json, self.failure_json)):
+                raise ValueError("CREATE cannot contain revision facts")
+        elif (self.base_plan is None or self.base_plan_id != self.base_plan.plan_id
+              or self.base_revision != self.base_plan.revision
+              or self.trigger is None or not self.reason.strip()):
+            raise ValueError("REVISE requires accepted base identity, trigger and reason")
+        return self
+
+
 class PlannerInput(ImmutableProtocolModel):
     """Controller-governed input contract for planner execution.
 
@@ -760,6 +822,8 @@ class ProtocolVisibleState(ImmutableProtocolModel):
     summary: ExecutionSummary | None = None
     accepted_requirements: tuple[AcceptedRequirement, ...] = ()
     resolved_coverages: tuple[ResolvedCoverage, ...] = ()
+    planning_request: PlanningRequest | None = None
+    planning_sequence: int = Field(default=0, ge=0)
 
 
 class WorkingState(ImmutableProtocolModel):
@@ -825,6 +889,9 @@ class ControllerDecision(ImmutableProtocolModel):
     """
 
     accepted_plan: ExecutionPlan | None = None
+    planning_request: PlanningRequest | None = None
+    clear_planning_request: bool = False
+    consume_tool_result: bool = False
     decision_type: ControllerDecisionType
     reason: str = ""
     execution_status: ExecutionStatus = ExecutionStatus.NON_TERMINAL

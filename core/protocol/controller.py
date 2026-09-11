@@ -12,6 +12,8 @@ from .enums import (
     ExecutionPhase,
     ExecutionStatus,
     PlannerOutcome,
+    PlanningOperation,
+    ReplanTrigger,
     StepStatus,
     WorkerRole,
 )
@@ -23,6 +25,8 @@ from .models import (
     ExecutionPlan,
     ExecutionStep,
     PlannerResult,
+    PlanningCapabilities,
+    PlanningRequest,
     RetryMetadata,
     ToolRequest,
     ToolResult,
@@ -42,6 +46,7 @@ class CortexController:
         max_reasoning_steps: int,
         *,
         now_utc: Callable[[], datetime] | None = None,
+        planning_capabilities: PlanningCapabilities | None = None,
         async_submission_tool_names: Iterable[str] = ("run_comfy_workflow",),
         ambiguous_submission_error_codes: Iterable[str] = (
             "COMFY_API_ERROR",
@@ -51,6 +56,7 @@ class CortexController:
     ):
         self._max_reasoning_steps = max_reasoning_steps
         self._now_utc = now_utc or (lambda: datetime.now(timezone.utc))
+        self._planning_capabilities = planning_capabilities or PlanningCapabilities()
         self._async_submission_tool_names = frozenset(async_submission_tool_names)
         self._ambiguous_submission_error_codes = frozenset(
             ambiguous_submission_error_codes
@@ -96,7 +102,10 @@ class CortexController:
             return self._terminate(controller_input.cursor, "max_steps")
 
         if controller_input.planner_result is not None:
-            return self._decide_from_planner(controller_input)
+            if controller_input.planning_request is not None:
+                self._validate_planning_request(controller_input, controller_input.planning_request)
+            return self._decide_from_planner(controller_input).model_copy(
+                update={"clear_planning_request": True})
         
         if controller_input.brain_result is not None:
             return self._decide_from_brain(controller_input)
@@ -123,9 +132,13 @@ class CortexController:
         self,
         controller_input: ControllerInput,
     ) -> ControllerDecision:
+        if controller_input.planning_request is not None:
+            request = controller_input.planning_request
+            self._validate_planning_request(controller_input, request)
+            return self._planning_dispatch(controller_input, request, "Resume authorized planning.")
         if controller_input.active_plan is None:
             return self._dispatch_planner(
-                controller_input.cursor,
+                controller_input,
                 "No active plan.",
             )
 
@@ -501,32 +514,12 @@ class CortexController:
                     if replan_request is not None
                     else brain_result.message.strip() or "replan_requested"
                 )
-                failed_plan = self._replace_plan_step(
-                    plan,
-                    active_step.model_copy(update={"status": StepStatus.FAILED}),
-                )
-                retry = RetryMetadata(max_retries=controller_input.retry.max_retries)
-                cursor = controller_input.cursor.model_copy(
-                    update={
-                        "phase": ExecutionPhase.REPLANNING,
-                        "current_worker": WorkerRole.PLANNER,
-                        "step_id": None,
-                        "step_attempt": None,
-                    }
-                )
-
-                return ControllerDecision(
-                    accepted_plan=failed_plan,
-                    decision_type=ControllerDecisionType.DISPATCH_PLANNER,
+                return self._request_replan(
+                    controller_input,
+                    trigger=ReplanTrigger.BRAIN_REQUESTED,
                     reason="replan_request",
-                    next_worker=WorkerRole.PLANNER,
-                    requires_checkpoint=True,
-                    requires_replan=True,
-                    cursor=cursor,
-                    failed_step_id=active_step.step_id,
                     failure_reason=failure_reason,
-                    retry=retry,
-                    clear_active_step=True,
+                    suggested_constraints=replan_request.constraints if replan_request else (),
                 )
 
             case BrainOutcome.FINAL_ANSWER:
@@ -817,19 +810,12 @@ class CortexController:
                 else 3
             )
             if consecutive_fails >= max_allowed_fails:
-                cursor = controller_input.cursor.model_copy(
-                    update={
-                        "phase": ExecutionPhase.REPLANNING,
-                        "current_worker": WorkerRole.PLANNER,
-                    }
-                )
-                return ControllerDecision(
-                    decision_type=ControllerDecisionType.DISPATCH_PLANNER,
+                return self._request_replan(
+                    controller_input,
+                    trigger=ReplanTrigger.REPEATED_TOOL_FAILURE,
                     reason=f"Repeated tool failure threshold ({consecutive_fails}) reached for {tool_result.signature}",
-                    next_worker=WorkerRole.PLANNER,
-                    requires_checkpoint=True,
-                    cursor=cursor,
-                    clear_pending_tool_request=clear_pending_tool_request,
+                    failure_reason=tool_result.message or "repeated_tool_failure",
+                    failure=tool_result,
                 )
 
         return self._dispatch_brain(
@@ -896,12 +882,83 @@ class CortexController:
 
     def _dispatch_planner(
         self,
-        cursor: ExecutionCursor,
+        context: ControllerInput,
         reason: str,
     ) -> ControllerDecision:
-        planning_cursor = cursor.model_copy(
+        if context.active_plan is not None:
+            raise ValueError("CREATE requires no accepted plan")
+        request = self._build_planning_request(context, operation=PlanningOperation.CREATE)
+        return self._planning_dispatch(context, request, reason)
+
+    @staticmethod
+    def _validate_planning_request(context: ControllerInput, request: PlanningRequest):
+        if request.identity != context.identity or request.sequence != context.planning_sequence:
+            raise ValueError("planning request identity/sequence mismatch")
+        if request.operation == PlanningOperation.CREATE:
+            if context.active_plan is not None:
+                raise ValueError("CREATE requires no accepted plan")
+        elif (context.active_plan is None or request.base_plan_id != context.active_plan.plan_id
+              or request.base_revision != context.active_plan.revision):
+            raise ValueError("planning request base revision mismatch")
+
+    def _build_planning_request(
+        self, context: ControllerInput, *, operation: PlanningOperation,
+        trigger: ReplanTrigger | None = None, reason: str = "",
+        suggested_constraints: tuple[str, ...] = (), failure: ToolResult | None = None,
+    ) -> PlanningRequest:
+        sequence = context.planning_sequence + 1
+        revision = operation == PlanningOperation.REVISE
+        plan = context.active_plan if revision else None
+        completed_ids = tuple(dict.fromkeys((
+            *context.completed_step_ids,
+            *(step.step_id for step in plan.steps if step.status == StepStatus.COMPLETED),
+        ))) if plan else ()
+        # Preserve provenance. Legacy records without scope remain visibly unscoped.
+        evidence = tuple(record.model_dump_json() for record in context.tool_execution_history
+                         if record.execution_id in (None, context.identity.execution_id)) if revision else ()
+        return PlanningRequest(
+            request_id=str(uuid5(NAMESPACE_URL, f"{context.identity.execution_id}:planning:{sequence}")),
+            identity=context.identity, operation=operation,
+            context=context.context.model_copy(update={"role": WorkerRole.PLANNER}),
+            capabilities=self._planning_capabilities,
+            sequence=sequence, created_at_utc=self._as_utc(self._now_utc()),
+            base_plan=plan.model_copy(deep=True) if plan else None,
+            base_plan_id=plan.plan_id if plan else None,
+            base_revision=plan.revision if plan else None,
+            completed_step_ids=completed_ids,
+            completed_steps=tuple(step.model_copy(deep=True) for step in plan.steps
+                                  if step.step_id in completed_ids) if plan else (),
+            interrupted_step=context.active_step.model_copy(deep=True) if revision and context.active_step else None,
+            trigger=trigger, reason=reason, suggested_constraints=suggested_constraints,
+            evidence_json=evidence, failure_json=failure.model_dump_json() if failure else None,
+            retry=context.retry if revision else RetryMetadata(max_retries=context.retry.max_retries),
+        )
+
+    def _request_replan(
+        self, context: ControllerInput, *, trigger: ReplanTrigger, reason: str,
+        failure_reason: str, suggested_constraints: tuple[str, ...] = (),
+        failure: ToolResult | None = None,
+    ) -> ControllerDecision:
+        plan, step = self._validate_active_step(context, transition="replan request")
+        request = self._build_planning_request(
+            context, operation=PlanningOperation.REVISE, trigger=trigger,
+            reason=failure_reason, suggested_constraints=suggested_constraints, failure=failure,
+        )
+        # Preserve Stage 1's Controller-owned failed-step transition for both sources.
+        failed_plan = self._replace_plan_step(plan, step.model_copy(update={"status": StepStatus.FAILED}))
+        return self._planning_dispatch(context, request, reason).model_copy(update={
+            "accepted_plan": failed_plan, "failed_step_id": step.step_id,
+            "failure_reason": failure_reason,
+            "retry": RetryMetadata(max_retries=context.retry.max_retries),
+            "consume_tool_result": context.tool_result is not None,
+        })
+
+    def _planning_dispatch(
+        self, context: ControllerInput, request: PlanningRequest, reason: str,
+    ) -> ControllerDecision:
+        planning_cursor = context.cursor.model_copy(
             update={
-                "phase": ExecutionPhase.PLANNING,
+                "phase": ExecutionPhase.REPLANNING if request.operation == PlanningOperation.REVISE else ExecutionPhase.PLANNING,
                 "current_worker": WorkerRole.PLANNER,
                 "step_id": None,
                 "step_attempt": None,
@@ -913,6 +970,10 @@ class CortexController:
             reason=reason,
             cursor=planning_cursor,
             requires_checkpoint=True,
+            requires_replan=request.operation == PlanningOperation.REVISE,
+            planning_request=request,
+            clear_active_step=True,
+            clear_pending_tool_request=True,
         )
 
     def _prepare_async_submission_request(

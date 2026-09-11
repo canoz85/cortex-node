@@ -3,7 +3,7 @@
 import json
 import logging
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from core.brain import BrainMessage
@@ -130,10 +130,18 @@ class LangChainBrainProvider:
             if tools_enabled and self.supports_native_tool_calls and not getattr(raw, "tool_calls", None):
                 raw = llm.invoke([
                     *provider_messages,
+                    # Show the rejected response so this is a protocol correction,
+                    # not a fresh task invocation. Never interpret its content.
+                    *([AIMessage(content=raw.content)] if isinstance(raw, AIMessage) else []),
                     SystemMessage(content=(
                         "The previous response was invalid because it did not contain a native tool call. "
                         "Do not write function-call syntax as text. Return exactly one native tool call. "
                         "Use one of the currently bound executable or lifecycle tools."
+                        " Lifecycle actions returned in content are text, not native calls. "
+                        "If reporting a lifecycle outcome, invoke brain_step_completed, "
+                        "brain_step_failed, or brain_replan_requested through the native tool channel "
+                        "with its required arguments and leave content empty. "
+                        "Keep the same active-step decision; correct only the response protocol."
                     )),
                 ])
                 _log_native_call_attempt(raw, 2)

@@ -10,16 +10,17 @@ from core.state import AgentState
 
 def create_planner_node(
     *, planner_llm=None, router_llm=None, rag_service, rag_top_k: int,
-    tools_set: set[str], planner_service: PlannerService | None = None,
+    tools_set: set[str], show_raw_llm: bool = False, planner_service: PlannerService | None = None,
 ):
     service = planner_service or PlannerService(
-        provider=LangChainPlannerProvider(planner_llm=planner_llm, router_llm=router_llm),
+        provider=LangChainPlannerProvider(planner_llm=planner_llm, router_llm=router_llm, show_raw_llm=show_raw_llm),
         tools_set=tools_set, domain_tool_map=DOMAIN_TOOL_MAP,
-        mutating_tools=MUTATING_TOOLS, system_capabilities_text=SYSTEM_CAPABILITIES_TEXT,
+        show_raw_llm=show_raw_llm, mutating_tools=MUTATING_TOOLS, system_capabilities_text=SYSTEM_CAPABILITIES_TEXT,
     )
 
     def planner_node(state: AgentState):
-        planner_input = build_planner_input(state)
+        # This reads/validates a durable authorization; it does not create one.
+        planning_request = build_planner_input(state)
         retrieval_messages = []
 
         def retrieve(user_request: str) -> tuple[str, ...]:
@@ -27,7 +28,7 @@ def create_planner_node(
             retrieval_messages.extend(retrieval_message(rag_service, user_request, rag_top_k))
             return tuple(message.content for message in retrieval_messages)
 
-        result = service.run(planner_input, retrieve=retrieve)
+        result = service.run(planning_request, retrieve=retrieve)
         return {"planner_result": result, "retrieval_messages": retrieval_messages}
 
     return planner_node

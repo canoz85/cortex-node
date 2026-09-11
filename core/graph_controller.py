@@ -7,7 +7,7 @@ from core.graph_constants import MAX_REASONING_STEPS
 from core.graph_state_machine import apply_controller_decision_to_state
 from core.protocol.bridge import build_controller_input
 from core.protocol.enums import WorkerRole, BrainOutcome, ExecutionStatus
-from core.protocol.models import ControllerDecision, ControllerInput, ExecutionState, FinalizationRequest
+from core.protocol.models import ControllerDecision, ControllerInput, ExecutionState, FinalizationRequest, PlanningCapabilities
 from core.state import AgentState
 from core.completion import CompletionService
 from core.protocol.completion_identity import accepted_step
@@ -17,10 +17,12 @@ def create_controller_node(
     controller: CortexController | None = None,
     completion_service: CompletionService | None = None,
     finalizer: Finalizer | None = None,
+    planning_capabilities: PlanningCapabilities | None = None,
 ):
     completion_service = completion_service or CompletionService()
     controller = controller or CortexController(
         max_reasoning_steps=MAX_REASONING_STEPS,
+        planning_capabilities=planning_capabilities,
     )
     finalizer = finalizer or Finalizer()
 

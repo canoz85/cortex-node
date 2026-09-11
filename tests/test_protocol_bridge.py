@@ -250,8 +250,10 @@ def test_controller_input_evidence_predicates_and_consecutive_failures():
         "execution_state": ExecutionState(
             protocol_visible=ProtocolVisibleState(
                 identity=ExecutionIdentity(execution_id="ex-1", protocol_version="1.0"),
-                cursor=ExecutionCursor(),
+                cursor=ExecutionCursor(step_id="step-1", plan_revision=1),
                 pending_tool_request=ToolRequest(request_id="req-3", tool_name="read_file"),
+                active_plan=ExecutionPlan(plan_id="p1", steps=(ExecutionStep(step_id="step-1", title="Read"),)),
+                active_step=ExecutionStep(step_id="step-1", title="Read"),
             ),
             working=WorkingState(
                 last_tool_result=rec3.result,

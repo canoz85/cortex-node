@@ -4,14 +4,15 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 import pytest
 
 from core.planner import PlannerRouting, PlannerService, filter_planner_tools
 from core.planner_normalization import normalize_planner_output
-from core.protocol.enums import PlannerOutcome, StepStatus, WorkerRole
+from core.protocol.enums import PlannerOutcome, StepStatus, WorkerRole, PlanningOperation, ReplanTrigger
 from core.protocol.models import (
-    ExecutionContext, ExecutionIdentity, ExecutionPlan, ExecutionStep, PlannerInput, RetryMetadata,
+    ExecutionContext, ExecutionIdentity, ExecutionPlan, ExecutionStep, PlanningRequest, PlanningCapabilities, RetryMetadata,
 )
 
 
@@ -19,7 +20,15 @@ VALID = "1. Inspect – Use `list_files` to inspect.\n2. Write - Use `write_file
 
 
 def planner_input(**updates):
-    return PlannerInput(
+    plan = updates.pop("active_plan", None)
+    return PlanningRequest(
+        request_id="fixture-request", sequence=1, created_at_utc=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        operation=PlanningOperation.REVISE if plan else PlanningOperation.CREATE,
+        base_plan=plan, base_plan_id=plan.plan_id if plan else None,
+        base_revision=plan.revision if plan else None,
+        trigger=ReplanTrigger.BRAIN_REQUESTED if plan else None,
+        reason="fixture revision" if plan else "",
+        capabilities=PlanningCapabilities(available_tools=("list_files", "write_file", "current_time", "agent_info", "token_usage")),
         identity=ExecutionIdentity(execution_id="p1", protocol_version="1"),
         context=ExecutionContext(user_request="create a file", role=WorkerRole.PLANNER),
         **updates,
@@ -69,7 +78,7 @@ def test_fake_provider_produces_current_plan_contract():
     )
     assert provider.requests == ["create a file"]
     assert len(provider.messages) == 1
-    assert [(m.role, m.content) for m in provider.messages[0][1:]] == [
+    assert [(m.role, m.content) for m in (provider.messages[0][1], provider.messages[0][-1])] == [
         ("system", "retrieved"), ("human", "create a file"),
     ]
 
@@ -179,8 +188,9 @@ class BlockFrameworks(importlib.abc.MetaPathFinder):
             raise AssertionError("framework import: " + fullname)
 sys.meta_path.insert(0, BlockFrameworks())
 from core.planner import PlannerService, PlannerRouting
-from core.protocol.models import PlannerInput, ExecutionIdentity, ExecutionContext
-from core.protocol.enums import WorkerRole, PlannerOutcome
+from core.protocol.models import PlanningRequest, PlanningCapabilities, ExecutionIdentity, ExecutionContext
+from core.protocol.enums import WorkerRole, PlannerOutcome, PlanningOperation
+from datetime import datetime, timezone
 class Fake:
     def route(self, request):
         return PlannerRouting("action", "general", 1.0, "fixture")
@@ -188,7 +198,9 @@ class Fake:
         return "1. Inspect - Use list_files."
 service = PlannerService(provider=Fake(), tools_set={"list_files"}, domain_tool_map={},
                          mutating_tools=set(), system_capabilities_text="fixture")
-result = service.run(PlannerInput(identity=ExecutionIdentity(execution_id="test", protocol_version="1"),
+result = service.run(PlanningRequest(request_id="test", sequence=1, created_at_utc=datetime.now(timezone.utc),
+    operation=PlanningOperation.CREATE, capabilities=PlanningCapabilities(available_tools=("list_files",)),
+    identity=ExecutionIdentity(execution_id="test", protocol_version="1"),
     context=ExecutionContext(user_request="inspect", role=WorkerRole.PLANNER)))
 assert result.outcome == PlannerOutcome.EXECUTION_PLAN
 '''

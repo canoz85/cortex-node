@@ -7,14 +7,15 @@ from core.planner import PlannerMessage, PlannerRouting
 
 
 class LangChainPlannerProvider:
-    def __init__(self, *, planner_llm, router_llm=None):
+    def __init__(self, *, planner_llm, router_llm=None, show_raw_llm: bool = False):
+        self.show_raw_llm = show_raw_llm
         self.planner_llm = planner_llm
         self.router_llm = router_llm
 
     def route(self, user_request: str) -> PlannerRouting:
         # Keep confidence arbitration; invocation exceptions must reach FAILED.
         decision = planner_routing_decision(
-            user_request, router_llm=self.router_llm, propagate_errors=True,
+            user_request, router_llm=self.router_llm, propagate_errors=True, show_raw_llm=self.show_raw_llm,
         )
         return PlannerRouting(decision.route, decision.domain, decision.confidence, decision.reason)
 

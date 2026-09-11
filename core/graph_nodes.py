@@ -12,6 +12,7 @@ from core.finalizer_provider import LangChainFinalAnswerRenderer
 from core.completion import CompletionService
 from core.completion_providers.filesystem import FileReadCollectionProvider, PROVIDER_ID
 from core.graph_planner import create_planner_node
+from core.protocol.models import PlanningCapabilities
 from core.graph_summarize import create_summarize_memory_node
 
 from core.rag import WorkspaceRAG
@@ -32,17 +33,19 @@ def create_graph_nodes(
 ):
 
     controller_node = create_controller_node(
+        planning_capabilities=PlanningCapabilities(available_tools=tuple(sorted(tools_set))),
         completion_service=CompletionService({
             PROVIDER_ID: FileReadCollectionProvider(),
         }),
         finalizer=Finalizer(answer_renderer=LangChainFinalAnswerRenderer(
-            llm=brain_llm,
-        )),
+            llm=brain_llm, show_raw_llm=show_raw_llm,
+        ), show_raw_llm=show_raw_llm),
     )
     
     planner_node = create_planner_node(
         planner_llm=planner_llm,
         router_llm=planner_llm,
+        show_raw_llm=show_raw_llm,
         rag_service=rag_service,
         rag_top_k=rag_top_k,
         tools_set=tools_set,
