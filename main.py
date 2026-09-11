@@ -15,7 +15,7 @@ from core.runtime.gpu_resources import GpuResourceMode, GpuResourcePolicy
 DEFAULT_SETTINGS = {
     "workspace": "workspace",
     "knowledge_dir": "knowledge",
-    "model": "gemma4:26b", #"gemma4:12b", #"qwen2.5-coder:14b", #
+    "model": "gemma4:26b", #"gemma4:26b", #"qwen2.5-coder:14b", #
     "model_planner": "gpt-oss:20b", # qwen2.5:7b
     "embedding_model": "nomic-embed-text",
     "rag_top_k": 4,

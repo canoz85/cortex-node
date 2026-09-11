@@ -1,6 +1,7 @@
 """LangChain/Ollama implementation of the framework-neutral Brain provider port."""
 
 import json
+import logging
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -9,6 +10,23 @@ from core.brain import BrainMessage
 from core.brain_normalization import normalize_brain_output, normalize_brain_usage
 from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import BrainInput, BrainOutcome
+
+
+logger = logging.getLogger(__name__)
+
+
+def _log_native_call_attempt(raw, attempt: int) -> None:
+    calls = getattr(raw, "tool_calls", None)
+    names = [
+        call["name"] for call in calls
+        if isinstance(call, dict) and isinstance(call.get("name"), str)
+    ] if isinstance(calls, (list, tuple)) else []
+    logger.info(
+        "Brain native-call compliance: attempt=%s native_tool_calls_present=%s "
+        "tool_call_names=%s retry_triggered=%s retry_exhausted=%s",
+        attempt, bool(calls), names,
+        attempt == 1 and not calls, attempt == 2 and not calls,
+    )
 
 
 LIFECYCLE_ACTION_SCHEMAS = (
@@ -107,9 +125,21 @@ class LangChainBrainProvider:
         llm = self.tool_brain_llm if tools_enabled else self.brain_llm
         try:
             raw = llm.invoke(provider_messages)
+            if tools_enabled and self.supports_native_tool_calls:
+                _log_native_call_attempt(raw, 1)
+            if tools_enabled and self.supports_native_tool_calls and not getattr(raw, "tool_calls", None):
+                raw = llm.invoke([
+                    *provider_messages,
+                    SystemMessage(content=(
+                        "The previous response was invalid because it did not contain a native tool call. "
+                        "Do not write function-call syntax as text. Return exactly one native tool call. "
+                        "Use one of the currently bound executable or lifecycle tools."
+                    )),
+                ])
+                _log_native_call_attempt(raw, 2)
         except Exception as exc:
             # Provider/structured-output errors are values at the service boundary.
-            # Retrying is a Controller decision, never another model/parser loop.
+            # Exception retries remain a Controller decision.
             return BrainOutcome(
                 outcome=BrainOutcomeKind.PROVIDER_FAILURE,
                 step_id=brain_input.active_step.step_id if brain_input.active_step else None,

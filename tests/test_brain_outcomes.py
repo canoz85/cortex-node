@@ -428,6 +428,84 @@ class FakeModel:
         return self.reply
 
 
+class SequenceModel:
+    def __init__(self, *replies):
+        self.replies = iter(replies)
+        self.calls = []
+
+    def invoke(self, messages):
+        self.calls.append(messages)
+        reply = next(self.replies)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+@pytest.mark.parametrize("first_text", [
+    'brain_step_completed(message="Do not reuse me", evidence_refs=["invented"])',
+    "I have completed the step.",
+])
+@pytest.mark.parametrize("retry", [False, True])
+def test_native_compliance_uses_bound_model_and_only_native_response(first_text, retry):
+    native = native_action("brain_step_completed", {"message": "Native completion", "evidence_refs": []})
+    bound = SequenceModel(*([AIMessage(content=first_text), native] if retry else [native]))
+    unbound = FakeModel(RuntimeError("must not invoke unbound model"))
+    provider = LangChainBrainProvider(brain_llm=unbound, tool_brain_llm=bound, tools_set={"read_file"})
+    result = provider.generate(brain_input(), (BrainMessage(role="system", content="Active step"),), tools_enabled=True)
+    assert result.kind == Kind.STEP_COMPLETED
+    assert result.completion_evidence.summary == "Native completion"
+    assert result.completion_evidence.tool_request_ids == ()
+    assert len(bound.calls) == (2 if retry else 1)
+    assert unbound.calls == []
+    if retry:
+        assert bound.calls[1][:-1] == bound.calls[0]
+        instruction = bound.calls[1][-1].content
+        assert "previous response was invalid because it did not contain a native tool call" in instruction
+        assert "Do not write function-call syntax as text" in instruction
+        assert "Return exactly one native tool call" in instruction
+        assert "currently bound executable or lifecycle tools" in instruction
+        assert first_text not in instruction
+
+
+@pytest.mark.parametrize("name, arguments", [
+    ("brain_step_completed", 'message="Done", evidence_refs=[]'),
+    ("brain_step_failed", 'message="Failed"'),
+    ("brain_replan_requested", 'reason="Changed", constraints=[]'),
+])
+def test_textual_lifecycle_is_never_salvaged_after_compliance_retry(name, arguments):
+    text = AIMessage(content=f"{name}({arguments})")
+    model = SequenceModel(text, text)
+    provider = LangChainBrainProvider(brain_llm=model, tool_brain_llm=model, tools_set={"read_file"})
+    result = provider.generate(brain_input(), (), tools_enabled=True)
+    assert len(model.calls) == 2
+    assert result.kind == Kind.INVALID_OUTPUT
+    assert result.error_code == "native_tool_call_required"
+    assert result.completion_evidence is None
+    assert result.tool_request is None
+
+
+@pytest.mark.parametrize("native, enabled", [(False, True), (True, False), (False, False)])
+def test_compliance_retry_is_disabled_outside_native_execution(native, enabled):
+    raw = AIMessage(content='read_file(path="a.py")')
+    model = SequenceModel(raw)
+    provider = LangChainBrainProvider(
+        brain_llm=model, tool_brain_llm=model, tools_set={"read_file"}, supports_native_tool_calls=native,
+    )
+    context = brain_input(direct=not enabled)
+    result = provider.generate(context, (), tools_enabled=enabled)
+    assert len(model.calls) == 1
+    assert result == normalize_brain_output(raw, context, {"read_file"}, allow_text_tool_calls=not native)
+
+
+def test_compliance_retry_exception_returns_provider_failure():
+    model = SequenceModel(AIMessage(content="Done"), RuntimeError("offline"))
+    provider = LangChainBrainProvider(brain_llm=model, tool_brain_llm=model, tools_set={"read_file"})
+    result = provider.generate(brain_input(), (), tools_enabled=True)
+    assert len(model.calls) == 2
+    assert result.kind == Kind.PROVIDER_FAILURE
+    assert result.error_code == "RuntimeError"
+
+
 @pytest.mark.parametrize(("reply", "kind"), [
     (RuntimeError("offline"), Kind.PROVIDER_FAILURE),
     (ValueError("structured output validation failed"), Kind.PROVIDER_FAILURE),
@@ -435,12 +513,12 @@ class FakeModel:
     (AIMessage(content='{"kind":"STEP_COMPLETED",'), Kind.INVALID_OUTPUT),
     (native_action("brain_step_completed", {"message": "Done", "evidence_refs": []}), Kind.STEP_COMPLETED),
 ])
-def test_provider_invocation_has_one_normalization_path_and_no_hidden_retries(reply, kind):
+def test_provider_invocation_retries_only_missing_native_calls(reply, kind):
     model = FakeModel(reply)
     provider = LangChainBrainProvider(brain_llm=model, tool_brain_llm=model, tools_set={"read_file"})
     result = provider.generate(brain_input(), (BrainMessage(role="human", content="read all"),), tools_enabled=True)
     assert result.kind == kind
-    assert len(model.calls) == 1
+    assert len(model.calls) == (2 if kind == Kind.INVALID_OUTPUT else 1)
     assert isinstance(result, BrainOutcome)
 
 
@@ -480,7 +558,7 @@ def test_execution_prompt_supplies_step_evidence_and_capability_without_auto_com
         ),
         casual_system_prompt="casual",
     ).run(context)
-    assert len(model.calls) == 1
+    assert len(model.calls) == (2 if supports_native_tool_calls else 1)
     messages = model.calls[0]
     rendered = "\n".join(message.content for message in messages)
     sections = (
@@ -606,7 +684,7 @@ def test_text_tool_requests_require_explicit_non_native_provider_configuration(r
     assert rejected.kind == Kind.INVALID_OUTPUT
     assert rejected.error_code == "native_tool_call_required"
     assert rejected.tool_request is None
-    assert len(native_model.calls) == 1
+    assert len(native_model.calls) == 2
     assert normalize_brain_output(raw, brain_input(), {"read_file"}) == rejected
 
     text_model = FakeModel(raw)
