@@ -37,7 +37,6 @@ def test_llm_route_decision_accepts_valid_info_response():
             domain="general",
             confidence=0.9,
             enforced=False,
-            needs_clarification=False,
             reason="read-only request",
         )
     )
@@ -54,10 +53,9 @@ def test_llm_route_decision_accepts_valid_action_response():
     llm = DummyRouterLLM(
         result=RouterDecisionSchema(
             route="action",
-            domain="python",
+            domain="workspace",
             confidence=0.85,
             enforced=False,
-            needs_clarification=False,
             reason="tool execution needed",
         )
     )
@@ -66,7 +64,7 @@ def test_llm_route_decision_accepts_valid_action_response():
 
     assert decision is not None
     assert decision.route == "action"
-    assert decision.domain == "python"
+    assert decision.domain == "workspace"
     assert decision.source == "llm_router"
 
 
@@ -77,7 +75,6 @@ def test_llm_route_decision_rejects_invalid_route():
             domain="general",
             confidence=0.9,
             enforced=False,
-            needs_clarification=False,
             reason="invalid route",
         )
     )
@@ -92,7 +89,6 @@ def test_llm_route_decision_rejects_invalid_domain():
             domain="finance",
             confidence=0.9,
             enforced=False,
-            needs_clarification=False,
             reason="invalid domain",
         )
     )
@@ -108,7 +104,6 @@ def test_llm_route_decision_rejects_out_of_range_confidence(confidence):
             domain="general",
             confidence=confidence,
             enforced=False,
-            needs_clarification=False,
             reason="bad confidence",
         )
     )

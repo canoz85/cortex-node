@@ -87,6 +87,8 @@ class RouterDecisionSchema(BaseModel):
 def _llm_route_decision(   
     user_text: str,
     llm,
+    *,
+    propagate_errors: bool = False,
 ) -> RoutingDecision | None:
 
     try:
@@ -123,6 +125,10 @@ def _llm_route_decision(
             source="llm_router",
         )
     except Exception as exc:
+        # PlannerService opts in so model failures become PlannerResult.FAILED.
+        # Keep the historical fallback for other callers of this router helper.
+        if propagate_errors:
+            raise
         logger.warning(f"LLM Routing failed: {str(exc)}")
         return None
     
@@ -161,6 +167,8 @@ def _arbiter_route(
 def planner_routing_decision(
     user_text: str,
     router_llm: ChatOllama | None = None,
+    *,
+    propagate_errors: bool = False,
 ) -> RoutingDecision:
 
     text = (user_text or "").strip()
@@ -225,6 +233,7 @@ def planner_routing_decision(
         llm_decision = _llm_route_decision(
             user_text=text,
             llm=router_llm,
+            propagate_errors=propagate_errors,
         )
 
     return _arbiter_route(
