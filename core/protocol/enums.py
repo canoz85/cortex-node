@@ -86,6 +86,12 @@ class PlannerOutcome(StrEnum):
     CLARIFICATION_REQUIRED = "clarification_required"
     FAILED = "failed"
 
+
+class PlanningFailureCategory(StrEnum):
+    INVALID_OUTPUT = "INVALID_OUTPUT"
+    PROVIDER_FAILURE = "PROVIDER_FAILURE"
+    UNPLANNABLE = "UNPLANNABLE"
+
 class BrainOutcomeKind(StrEnum):
     """Framework-neutral Brain result discriminants."""
 

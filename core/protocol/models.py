@@ -21,6 +21,7 @@ from .enums import (
     ExecutionPhase,
     ExecutionStatus,
     PlannerOutcome,
+    PlanningFailureCategory,
     PlanningOperation,
     ReplanTrigger,
     StepStatus,
@@ -712,6 +713,7 @@ class PlannerResult(ImmutableProtocolModel):
     message: str = ""
     planning_rationale: str = ""
     change_summary: str = ""
+    failure_category: PlanningFailureCategory | None = None
 
 class ExecutionSummary(ImmutableProtocolModel):
     """Terminal summary generated from accepted protocol-visible facts.

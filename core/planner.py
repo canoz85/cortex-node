@@ -1,4 +1,4 @@
-"""Framework-neutral Planner service; numbered prose is P1 compatibility only."""
+"""Framework-neutral Planner service for structured proposals."""
 
 from collections.abc import Callable, Mapping, Set
 from dataclasses import dataclass
@@ -6,17 +6,19 @@ from typing import Protocol
 import json
 
 from core.planner_debug import log_planner
-from core.planner_normalization import DIRECT_RESPONSE_ROUTES, normalize_planner_output, planner_failure
+from core.planner_contract import PlannerInvalidOutputError, PlannerProposal
+from core.planner_normalization import normalize_planner_proposal, planner_failure
 from core.protocol.models import PlanningRequest, PlannerResult
-from core.protocol.enums import PlanningOperation
+from core.protocol.enums import PlanningFailureCategory, PlanningOperation
 
+DIRECT_RESPONSE_ROUTES = frozenset({"conversation", "clarify_domain"})
 
 PLANNER_SYSTEM_PROMPT = """You are the Planner worker of CortexNode.
 
 Your responsibility is to transform a user request into a deterministic execution plan.
 You NEVER execute tools.
 You NEVER answer the user.
-You ONLY produce the execution plan.
+You ONLY produce one structured planning proposal/result.
 
 ROUTER CONTEXT:
 Route: {route}
@@ -29,7 +31,7 @@ AVAILABLE TOOLS FOR THIS REQUEST (CLOSED SET — the ONLY tools you may referenc
 {available_tools}
 
 PLANNING RULES:
-1. Produce between 1 and 4 sequential execution steps. Never exceed 4 steps; merge
+1. Produce between 1 and 4 execution steps. Never exceed 4 steps; merge
    only within the same category (see rule 2), never across categories.
 2. SINGLE-RESPONSIBILITY STEPS (STRICT): Each step maps to exactly ONE category:
    - INSPECT (read-only lookups: list_files, read_file, git_status, rag_search, ...)
@@ -69,8 +71,16 @@ PLANNING RULES:
      new file, prefer a task-specific name over a generic one (e.g., not `script.py`).
    - Do not include code, shell commands, JSON, queries, or prompts.
    - Leave execution details and batching logic to the Brain worker.
+   - A plan step is a logical unit of work, not necessarily one tool invocation.
+     The Brain may invoke the step's primary tool multiple times when processing a
+     collection of items discovered at runtime.
+   - Concrete tool arguments may be derived by the Brain from evidence produced by
+     dependency steps. Express that relationship with dependencies; the arguments do
+     not need to be known or enumerated while planning.
+   - Do not select NEEDS_INPUT or PLANNING_FAILED merely because tool arguments or the
+     number or identities of items are discoverable only during execution.
 9. Do not explain the plan or add conversational fluff.
-10. Do not include any text outside the numbered steps.
+10. Return exactly one structured result matching the bound output schema.
 11. Do not assume any file, directory, or dependency state persists from a previous,
     unrelated request unless this turn's context confirms it.
 12. Re-planning boundary: you own step definitions only, never retries. Do not emit
@@ -92,22 +102,17 @@ FORBIDDEN PATTERNS (never produce a step like these):
 - "Retry the failed write – Use `write_file` again with the same arguments."
   (retries belong to the Controller, not the plan)
 
-OUTPUT FORMAT:
-Return ONLY the numbered list of steps in the following format:
-
-1. <Short title> – <Short description stating the primary tool to use>
-2. <Short title> – <Short description stating the primary tool to use>
-
-EXAMPLES:
-
-[Workspace Script Execution]
-1. Inspect workspace – Use `list_files` to check existing files and layout.
-2. Generate processing script – Use `write_file` to create a Python script for batch processing.
-3. Execute analysis – Use `run_python` to run the processing script and output results.
-
-[Read-Only Info Request]
-1. Search Knowledge – Use `rag_search` to retrieve relevant document passages.
-2. Query SAP Data – Use `query_abap_table` to check corresponding enterprise records.
+RESULT CONTRACT:
+- PLAN_PROPOSED: provide objective and 1-4 structured steps. Each step has a stable
+  step_id, non-empty title and description, optional primary_tool, and dependencies
+  containing only step_ids in this proposal. Dependencies must be acyclic.
+- NO_PLAN_REQUIRED: explicitly select this when no tool execution plan is needed.
+- NEEDS_INPUT: explicitly select this when required user information is missing.
+- PLANNING_FAILED: select this with failure_category UNPLANNABLE when no valid plan
+  can be proposed because a required capability is absent from the closed tool set.
+  Runtime-discoverable inputs do not make a request unplannable. INVALID_OUTPUT and
+  PROVIDER_FAILURE are runtime-generated categories.
+For non-plan results, steps must be empty. Do not emit prose outside the schema.
 """
 
 
@@ -132,8 +137,8 @@ class PlannerProvider(Protocol):
         """Run the existing router policy and return transport-free routing data."""
         ...
 
-    def generate(self, messages: tuple[PlannerMessage, ...]) -> object:
-        """Invoke once and return content for legacy normalization. Never retry."""
+    def generate(self, messages: tuple[PlannerMessage, ...]) -> PlannerProposal:
+        """Invoke once and return a structured proposal. Never retry."""
         ...
 
 
@@ -184,19 +189,16 @@ class PlannerService:
         try:
             routing = self.provider.route(user_request)
         except Exception as exc:
-            return self._logged_result(planner_failure("provider", exc))
+            return self._logged_result(planner_failure(
+                PlanningFailureCategory.PROVIDER_FAILURE,
+                f"Planner provider failed ({type(exc).__name__}).",
+            ))
 
         if planner_input.operation == PlanningOperation.REVISE and routing.route in DIRECT_RESPONSE_ROUTES:
-            # A reclassification of the original request cannot discard a pending
-            # Controller-authorized revision. P2 still requires numbered steps.
+            # A reclassification cannot discard a Controller-authorized revision.
             routing = PlannerRouting("action", routing.domain, routing.confidence, routing.reason)
 
         log_planner("router", {"selected": vars(routing)}, enabled=self.show_raw_llm)
-        if routing.route in DIRECT_RESPONSE_ROUTES and planner_input.operation == PlanningOperation.CREATE:
-            return self._logged_result(normalize_planner_output(
-                "", planner_input, route=routing.route, confidence=routing.confidence,
-            ))
-
         filtered = filter_planner_tools(
             frozenset(planner_input.capabilities.available_tools), route=routing.route, domain=routing.domain,
             domain_tool_map=self.domain_tool_map, mutating_tools=self.mutating_tools,
@@ -210,9 +212,13 @@ class PlannerService:
             or "- No tool access allowed for this step",
         )
         try:
-            retrieval = retrieve(user_request) if retrieve is not None else planner_input.context.retrieval_messages
+            retrieval = (() if routing.route in DIRECT_RESPONSE_ROUTES else
+                         retrieve(user_request) if retrieve is not None else planner_input.context.retrieval_messages)
         except Exception as exc:
-            return self._logged_result(planner_failure("context retrieval", exc))
+            return self._logged_result(planner_failure(
+                PlanningFailureCategory.PROVIDER_FAILURE,
+                f"Planner context retrieval failed ({type(exc).__name__}).",
+            ))
         messages = (
             PlannerMessage("system", prompt),
             *(PlannerMessage("system", text) for text in retrieval),
@@ -223,13 +229,23 @@ class PlannerService:
             log_planner(f"prompt][{message.role}", message.content, enabled=self.show_raw_llm)
         try:
             content = self.provider.generate(messages)
+        except PlannerInvalidOutputError as exc:
+            return self._logged_result(planner_failure(
+                PlanningFailureCategory.INVALID_OUTPUT,
+                f"Planner output is invalid ({type(exc).__name__}).",
+            ))
         except Exception as exc:
-            return self._logged_result(planner_failure("provider", exc))
-        log_planner("raw", content, enabled=self.show_raw_llm)
-        return self._logged_result(normalize_planner_output(
+            return self._logged_result(planner_failure(
+                PlanningFailureCategory.PROVIDER_FAILURE,
+                f"Planner provider failed ({type(exc).__name__}).",
+            ))
+        raw = content.model_dump(mode="json") if isinstance(content, PlannerProposal) else content
+        log_planner("raw", raw, enabled=self.show_raw_llm)
+        return self._logged_result(normalize_planner_proposal(
             content, planner_input,
             route=routing.route,
             confidence=routing.confidence,
+            effective_tools=frozenset(filtered),
         ))
 
 
@@ -255,7 +271,7 @@ def planning_request_context(request: PlanningRequest) -> str:
             "This is REVISE, not initial planning. Revise unfinished work only. "
             "Do not repeat completed work. Use the failure reason, partial effects and evidence "
             "to explain why the previous approach cannot continue unchanged in your step definitions. "
-            "Do not change completed facts or perform retries. Return the legacy numbered steps only. "
+            "Do not change completed facts or perform retries. Return the structured result contract only. "
         )
     return instructions + "\n" + json.dumps(payload, ensure_ascii=True)
 

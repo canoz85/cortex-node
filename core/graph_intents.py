@@ -194,50 +194,6 @@ def planner_routing_decision(
 
     hard_decision: RoutingDecision | None = None
 
-    # info_tool = preferred_info_tool(text)
-    # if info_tool:
-    #     hard_decision = RoutingDecision(
-    #         route="info",
-    #         domain="general",
-    #         confidence=1.0,
-    #         enforced=False,
-    #         reason=info_tool,
-    #         needs_clarification=False,
-    #         source="hard_rule",
-    #     )
-
-    # if hard_decision is None:
-    #     # Optional: explicit domain override hard rule
-    #     # Reuse your existing _domain_decision behavior if needed.
-    #     intent = _workspace_intent(text)
-    #     if intent:
-    #         route_map = {
-    #             "LIST": "action:list_workspace",
-    #             "READ": "action:read_workspace",
-    #             "ANALYZE": "action:analyze_workspace",
-    #             "GENERATE": "action:generate_workspace",
-    #         }
-    #         hard_decision = RoutingDecision(
-    #             route=route_map[intent],
-    #             domain="general",
-    #             confidence=1.0,
-    #             enforced=False,
-    #             reason=f"{intent} workspace intent",
-    #             needs_clarification=False,
-    #             source="hard_rule",
-    #         )
-
-    # if hard_decision is None and _is_casual_chat(text):
-    #     hard_decision = RoutingDecision(
-    #         route="casual",
-    #         domain="general",
-    #         confidence=1.0,
-    #         enforced=False,
-    #         reason="casual chat",
-    #         needs_clarification=False,
-    #         source="hard_rule",
-    #     )
-
     llm_decision = None
     if hard_decision is None and router_llm is not None:
         llm_decision = _llm_route_decision(

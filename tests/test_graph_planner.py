@@ -13,6 +13,7 @@ from core.protocol.models import (
 from core.protocol.controller import CortexController
 from core.protocol.bridge import build_controller_input, build_execution_state
 from core.graph_state_machine import apply_controller_decision_to_state
+from core.planner_contract import PlannerProposal
 
 
 def authorize(state):
@@ -32,6 +33,11 @@ class DummyPlannerLLM:
 
     def with_structured_output(self, schema, method):
         def invoke(messages):
+            if schema is PlannerProposal:
+                self.invocations.append(messages)
+                if isinstance(self.text, Exception):
+                    raise self.text
+                return self.text
             self.routes.append(messages)
             return self.routing
         return SimpleNamespace(invoke=invoke)
@@ -58,16 +64,18 @@ def make_node(llm, rag):
     return lambda state: node(authorize(state))
 
 
-def test_current_numbered_plan_and_retrieval():
-    text = "1. Inspect – Use `list_files` to inspect.\n2. Write - Use `write_file` to create."
-    llm, rag = DummyPlannerLLM(text), DummyRAG()
+def test_structured_plan_and_retrieval():
+    proposal = {"result":"PLAN_PROPOSED","objective":"create","steps":[
+        {"step_id":"inspect","title":"Inspect","description":"Inspect","primary_tool":"list_files","dependencies":[]},
+        {"step_id":"write","title":"Write","description":"Write","primary_tool":"write_file","dependencies":["inspect"]}]}
+    llm, rag = DummyPlannerLLM(proposal), DummyRAG()
     state = {"messages": [HumanMessage(content="create a file")]}
     update = make_node(llm, rag)(state)
     result = update["planner_result"]
     assert result.outcome == PlannerOutcome.EXECUTION_PLAN
-    assert result.proposed_plan.objective == text
+    assert result.proposed_plan.objective == "create"
     assert [s.primary_tool for s in result.proposed_plan.steps] == ["list_files", "write_file"]
-    assert result.proposed_plan.steps[1].depends_on_step_ids == ("step-1",)
+    assert result.proposed_plan.steps[1].depends_on_step_ids == ("inspect",)
     assert rag.calls == [("create a file", 4)]
     assert [m.content for m in update["retrieval_messages"]] == ["retrieved context"]
     assert llm.invocations[0][1].content == "retrieved context"
@@ -75,26 +83,25 @@ def test_current_numbered_plan_and_retrieval():
     assert set(state) == {"messages"}
 
 
-def test_legacy_parser_skips_unmatched_lines_without_repair():
-    llm = DummyPlannerLLM("intro\n1. Inspect – Use `list_files`.\n2. malformed\n3. Verify - Use `read_file`.")
+def test_numbered_prose_is_invalid_output():
+    llm = DummyPlannerLLM("1. Inspect - Use list_files.")
     result = make_node(llm, DummyRAG())({"messages": [HumanMessage(content="inspect")]})["planner_result"]
-    assert [s.step_id for s in result.proposed_plan.steps] == ["step-1", "step-3"]
-    assert result.proposed_plan.steps[1].depends_on_step_ids == ("step-1",)
+    assert result.outcome == PlannerOutcome.FAILED
 
 
 @pytest.mark.parametrize("route", ["conversation", "clarify_domain"])
-def test_direct_routes_do_not_generate_or_retrieve(route):
-    llm, rag = DummyPlannerLLM("unused", route=route), DummyRAG()
+def test_direct_routes_require_explicit_structured_result(route):
+    llm, rag = DummyPlannerLLM({"result":"NO_PLAN_REQUIRED","message":"direct"}, route=route), DummyRAG()
     update = make_node(llm, rag)({"messages": [HumanMessage(content="hello")]})
     assert update["planner_result"].outcome == PlannerOutcome.DIRECT_RESPONSE
     assert update["retrieval_messages"] == []
-    assert llm.invocations == []
+    assert len(llm.invocations) == 1
     assert rag.calls == []
 
 
 @pytest.mark.parametrize("route,has_write", [("info", False), ("action", True)])
 def test_current_tool_filtering(route, has_write):
-    llm = DummyPlannerLLM("1. Inspect – Use `list_files`.", route=route)
+    llm = DummyPlannerLLM({"result":"PLAN_PROPOSED","steps":[{"step_id":"inspect","title":"Inspect","description":"Inspect","primary_tool":"list_files","dependencies":[]}]}, route=route)
     make_node(llm, DummyRAG())({"messages": [HumanMessage(content="inspect")]})
     prompt = llm.invocations[0][0].content
     tools = prompt.split("AVAILABLE TOOLS FOR THIS REQUEST", 1)[1].split("PLANNING RULES:", 1)[0]
@@ -105,10 +112,10 @@ def test_current_tool_filtering(route, has_write):
 
 
 def test_low_confidence_router_preserves_conversation_fallback():
-    llm, rag = DummyPlannerLLM("unused", confidence=0.5), DummyRAG()
+    llm, rag = DummyPlannerLLM({"result":"NO_PLAN_REQUIRED"}, confidence=0.5), DummyRAG()
     result = make_node(llm, rag)({"messages": [HumanMessage(content="inspect")]})["planner_result"]
     assert result.outcome == PlannerOutcome.DIRECT_RESPONSE
-    assert llm.invocations == []
+    assert len(llm.invocations) == 1
 
 
 def execution_state():
@@ -168,14 +175,14 @@ def test_router_provider_exception_is_failed_not_direct_response():
 
 
 def test_missing_router_retains_direct_fallback():
-    llm, rag = DummyPlannerLLM("unused"), DummyRAG()
+    llm, rag = DummyPlannerLLM({"result":"NO_PLAN_REQUIRED"}), DummyRAG()
     node = create_planner_node(planner_llm=llm, rag_service=rag, rag_top_k=4, tools_set=set())
     assert node(authorize({"messages": [HumanMessage(content="inspect")]}))["planner_result"].outcome == PlannerOutcome.DIRECT_RESPONSE
-    assert llm.invocations == []
+    assert len(llm.invocations) == 1
 
 
 def test_retrieval_is_per_invocation_not_shared_service_state():
-    llm, rag = DummyPlannerLLM("1. Inspect - Use list_files."), DummyRAG()
+    llm, rag = DummyPlannerLLM({"result":"PLAN_PROPOSED","steps":[{"step_id":"inspect","title":"Inspect","description":"Inspect","primary_tool":"list_files","dependencies":[]}]}), DummyRAG()
     node = make_node(llm, rag)
     first = node({"messages": [HumanMessage(content="first")]})
     llm.routing.route = "conversation"

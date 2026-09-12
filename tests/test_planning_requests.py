@@ -140,7 +140,11 @@ def test_both_sources_share_helper_and_capture_revision_facts(trigger):
 
 
 class FakeProvider:
-    def __init__(self, content="1. Inspect - Use list_files.", route="info"):
+    def __init__(self, content=None, route="info"):
+        if content is None:
+            content = {"result": "PLAN_PROPOSED", "objective": "Inspect", "steps": [
+                {"step_id": "inspect", "title": "Inspect", "description": "Inspect workspace", "primary_tool": "list_files", "dependencies": []}
+            ]}
         self.content = content
         self.routing = PlannerRouting(route, "workspace", 0.99, "fixture")
         self.messages = []
@@ -188,7 +192,9 @@ def test_revise_prompt_contains_facts_and_enforced_ceiling(trigger):
     assert request.model_dump_json() == before
 
 
-@pytest.mark.parametrize("content", ["1. Inspect - Use list_files.", "malformed"])
+@pytest.mark.parametrize("content", [{"result": "PLAN_PROPOSED", "objective": "Inspect", "steps": [
+    {"step_id": "inspect", "title": "Inspect", "description": "Inspect workspace", "primary_tool": "list_files", "dependencies": []}
+]}, "malformed"])
 @pytest.mark.parametrize("trigger", list(ReplanTrigger))
 def test_worker_consumption_through_controller_planner_controller(trigger, content):
     state = active_state(trigger)

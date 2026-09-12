@@ -1,9 +1,12 @@
 """LangChain transport for the current Planner and its existing intent router."""
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.exceptions import OutputParserException
 
 from core.graph_intents import planner_routing_decision
 from core.planner import PlannerMessage, PlannerRouting
+from core.planner_contract import PlannerInvalidOutputError, PlannerProposal
+from pydantic import ValidationError
 
 
 class LangChainPlannerProvider:
@@ -19,12 +22,17 @@ class LangChainPlannerProvider:
         )
         return PlannerRouting(decision.route, decision.domain, decision.confidence, decision.reason)
 
-    def generate(self, messages: tuple[PlannerMessage, ...]) -> object:
+    def generate(self, messages: tuple[PlannerMessage, ...]) -> PlannerProposal:
         provider_messages = [
             HumanMessage(content=message.content) if message.role == "human"
             else SystemMessage(content=message.content)
             for message in messages
         ]
-        # Exceptions cross the port to the service's existing FAILED result path.
-        # No corrective calls or implicit retries.
-        return self.planner_llm.invoke(provider_messages).content
+        structured = self.planner_llm.with_structured_output(
+            PlannerProposal, method="json_schema"
+        )
+        try:
+            value = structured.invoke(provider_messages)
+            return PlannerProposal.model_validate(value)
+        except (ValidationError, OutputParserException) as exc:
+            raise PlannerInvalidOutputError("Planner output failed schema validation") from exc

@@ -12,6 +12,7 @@ from .enums import (
     StepStatus,
     PlanningOperation,
     ReplanTrigger,
+    PlanningFailureCategory,
     WorkerRole,
 )
 
@@ -67,6 +68,7 @@ __all__ = [
     "StepStatus",
     "PlanningOperation",
     "ReplanTrigger",
+    "PlanningFailureCategory",
     "WorkerRole",
 
     # Models
