@@ -61,9 +61,7 @@ def test_run_prompt_handles_tool_flow_and_updates_summary(capsys):
     history, summary = run_prompt(app, "list files", history=[HumanMessage(content="previous")], rolling_summary="old")
 
     assert summary == "final-summary"
-    assert len(history) == 5
-    assert isinstance(history[-1], AIMessage)
-    assert history[-1].content == "Completed"
+    assert [message.content for message in history] == ["previous", "list files"]
 
     output = capsys.readouterr().out
     assert "[planner:action]" in output
@@ -82,7 +80,7 @@ def test_run_prompt_emits_pseudo_tool_stop_warning(capsys):
 
     history, summary = run_prompt(app, "do task")
 
-    assert len(history) == 2
+    assert [message.content for message in history] == ["do task"]
     assert summary == ""
     output = capsys.readouterr().out
     assert "halted without executing those actions" in output

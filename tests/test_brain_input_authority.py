@@ -140,48 +140,43 @@ def test_satisfied_step_completes_with_current_evidence_and_later_tools_still_av
         assert task["step_id"] == "s1"
         assert context.context.user_request not in messages[-1].content
         assert context.active_plan.steps[1].description not in messages[-1].content
-        data = next(m.content for m in messages if m.content.startswith("Execution evidence v1:"))
-        evidence = json.loads(data.split("\n", 1)[1])
         return AIMessage(content="", tool_calls=[{
             "name": "brain_step_completed", "id": "complete",
-            "args": {"message": "Workspace inspected", "evidence_refs": [evidence["current_attempts"][0]["evidence_ref"]]},
+            "args": {"message": "Workspace inspected"},
         }])
 
     model.reply = complete
     outcome = service.run(context)
     assert len(model.calls) == 1
     assert outcome.kind == BrainOutcomeKind.STEP_COMPLETED
-    assert outcome.completion_evidence.tool_request_ids == ("listed",)
+    assert outcome.completion_evidence.tool_request_ids == ()
     assert outcome.tool_request is None
     assert service.provider.tools_set == {"list_files", "read_file"}
 
 
-@pytest.mark.parametrize("invalid_ref", ["s1", "list_files", "previous_reference"])
-def test_prior_facts_inform_new_task_but_cannot_be_cited_as_current_evidence(invalid_ref):
+def test_prior_facts_inform_new_task_without_model_selected_evidence_ids():
     service, model, context = setup()
     context = context.model_copy(update={"tool_execution_history": (ToolExecutionRecord(
         step_id="s1", tool_name="list_files", arguments={"path": "."},
         result=ToolResult(request_id="listed", success=True, message="Listed", data={"entries": ["c.py"]}),
     ),)})
-    # Capture an actual previous-step ref, then prove it is not remapped later.
-    service.run(context)
-    evidence_text = next(m.content for m in model.calls[0] if m.content.startswith("Execution evidence v1:"))
-    previous_ref = json.loads(evidence_text.split("\n", 1)[1])["current_attempts"][0]["evidence_ref"]
     context = context.model_copy(update={
         "active_step": context.active_plan.steps[1],
         "cursor": context.cursor.model_copy(update={"step_id": "s2"}),
     })
     model.reply = AIMessage(content="", tool_calls=[{
-        "name": "brain_step_completed", "id": "invalid",
-        "args": {"message": "Already done", "evidence_refs": [
-            previous_ref if invalid_ref == "previous_reference" else invalid_ref,
-        ]},
+        "name": "brain_step_completed", "id": "complete",
+        "args": {"message": "Already done"},
     }])
     outcome = service.run(context)
-    assert outcome.error_code == "unknown_step_evidence"
+    assert outcome.kind == BrainOutcomeKind.STEP_COMPLETED
     data = next(m.content for m in model.calls[-1] if m.content.startswith("Execution evidence v1:"))
     evidence = json.loads(data.split("\n", 1)[1])
     assert evidence["current_attempts"] == []
     assert evidence["prior_facts"][0]["evidence"] == {"entries": ["c.py"]}
     assert "evidence_ref" not in evidence["prior_facts"][0]
-    assert json.loads(model.calls[-1][-1].content.split("\n", 1)[1])["step_id"] == "s2"
+    active_step = next(
+        message.content for message in model.calls[-1]
+        if message.content.startswith("Active step:\n")
+    )
+    assert json.loads(active_step.split("\n", 1)[1])["step_id"] == "s2"

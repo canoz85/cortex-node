@@ -133,20 +133,14 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
                             "name": "read_file", "args": {"path": "a.py"}, "id": "native-call-id",
                         }])
                     return AIMessage(content='{"name":"read_file","arguments":{"path":"a.py"}}')
-                evidence = next(message.content for message in messages if message.content.startswith("Execution evidence v1:"))
-                payload = json.loads(evidence.split("\n", 1)[1])
                 if supports_native_tool_calls:
                     return AIMessage(content="", tool_calls=[{
                         "name": "brain_step_completed",
-                        "args": {
-                            "message": "File read",
-                            "evidence_refs": [payload["current_attempts"][0]["evidence_ref"]],
-                        },
+                        "args": {"message": "File read"},
                         "id": "native-completion-id",
                     }])
                 return AIMessage(content=json.dumps({
                     "kind": "STEP_COMPLETED", "step_id": "s1", "message": "File read",
-                    "evidence_refs": [payload["current_attempts"][0]["evidence_ref"]],
                 }))
             return AIMessage(content="File contents reported")
 
@@ -239,8 +233,7 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
             assert '"parameters"' in calls[0][1]
             assert '"path"' in calls[0][1]
         assert "Execution evidence v1:" in calls[-1][1]
-        completion_outcome = next(state["brain_result"] for state in snapshots if state.get("brain_result") and state["brain_result"].completion_evidence is not None)
-        assert completion_outcome.completion_evidence.tool_request_ids == (tool_calls[0].request_id,)
+        assert protocol.completion_provenance[0].tool_request_ids == (tool_calls[0].request_id,)
         assert protocol.completed_step_ids == ("s1",)
         assert protocol.retry.retry_count == 0
         assert protocol.active_plan.steps[0].status == StepStatus.COMPLETED

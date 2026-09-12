@@ -29,6 +29,17 @@ def eligible_records(identity, plan, records):
                  and r.plan_id == plan.plan_id and r.plan_revision == plan.revision)
 
 
+def completion_provenance_records(identity, plan, step, records):
+    """Records owned by one accepted step, preserving capture/history order.
+
+    Retry records intentionally accumulate. ToolExecutionRecord has no accepted
+    record-level attempt identity, so this predicate must not imply one.
+    """
+    accepted_step(plan, step)
+    return tuple(record for record in eligible_records(identity, plan, records)
+                 if record.step_id == step.step_id)
+
+
 def accepted_step(plan, step, cursor=None):
     if plan is None:
         raise ValueError("active step requires accepted plan")

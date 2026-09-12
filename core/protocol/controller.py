@@ -28,10 +28,12 @@ from .models import (
     PlanningCapabilities,
     PlanningRequest,
     RetryMetadata,
+    StepCompletionEvidence,
     ToolRequest,
     ToolResult,
 )
-from .completion_identity import requirement_scope, evidence_identity, plan_validation_identity, eligible_records, accepted_step, binding_for
+from .completion_identity import (requirement_scope, evidence_identity, plan_validation_identity,
+    eligible_records, completion_provenance_records, accepted_step, binding_for)
 
 
 class CortexController:
@@ -408,7 +410,31 @@ class CortexController:
         if brain_result is None:
             raise RuntimeError(
                 "Controller dispatched to Brain without BrainResult."
-        )
+            )
+
+        if brain_result.outcome == BrainOutcome.STEP_COMPLETED:
+            plan, active_step = self._validate_active_step(
+                controller_input, transition="completion provenance binding",
+            )
+            semantic = brain_result.completion_evidence
+            if semantic is not None and semantic.step_id != active_step.step_id:
+                raise ValueError("brain outcome step does not match active step")
+            records = completion_provenance_records(
+                controller_input.identity, plan, active_step,
+                controller_input.tool_execution_history,
+            )
+            bound = StepCompletionEvidence(
+                execution_id=controller_input.identity.execution_id,
+                plan_id=plan.plan_id,
+                plan_revision=plan.revision,
+                step_id=active_step.step_id,
+                summary=(semantic.summary if semantic is not None else brain_result.message)
+                or "Step completed.",
+                tool_request_ids=tuple(record.result.request_id for record in records),
+                evidence_id=evidence_identity(records),
+            )
+            brain_result = brain_result.model_copy(update={"completion_evidence": bound})
+            controller_input = controller_input.model_copy(update={"brain_result": brain_result})
 
         # Typed scope identifiers are authoritative; message text and suggested
         # status have no role in deciding what happened.
@@ -1246,6 +1272,7 @@ class CortexController:
                 reason="Generate final answer.",
                 cursor=cursor,
                 completed_step_id=current.step_id if current else None,
+                completion_evidence=controller_input.brain_result.completion_evidence,
                 next_step_id=None,
                 clear_active_step=True,
                 retry=retry,
@@ -1266,6 +1293,7 @@ class CortexController:
             reason="Advance to next executable step.",
             cursor=cursor,
             completed_step_id=current.step_id if current else None,
+            completion_evidence=controller_input.brain_result.completion_evidence,
             next_step_id=next_step.step_id,
             retry=retry,
         )

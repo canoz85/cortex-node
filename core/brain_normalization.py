@@ -13,7 +13,6 @@ from collections.abc import Mapping
 
 from pydantic import BaseModel, ValidationError
 
-from core.brain_evidence import EvidenceSnapshot, evidence_scope
 from core.protocol.enums import BrainOutcomeKind as Kind, StepStatus
 from core.protocol.models import (
     BrainInput, BrainOutcome, BrainUsage, ReplanRequest,
@@ -143,8 +142,7 @@ def _native_call(call) -> tuple[str, dict]:
 
 
 def _native_outcome(
-    calls, brain_input: BrainInput, allowed_tools: set[str], *,
-    evidence_snapshot: EvidenceSnapshot | None = None,
+    calls, brain_input: BrainInput, allowed_tools: set[str],
 ) -> BrainOutcome:
     if not isinstance(calls, (list, tuple)) or len(calls) != 1:
         raise InvalidBrainOutput("exactly_one_tool_call_required")
@@ -155,21 +153,12 @@ def _native_outcome(
         return _tool_outcome(calls, brain_input, allowed_tools)
     step_id = brain_input.active_step.step_id
     if name == "brain_step_completed":
-        _only_fields(arguments, {"message", "evidence_refs"})
+        _only_fields(arguments, {"message"})
         summary = _text(arguments.get("message"), "message")
-        refs = arguments.get("evidence_refs")
-        if not isinstance(refs, list) or any(not isinstance(item, str) for item in refs):
-            raise InvalidBrainOutput("invalid_evidence_refs")
-        if evidence_snapshot is not None and evidence_snapshot.scope != evidence_scope(brain_input):
-            raise InvalidBrainOutput("evidence_snapshot_scope_mismatch")
-        bindings = dict(evidence_snapshot.bindings) if evidence_snapshot is not None else {}
-        if set(refs) - bindings.keys():
-            raise InvalidBrainOutput("unknown_step_evidence")
-        ids = tuple(bindings[ref] for ref in refs)
         return BrainOutcome(
             outcome=Kind.STEP_COMPLETED, step_id=step_id, message=summary,
             completion_evidence=StepCompletionEvidence(
-                step_id=step_id, summary=summary, tool_request_ids=ids,
+                step_id=step_id, summary=summary,
             ),
             proposed_step_status=StepStatus.COMPLETED,
         )
@@ -197,7 +186,6 @@ def _native_outcome(
 
 def _structured(
     payload, brain_input: BrainInput, allowed_tools: set[str], *, allow_text_tool_calls: bool,
-    evidence_snapshot: EvidenceSnapshot | None = None,
 ) -> BrainOutcome:
     if not isinstance(payload, dict):
         raise InvalidBrainOutput("outcome_must_be_object")
@@ -232,21 +220,12 @@ def _structured(
     if kind == Kind.FINAL_ANSWER_READY:
         raise InvalidBrainOutput("brain_final_answer_unsupported")
     if kind == Kind.STEP_COMPLETED:
-        _only_fields(payload, {"kind", "step_id", "message", "evidence_refs"})
+        _only_fields(payload, {"kind", "step_id", "message"})
         step_id = _step_id(payload, brain_input)
         summary = _text(payload.get("message"), "message")
-        refs = payload.get("evidence_refs", [])
-        if not isinstance(refs, list) or any(not isinstance(item, str) for item in refs):
-            raise InvalidBrainOutput("invalid_evidence_refs")
-        if evidence_snapshot is not None and evidence_snapshot.scope != evidence_scope(brain_input):
-            raise InvalidBrainOutput("evidence_snapshot_scope_mismatch")
-        bindings = dict(evidence_snapshot.bindings) if evidence_snapshot is not None else {}
-        if set(refs) - bindings.keys():
-            raise InvalidBrainOutput("unknown_step_evidence")
-        ids = tuple(bindings[ref] for ref in refs)
         return BrainOutcome(
             outcome=kind, step_id=step_id, message=summary,
-            completion_evidence=StepCompletionEvidence(step_id=step_id, summary=summary, tool_request_ids=ids),
+            completion_evidence=StepCompletionEvidence(step_id=step_id, summary=summary),
             proposed_step_status=StepStatus.COMPLETED,
         )
     if kind == Kind.REPLAN_REQUESTED:
@@ -290,7 +269,6 @@ def _content_text(content) -> str:
 
 def _text_outcome(
     text: str, brain_input: BrainInput, allowed_tools: set[str], *, allow_text_tool_calls: bool,
-    evidence_snapshot: EvidenceSnapshot | None = None,
 ) -> BrainOutcome:
     stripped = text.strip()
     if not stripped:
@@ -308,7 +286,7 @@ def _text_outcome(
         has_contract_fields = isinstance(payload, dict) and bool(
             payload.keys() & {"kind", "tool_calls", "name", "function"}
         )
-        return _structured(payload, brain_input, allowed_tools, allow_text_tool_calls=allow_text_tool_calls, evidence_snapshot=evidence_snapshot)
+        return _structured(payload, brain_input, allowed_tools, allow_text_tool_calls=allow_text_tool_calls)
     # Preserve complete keyword-only function text from non-tool-capable models.
     # Never search within prose or guess arguments from a partial call.
     if re.match(r"^[A-Za-z_]\w*\s*\(", candidate):
@@ -331,7 +309,6 @@ def _text_outcome(
 
 def normalize_brain_output(
     raw: object, brain_input: BrainInput, allowed_tools: set[str], *, allow_text_tool_calls: bool = False,
-    evidence_snapshot: EvidenceSnapshot | None = None,
 ) -> BrainOutcome:
     """Normalize once. Text tool compatibility requires explicit provider opt-in."""
     try:
@@ -343,7 +320,7 @@ def normalize_brain_output(
                 parsed = parsed.model_dump(mode="json")
             if _field(raw.get("raw"), "tool_calls"):
                 raise InvalidBrainOutput("ambiguous_structured_and_native_output")
-            return _structured(parsed, brain_input, allowed_tools, allow_text_tool_calls=allow_text_tool_calls, evidence_snapshot=evidence_snapshot)
+            return _structured(parsed, brain_input, allowed_tools, allow_text_tool_calls=allow_text_tool_calls)
         if isinstance(raw, Mapping) and "choices" in raw:
             if len(raw["choices"]) != 1:
                 raise InvalidBrainOutput("ambiguous_provider_choices")
@@ -351,7 +328,7 @@ def normalize_brain_output(
         elif isinstance(raw, Mapping) and isinstance(raw.get("message"), Mapping):
             raw = raw["message"]
         if isinstance(raw, Mapping) and any(key in raw for key in ("kind", "name", "function")):
-            return _structured(dict(raw), brain_input, allowed_tools, allow_text_tool_calls=allow_text_tool_calls, evidence_snapshot=evidence_snapshot)
+            return _structured(dict(raw), brain_input, allowed_tools, allow_text_tool_calls=allow_text_tool_calls)
         if _field(raw, "invalid_tool_calls"):
             raise InvalidBrainOutput("invalid_native_tool_call")
         native = _field(raw, "tool_calls")
@@ -360,8 +337,8 @@ def normalize_brain_output(
         # LangChain may mirror the original native calls in additional_kwargs.
         # Accept the mirror only if both representations normalize identically.
         if native and encoded_native:
-            left = _native_outcome(native, brain_input, allowed_tools, evidence_snapshot=evidence_snapshot)
-            right = _native_outcome(encoded_native, brain_input, allowed_tools, evidence_snapshot=evidence_snapshot)
+            left = _native_outcome(native, brain_input, allowed_tools)
+            right = _native_outcome(encoded_native, brain_input, allowed_tools)
             if left != right:
                 raise InvalidBrainOutput("conflicting_native_tool_calls")
         calls = native or encoded_native
@@ -370,12 +347,9 @@ def normalize_brain_output(
             text = _content_text("" if content is None else content).strip()
             if text.startswith(("{", "[", "```")) or re.match(r"^[A-Za-z_]\w*\s*\(", text):
                 raise InvalidBrainOutput("ambiguous_native_and_structured_output")
-            return _native_outcome(
-                calls, brain_input, allowed_tools, evidence_snapshot=evidence_snapshot,
-            )
+            return _native_outcome(calls, brain_input, allowed_tools)
         return _text_outcome(
             _content_text(content), brain_input, allowed_tools, allow_text_tool_calls=allow_text_tool_calls,
-            evidence_snapshot=evidence_snapshot,
         )
     except (ValueError, TypeError, KeyError, AttributeError, SyntaxError, RecursionError) as exc:
         code = str(exc) if isinstance(exc, InvalidBrainOutput) else "malformed_model_output"

@@ -168,7 +168,10 @@ def test_new_revision_resolves_again_and_citations_are_unchanged():
     assert len(frozen) == 2 and frozen[0].scope_id != frozen[1].scope_id
     assert frozen[1].required_item_ids == ("c",) and provider.resolve_calls == 2
     assert ctx.brain_result.completion_evidence.tool_request_ids == ()
-    assert set(StepCompletionEvidence.model_fields) == {"step_id", "summary", "tool_request_ids"}
+    assert set(StepCompletionEvidence.model_fields) == {
+        "execution_id", "plan_id", "plan_revision", "step_id", "summary",
+        "tool_request_ids", "evidence_id",
+    }
 
 
 def test_semantic_step_behavior_unchanged():

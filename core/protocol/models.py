@@ -363,11 +363,15 @@ class BrainInput(ImmutableProtocolModel):
 
 
 class StepCompletionEvidence(ImmutableProtocolModel):
-    """Brain's step-scoped claim; Controller alone accepts completion."""
+    """Runtime-bound provenance for a semantic Brain completion claim."""
 
     step_id: str = Field(min_length=1)
     summary: str = Field(min_length=1)
     tool_request_ids: tuple[str, ...] = Field(default_factory=tuple)
+    execution_id: str | None = None
+    plan_id: str | None = None
+    plan_revision: int | None = Field(default=None, ge=1)
+    evidence_id: str | None = None
 
 
 class BrainUsage(ImmutableProtocolModel):
@@ -817,6 +821,7 @@ class ProtocolVisibleState(ImmutableProtocolModel):
     active_step: ExecutionStep | None = None
     pending_tool_request: ToolRequest | None = None
     completed_step_ids: StepIdList = Field(default_factory=tuple)
+    completion_provenance: tuple[StepCompletionEvidence, ...] = ()
     accepted_event_history: EventHistory = Field(default_factory=tuple)
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
     async_policy: AsyncJobPolicy = Field(default_factory=AsyncJobPolicy)
@@ -903,6 +908,7 @@ class ControllerDecision(ImmutableProtocolModel):
 
     # Step transition
     completed_step_id: str | None = None
+    completion_evidence: StepCompletionEvidence | None = None
     failed_step_id: str | None = None
     failure_reason: str | None = None
     next_step_id: str | None = None

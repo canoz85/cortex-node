@@ -40,10 +40,10 @@ def brain_input(*, direct=False, final=False, retry_count=0, max_retries=1):
     )
 
 
-def normalize(raw, context=None, *, evidence_snapshot=None):
+def normalize(raw, context=None):
     return normalize_brain_output(
         raw, context or brain_input(), {"read_file", "write_file", "list_files"},
-        allow_text_tool_calls=True, evidence_snapshot=evidence_snapshot,
+        allow_text_tool_calls=True,
     )
 
 
@@ -191,12 +191,12 @@ def evidence_prompt(context, *, system_prompt="active", output_protocol="contrac
         system_prompt=system_prompt, brain_input=context, retrieval_messages=(),
         instruction_brief=None, output_protocol=output_protocol,
     )
-    message = next(message for message in messages if message.evidence_snapshot is not None)
-    return json.loads(message.content.split("\n", 1)[1]), message.evidence_snapshot
+    message = next(message for message in messages if message.content.startswith("Execution evidence v1:"))
+    return json.loads(message.content.split("\n", 1)[1])
 
 
-def completion(refs):
-    return {"kind": "STEP_COMPLETED", "step_id": "s1", "message": "Done", "evidence_refs": refs}
+def completion():
+    return {"kind": "STEP_COMPLETED", "step_id": "s1", "message": "Done"}
 
 
 def native_action(name, arguments):
@@ -204,57 +204,26 @@ def native_action(name, arguments):
 
 
 @pytest.mark.parametrize("representation", ["text", "mapping", "structured", "blocks"])
-@pytest.mark.parametrize("success", [True, False])
-def test_valid_evidence_ref_resolves_to_domain_id(representation, success):
-    context = evidence_context(success=success)
-    payload, snapshot = evidence_prompt(context)
-    ref = payload["current_attempts"][0]["evidence_ref"]
-    assert ref.startswith("e1-")
+def test_completion_contract_needs_only_a_semantic_message(representation):
+    context = evidence_context()
+    payload = evidence_prompt(context)
     assert "request_id" not in payload["current_attempts"][0]
-    assert evidence_prompt(context) == (payload, snapshot)
-    response = completion([ref])
+    assert "evidence_ref" not in payload["current_attempts"][0]
+    response = completion()
     raw = {
         "text": json.dumps(response),
         "mapping": response,
         "structured": {"parsing_error": None, "parsed": response},
         "blocks": AIMessage(content=[{"type": "text", "text": json.dumps(response)}]),
     }[representation]
-    result = normalize(raw, context, evidence_snapshot=snapshot)
+    result = normalize(raw, context)
     assert result.kind == Kind.STEP_COMPLETED
-    assert result.completion_evidence.tool_request_ids == ("req1",)
+    assert result.completion_evidence.tool_request_ids == ()
 
 
-@pytest.mark.parametrize("success", [True, False])
-def test_completion_evidence_is_scoped_to_the_active_step(success):
-    context = evidence_context(success=success)
-    payload, original = evidence_prompt(context)
-    ref = payload["current_attempts"][0]["evidence_ref"]
-    record = context.tool_execution_history[0].model_copy(update={"step_id": "s0"})
-    context = context.model_copy(update={"tool_execution_history": (record,)})
-    payload, snapshot = evidence_prompt(context)
-    assert payload["current_attempts"] == []
-    assert "evidence_ref" not in payload["prior_facts" if success else "prior_failures"][0]
-    assert normalize(completion([ref]), context, evidence_snapshot=snapshot).error_code == "unknown_step_evidence"
-    # Even supplying the old map cannot authorize it for a different active step.
-    other_step = context.active_step.model_copy(update={"step_id": "s2"})
-    other = context.model_copy(update={"active_step": other_step})
-    response = {**completion([ref]), "step_id": "s2"}
-    assert normalize(response, other, evidence_snapshot=original).error_code == "evidence_snapshot_scope_mismatch"
-
-
-@pytest.mark.parametrize("refs", [["invented"], ["e1"], ["req1"]])
-def test_unknown_evidence_ref_fails_closed(refs):
-    context = evidence_context()
-    _, snapshot = evidence_prompt(context)
-    result = normalize(completion(refs), context, evidence_snapshot=snapshot)
-    assert result.kind == Kind.INVALID_OUTPUT
-    assert result.error_code == "unknown_step_evidence"
-    assert result.completion_evidence is None
-
-
-@pytest.mark.parametrize("refs", [None, "e1", [1], [True], [{}]])
-def test_malformed_evidence_refs_fail_closed(refs):
-    assert normalize(completion(refs)).error_code == "invalid_evidence_refs"
+def test_primary_completion_contract_rejects_legacy_evidence_refs():
+    response = {**completion(), "evidence_refs": ["opaque"]}
+    assert normalize(response).error_code == "unexpected_envelope_fields"
 
 
 def test_domain_request_ids_are_no_longer_accepted_in_model_contract():
@@ -262,88 +231,17 @@ def test_domain_request_ids_are_no_longer_accepted_in_model_contract():
     assert normalize(payload, evidence_context()).error_code == "unexpected_envelope_fields"
 
 
-def test_multiple_evidence_refs_preserve_selection_and_order():
-    context = evidence_context(count=3)
-    payload, snapshot = evidence_prompt(context)
-    refs = [item["evidence_ref"] for item in payload["current_attempts"]]
-    result = normalize(completion([refs[2], refs[0]]), context, evidence_snapshot=snapshot)
-    assert result.completion_evidence.tool_request_ids == ("req3", "req1")
-
-
-def test_one_unknown_ref_rejects_the_entire_completion():
-    context = evidence_context()
-    payload, snapshot = evidence_prompt(context)
-    ref = payload["current_attempts"][0]["evidence_ref"]
-    result = normalize(completion([ref, "invented"]), context, evidence_snapshot=snapshot)
-    assert result.error_code == "unknown_step_evidence"
-    assert result.completion_evidence is None
-
-
-def test_empty_refs_allow_reasoning_only_completion():
-    result = normalize(completion([]))
+def test_reasoning_only_completion_requires_no_evidence_identifiers():
+    result = normalize(completion())
     assert result.kind == Kind.STEP_COMPLETED
     assert result.completion_evidence.tool_request_ids == ()
 
 
-@pytest.mark.parametrize("change", ["history", "retry", "cursor", "execution", "prompt", "contract"])
-def test_refs_from_another_prompt_snapshot_do_not_resolve(change):
-    context = evidence_context()
-    payload, _ = evidence_prompt(context)
-    old_ref = payload["current_attempts"][0]["evidence_ref"]
-    kwargs = {}
-    if change == "history":
-        context = evidence_context(count=2)
-    elif change == "retry":
-        context = context.model_copy(update={"retry": context.retry.model_copy(update={"retry_count": 1})})
-    elif change == "cursor":
-        context = context.model_copy(update={"cursor": context.cursor.model_copy(update={"controller_iteration": 2})})
-    elif change == "execution":
-        context = context.model_copy(update={"identity": context.identity.model_copy(update={"execution_id": "another"})})
-    elif change == "prompt":
-        kwargs["system_prompt"] = "different instructions"
-    else:
-        kwargs["output_protocol"] = "different contract"
-    _, snapshot = evidence_prompt(context, **kwargs)
-    assert normalize(completion([old_ref]), context, evidence_snapshot=snapshot).error_code == "unknown_step_evidence"
-
-
 def test_only_visible_current_step_records_receive_refs():
     context = evidence_context(count=25)
-    payload, snapshot = evidence_prompt(context)
+    payload = evidence_prompt(context)
     assert len(payload["current_attempts"]) == 24
-    assert tuple(request_id for _, request_id in snapshot.bindings) == tuple(f"req{i}" for i in range(2, 26))
-    assert all("evidence_ref" in record for record in payload["current_attempts"])
-
-
-def test_nonempty_refs_require_a_captured_prompt_snapshot():
-    context = evidence_context()
-    payload, _ = evidence_prompt(context)
-    ref = payload["current_attempts"][0]["evidence_ref"]
-    assert normalize(completion([ref]), context).error_code == "unknown_step_evidence"
-
-
-def test_provider_resolves_captured_refs_without_rebuilding_mutated_history():
-    context = evidence_context()
-
-    class MutatingModel:
-        def invoke(self, messages):
-            evidence = next(m.content for m in messages if m.content.startswith("Execution evidence v1:"))
-            payload = json.loads(evidence.split("\n", 1)[1])
-            ref = payload["current_attempts"][0]["evidence_ref"]
-            record = context.tool_execution_history[0]
-            replacement = record.model_copy(update={
-                "result": record.result.model_copy(update={"request_id": "replacement"}),
-            })
-            # Deliberately bypass the frozen model to simulate a hostile state
-            # replacement while the provider call is in flight.
-            object.__setattr__(context, "tool_execution_history", (replacement,))
-            return native_action("brain_step_completed", {"message": "Done", "evidence_refs": [ref]})
-
-    model = MutatingModel()
-    provider = LangChainBrainProvider(brain_llm=model, tool_brain_llm=model, tools_set={"read_file"})
-    result = BrainService(provider=provider, agent_system_prompt="active", casual_system_prompt="casual").run(context)
-    assert context.tool_execution_history[0].result.request_id == "replacement"
-    assert result.completion_evidence.tool_request_ids == ("req1",)
+    assert all("evidence_ref" not in record and "request_id" not in record for record in payload["current_attempts"])
 
 
 @pytest.mark.parametrize("kind", list(Kind))
@@ -442,12 +340,12 @@ class SequenceModel:
 
 
 @pytest.mark.parametrize("first_text", [
-    'brain_step_completed(message="Do not reuse me", evidence_refs=["invented"])',
+    'brain_step_completed(message="Do not reuse me")',
     "I have completed the step.",
 ])
 @pytest.mark.parametrize("retry", [False, True])
 def test_native_compliance_uses_bound_model_and_only_native_response(first_text, retry):
-    native = native_action("brain_step_completed", {"message": "Native completion", "evidence_refs": []})
+    native = native_action("brain_step_completed", {"message": "Native completion"})
     bound = SequenceModel(*([AIMessage(content=first_text), native] if retry else [native]))
     unbound = FakeModel(RuntimeError("must not invoke unbound model"))
     provider = LangChainBrainProvider(brain_llm=unbound, tool_brain_llm=bound, tools_set={"read_file"})
@@ -467,11 +365,12 @@ def test_native_compliance_uses_bound_model_and_only_native_response(first_text,
         assert "Do not write function-call syntax as text" in instruction
         assert "Return exactly one native tool call" in instruction
         assert "currently bound executable or lifecycle tools" in instruction
+        assert "evidence_refs were invalid" not in instruction
         assert first_text not in instruction
 
 
 @pytest.mark.parametrize("name, arguments", [
-    ("brain_step_completed", 'message="Done", evidence_refs=[]'),
+    ("brain_step_completed", 'message="Done"'),
     ("brain_step_failed", 'message="Failed"'),
     ("brain_replan_requested", 'reason="Changed", constraints=[]'),
 ])
@@ -514,7 +413,7 @@ def test_compliance_retry_exception_returns_provider_failure():
     (ValueError("structured output validation failed"), Kind.PROVIDER_FAILURE),
     (AIMessage(content=""), Kind.INVALID_OUTPUT),
     (AIMessage(content='{"kind":"STEP_COMPLETED",'), Kind.INVALID_OUTPUT),
-    (native_action("brain_step_completed", {"message": "Done", "evidence_refs": []}), Kind.STEP_COMPLETED),
+    (native_action("brain_step_completed", {"message": "Done"}), Kind.STEP_COMPLETED),
 ])
 def test_provider_invocation_retries_only_missing_native_calls(reply, kind):
     model = FakeModel(reply)
@@ -620,7 +519,7 @@ def test_tool_output_schema_cannot_redefine_model_facing_completion_contract(sup
         "rendered_output": conflicting_source,
     })})
     context = context.model_copy(update={"tool_execution_history": (record,)})
-    model = FakeModel(AIMessage(content=json.dumps(completion([]))))
+    model = FakeModel(AIMessage(content=json.dumps(completion())))
     provider = LangChainBrainProvider(
         brain_llm=model, tool_brain_llm=model, tools_set={"read_file"},
         supports_native_tool_calls=supports_native_tool_calls,
@@ -642,7 +541,7 @@ def test_tool_output_schema_cannot_redefine_model_facing_completion_contract(sup
         assert '{"kind":"STEP_COMPLETED"' not in contract
     else:
         example = next(line for line in contract.splitlines() if line.startswith('{"kind":"STEP_COMPLETED"'))
-        assert set(json.loads(example)) == {"kind", "step_id", "message", "evidence_refs"}
+        assert set(json.loads(example)) == {"kind", "step_id", "message"}
 
 
 @pytest.mark.parametrize("supports_native_tool_calls", [True, False])
@@ -720,7 +619,7 @@ def test_non_tool_json_outcomes_remain_for_non_native_compatibility(payload, kin
 
 
 @pytest.mark.parametrize(("name", "arguments", "kind"), [
-    ("brain_step_completed", {"message": "line one\nline two", "evidence_refs": []}, Kind.STEP_COMPLETED),
+    ("brain_step_completed", {"message": "line one\nline two"}, Kind.STEP_COMPLETED),
     ("brain_step_failed", {"message": "cannot continue"}, Kind.STEP_FAILED),
     ("brain_replan_requested", {"reason": "path moved", "constraints": ["use the new path"]}, Kind.REPLAN_REQUESTED),
 ])
@@ -733,20 +632,16 @@ def test_reserved_native_lifecycle_actions_derive_active_step(name, arguments, k
         assert result.message == "line one\nline two"
 
 
-def test_native_lifecycle_evidence_refs_are_strictly_validated():
-    context = evidence_context()
-    payload, snapshot = evidence_prompt(context)
-    ref = payload["current_attempts"][0]["evidence_ref"]
-    accepted = normalize_brain_output(
-        native_action("brain_step_completed", {"message": "done", "evidence_refs": [ref]}),
-        context, {"read_file"}, evidence_snapshot=snapshot,
-    )
-    assert accepted.completion_evidence.tool_request_ids == ("req1",)
-    rejected = normalize_brain_output(
-        native_action("brain_step_completed", {"message": "done", "evidence_refs": ["invented"]}),
-        context, {"read_file"}, evidence_snapshot=snapshot,
-    )
-    assert rejected.error_code == "unknown_step_evidence"
+def test_native_completion_rejects_removed_opaque_reference_field_without_retry():
+    model = SequenceModel(native_action(
+        "brain_step_completed", {"message": "Done", "evidence_refs": ["bad"]},
+    ))
+    result = LangChainBrainProvider(
+        brain_llm=model, tool_brain_llm=model, tools_set={"read_file"},
+    ).generate(evidence_context(), (), tools_enabled=True)
+    assert len(model.calls) == 1
+    assert result.kind == Kind.INVALID_OUTPUT
+    assert result.error_code == "unexpected_envelope_fields"
 
 
 @pytest.mark.parametrize("raw", [
@@ -757,7 +652,7 @@ def test_native_lifecycle_evidence_refs_are_strictly_validated():
     ]),
     AIMessage(
         content='{"kind":"STEP_COMPLETED"}',
-        tool_calls=[{"name": "brain_step_completed", "args": {"message": "done", "evidence_refs": []}, "id": "one"}],
+        tool_calls=[{"name": "brain_step_completed", "args": {"message": "done"}, "id": "one"}],
     ),
     native_action("brain_step_failed", {"message": "failed", "unexpected": True}),
 ])
@@ -766,7 +661,7 @@ def test_reserved_native_actions_reject_unknown_multiple_ambiguous_or_extra_fiel
 
 
 def test_native_mode_rejects_text_lifecycle_while_compatibility_mode_retains_it():
-    raw = AIMessage(content=json.dumps(completion([])))
+    raw = AIMessage(content=json.dumps(completion()))
     assert normalize_brain_output(raw, brain_input(), {"read_file"}).error_code == "native_lifecycle_call_required"
     assert normalize_brain_output(
         raw, brain_input(), {"read_file"}, allow_text_tool_calls=True,
@@ -774,7 +669,7 @@ def test_native_mode_rejects_text_lifecycle_while_compatibility_mode_retains_it(
 
 
 def test_legacy_malformed_multiline_json_remains_rejected_in_compatibility_mode():
-    raw = '```json\n{"kind":"STEP_COMPLETED","step_id":"s1","message":"line one\nline two","evidence_refs":[]}\n```'
+    raw = '```json\n{"kind":"STEP_COMPLETED","step_id":"s1","message":"line one\nline two"}\n```'
     result = normalize_brain_output(raw, brain_input(), {"read_file"}, allow_text_tool_calls=True)
     assert result.kind == Kind.INVALID_OUTPUT
     assert result.error_code == "malformed_model_output"

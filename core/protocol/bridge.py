@@ -26,6 +26,7 @@ from typing import Any, Mapping, Sequence, Final
 from pydantic import BaseModel
 
 from core import protocol
+from core.graph_messages import conversational_messages
 
 from .converters import (
     _to_int,
@@ -70,6 +71,7 @@ from .models import (
     ToolExecutionRecord,
     ToolRequest,
     ToolResult,
+    StepCompletionEvidence,
     WorkingState,
 )
 
@@ -121,6 +123,7 @@ _WORKING_STATE_CONSUMED_KEYS: Final[frozenset[str]] = frozenset({
     "execution_status",
     "execution_summary",
     "completed_step_ids",
+    "completion_provenance",
     "accepted_event_history",
     "active_step_id",
     "active_step_title",
@@ -564,7 +567,7 @@ def build_execution_context(
 
     resolved_user_request = (user_request or _latest_user_request(messages)).strip() or _DEFAULT_USER_REQUEST
     retrieval_messages = tuple(_message_text(item) for item in retrieval)
-    recent_history = tuple(_message_text(item) for item in messages[-32:])
+    recent_history = tuple(_message_text(item) for item in conversational_messages(list(messages))[-32:])
 
     return ExecutionContext(
         user_request=resolved_user_request,
@@ -624,6 +627,11 @@ def build_protocol_visible_state(
 
     completed_step_ids_raw = state.get("completed_step_ids")
     completed_step_ids = tuple(str(s) for s in completed_step_ids_raw) if isinstance(completed_step_ids_raw, Sequence) else tuple()
+    completion_provenance_raw = state.get("completion_provenance")
+    completion_provenance = tuple(
+        item if isinstance(item, StepCompletionEvidence) else StepCompletionEvidence.model_validate(item)
+        for item in completion_provenance_raw
+    ) if isinstance(completion_provenance_raw, Sequence) else tuple()
 
     return ProtocolVisibleState(
         identity=resolved_identity,
@@ -631,7 +639,8 @@ def build_protocol_visible_state(
         cursor=resolved_cursor,
         active_plan=active_plan,
         active_step=active_step,
-         completed_step_ids=completed_step_ids,
+        completed_step_ids=completed_step_ids,
+        completion_provenance=completion_provenance,
         accepted_event_history=accepted_event_history,
         retry=retry,
         async_policy=async_policy,
@@ -1002,6 +1011,7 @@ def execution_state_to_legacy(state: ExecutionState) -> dict[str, Any]:
         legacy["active_step_status"] = pv.active_step.status.value
 
     legacy["completed_step_ids"] = list(pv.completed_step_ids)
+    legacy["completion_provenance"] = [item.model_dump(mode="json") for item in pv.completion_provenance]
     legacy["accepted_event_history"] = [event.model_dump(mode="json") for event in pv.accepted_event_history]
 
     legacy["repeat_fail_count"] = pv.retry.retry_count

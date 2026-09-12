@@ -5,19 +5,29 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from core.graph_constants import ANSI_BLUE, ANSI_CYAN, ANSI_GREEN, ANSI_ITALIC, ANSI_LIGHT_BLUE, ANSI_RED, ANSI_RESET, MAX_REASONING_STEPS
+from core.graph_messages import (
+    ACCEPTED_FINALIZER_PROVENANCE, CONVERSATION_PROVENANCE_KEY,
+    conversational_messages,
+)
 from core.logging.node_update import extract_node_update
 from core.logging.renderer import render_node_update
 from core.logging_utils import get_logger, log_event
 from core.protocol.bridge import legacy_state_to_execution_state
 from core.protocol.enums import ControllerDecisionType
-from core.protocol.models import AsyncJobPolicy, ControllerDecision
+from core.protocol.models import AsyncJobPolicy, ControllerDecision, FinalizationResult
 from core.runtime.accessors import get_execution_state
 from core.state import AgentState
 
 logger = get_logger(__name__)
+
+def _accepted_finalizer_message(result: FinalizationResult) -> AIMessage:
+    return AIMessage(
+        content=result.final_answer,
+        additional_kwargs={CONVERSATION_PROVENANCE_KEY: ACCEPTED_FINALIZER_PROVENANCE},
+    )
 
 
 @dataclass
@@ -87,7 +97,7 @@ def run_prompt(
     run_id: str | None = None,
     async_job_policy: AsyncJobPolicy | None = None,
 ) -> tuple[list, str]:
-    prior_messages = history or []
+    prior_messages = conversational_messages(history or [])
     run_id = run_id or uuid.uuid4().hex[:12]
     started_at = perf_counter()
 
@@ -121,7 +131,7 @@ def run_prompt(
     initial_state["execution_state"] = execution_state
     _ = get_execution_state(initial_state)
 
-    final_messages = list(initial_state["messages"])
+    conversation_history = list(initial_state["messages"])
     metrics = RunMetrics()
     from_node = ""
 
@@ -149,9 +159,9 @@ def run_prompt(
                 if isinstance(decision, ControllerDecision):
                     latest_controller_decision = decision
 
-                node_messages = value.get("messages")
-                if node_messages:
-                    final_messages.extend(node_messages)
+                finalization_result = value.get("finalization_result")
+                if isinstance(finalization_result, FinalizationResult):
+                    conversation_history.append(_accepted_finalizer_message(finalization_result))
 
                 node_update = extract_node_update(
                     from_node=from_node,
@@ -221,4 +231,4 @@ def run_prompt(
         error_counts=metrics.error_counts or None,
     )
 
-    return final_messages, metrics.latest_summary
+    return conversation_history, metrics.latest_summary

@@ -39,12 +39,8 @@ LIFECYCLE_ACTION_SCHEMAS = (
                 "type": "object",
                 "properties": {
                     "message": {"type": "string", "description": "Concise step-local completion summary."},
-                    "evidence_refs": {
-                        "type": "array", "items": {"type": "string"},
-                        "description": "Evidence references from the visible current attempts.",
-                    },
                 },
-                "required": ["message", "evidence_refs"],
+                "required": ["message"],
                 "additionalProperties": False,
             },
         },
@@ -113,10 +109,6 @@ class LangChainBrainProvider:
     def generate(
         self, brain_input: BrainInput, messages: tuple[BrainMessage, ...], *, tools_enabled: bool,
     ) -> BrainOutcome:
-        snapshots = [message.evidence_snapshot for message in messages if message.evidence_snapshot is not None]
-        if len(snapshots) > 1:
-            raise ValueError("ambiguous_evidence_snapshot")
-        evidence_snapshot = snapshots[0] if snapshots else None
         provider_messages = [
             HumanMessage(content=message.content) if message.role == "human"
             else SystemMessage(content=message.content)
@@ -160,7 +152,6 @@ class LangChainBrainProvider:
             print(f"[raw-llm][response]\n{raw}")
         outcome = normalize_brain_output(
             raw, brain_input, self.tools_set,
-            evidence_snapshot=evidence_snapshot,
             allow_text_tool_calls=not self.supports_native_tool_calls,
         )
         return outcome.model_copy(update={"usage": normalize_brain_usage(raw)})

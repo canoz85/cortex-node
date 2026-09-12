@@ -33,13 +33,13 @@ def native(name, args):
 
 @pytest.mark.parametrize("name,args,kind", [
     ("git_status", {}, Kind.TOOL_REQUESTED),
-    ("brain_step_completed", {"message": "Done", "evidence_refs": []}, Kind.STEP_COMPLETED),
+    ("brain_step_completed", {"message": "Done"}, Kind.STEP_COMPLETED),
     ("brain_step_failed", {"message": "Cannot proceed"}, Kind.STEP_FAILED),
     ("brain_replan_requested", {"reason": "Plan cannot proceed", "constraints": []}, Kind.REPLAN_REQUESTED),
 ])
 @pytest.mark.parametrize("retry", [False, True])
 def test_native_actions_survive_real_ollama_boundary(name, args, kind, retry):
-    replies = ([{"content": 'brain_step_completed{"message":"Done","evidence_refs":[]}'}]
+    replies = ([{"content": 'brain_step_completed{"message":"Done"}'}]
                if retry else []) + [native(name, args)]
     provider, requests = boundary(replies)
     protocol = build_brain_output_protocol(supports_native_tool_calls=True, tools_enabled=True)
@@ -68,7 +68,7 @@ def test_native_actions_survive_real_ollama_boundary(name, args, kind, retry):
 
 
 def test_exhausted_textual_pseudo_calls_are_typed_failure():
-    provider, requests = boundary([{"content": 'brain_step_completed{"message":"Done","evidence_refs":[]}'}] * 2)
+    provider, requests = boundary([{"content": 'brain_step_completed{"message":"Done"}'}] * 2)
     outcome = provider.generate(brain_input(), (), tools_enabled=True)
     assert outcome.kind == Kind.INVALID_OUTPUT
     assert outcome.error_code == "expected_structured_outcome"

@@ -1,5 +1,21 @@
 from langchain_core.messages import HumanMessage, BaseMessage, ToolMessage, AIMessage
 
+CONVERSATION_PROVENANCE_KEY = "cortex_conversation_provenance"
+ACCEPTED_FINALIZER_PROVENANCE = "accepted_finalizer_answer"
+
+
+def conversational_messages(history: list) -> list:
+    """Return only user input and structurally marked accepted final answers."""
+    return [
+        message for message in history
+        if isinstance(message, HumanMessage)
+        or (
+            isinstance(message, AIMessage)
+            and message.additional_kwargs.get(CONVERSATION_PROVENANCE_KEY)
+            == ACCEPTED_FINALIZER_PROVENANCE
+        )
+    ]
+
 
 def latest_human_message_str(history: list) -> str:
     

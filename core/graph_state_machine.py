@@ -89,6 +89,7 @@ def apply_controller_decision_to_state(
     # Completed steps
     #
     completed_step_ids = protocol_visible.completed_step_ids
+    completion_provenance = protocol_visible.completion_provenance
 
     if decision.completed_step_id is not None:
         if decision.completed_step_id not in completed_step_ids:
@@ -96,6 +97,25 @@ def apply_controller_decision_to_state(
                 *completed_step_ids,
                 decision.completed_step_id,
             )
+
+    if decision.completion_evidence is not None:
+        provenance = decision.completion_evidence
+        if decision.completed_step_id != provenance.step_id:
+            raise ValueError("completion provenance does not match completed step")
+        scope = (
+            provenance.execution_id,
+            provenance.plan_id,
+            provenance.plan_revision,
+            provenance.step_id,
+        )
+        existing = next((
+            item for item in completion_provenance
+            if (item.execution_id, item.plan_id, item.plan_revision, item.step_id) == scope
+        ), None)
+        if existing is not None and existing != provenance:
+            raise ValueError("accepted completion provenance cannot change")
+        if existing is None:
+            completion_provenance = (*completion_provenance, provenance)
 
     #
     # Pending tool request
@@ -192,6 +212,7 @@ def apply_controller_decision_to_state(
                     "active_step": active_step,
                     "pending_tool_request": pending_tool_request,
                     "completed_step_ids": completed_step_ids,
+                    "completion_provenance": completion_provenance,
                     "retry": (
                         decision.retry
                         if decision.retry is not None

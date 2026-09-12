@@ -302,8 +302,8 @@ def test_run_prompt_reenters_runtime_only_for_await_decision():
         app.initial_state["execution_state"].protocol_visible.async_policy
         == policy
     )
-    assert isinstance(history[-1], AIMessage)
-    assert history[-1].content == "Finished."
+    # A Brain lifecycle message is execution transport, not cross-turn conversation.
+    assert [message.content for message in history] == ["Generate an image"]
 
 
 def test_local_polling_resumes_existing_terminal_evidence_without_repolling():
