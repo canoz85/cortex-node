@@ -48,4 +48,5 @@ class AgentState(TypedDict, total=False):
     controller_decision: ControllerDecision
     finalization_result: FinalizationResult
     finalization_error: str
+    clarification_request: str
 

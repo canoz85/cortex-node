@@ -12,6 +12,7 @@ from .enums import (
     ExecutionPhase,
     ExecutionStatus,
     PlannerOutcome,
+    PlanningFailureCategory,
     PlanningOperation,
     ReplanTrigger,
     StepStatus,
@@ -27,6 +28,7 @@ from .models import (
     PlannerResult,
     PlanningCapabilities,
     PlanningRequest,
+    PlanningClarification,
     RetryMetadata,
     StepCompletionEvidence,
     ToolRequest,
@@ -35,6 +37,7 @@ from .models import (
 from .completion_identity import (requirement_scope, evidence_identity, plan_validation_identity,
     eligible_records, completion_provenance_records, accepted_step, binding_for)
 from core.planner_revision import RevisionRejection, reconcile_revision
+from core.planner_progress import build_planner_progress
 
 
 class CortexController:
@@ -105,10 +108,16 @@ class CortexController:
             return self._terminate(controller_input.cursor, "max_steps")
 
         if controller_input.planner_result is not None:
-            if controller_input.planning_request is not None:
-                self._validate_planning_request(controller_input, controller_input.planning_request)
-            return self._decide_from_planner(controller_input).model_copy(
-                update={"clear_planning_request": True})
+            request = controller_input.planning_request
+            if request is None:
+                raise ValueError("PlannerResult requires a pending PlanningRequest")
+            self._validate_planning_request(controller_input, request)
+            if controller_input.planner_result.request_id != request.request_id:
+                raise ValueError("PlannerResult request identity mismatch")
+            decision = self._decide_from_planner(controller_input)
+            return decision.model_copy(update={
+                "clear_planning_request": decision.planning_request is None,
+            })
         
         if controller_input.brain_result is not None:
             return self._decide_from_brain(controller_input)
@@ -135,6 +144,26 @@ class CortexController:
         self,
         controller_input: ControllerInput,
     ) -> ControllerDecision:
+        clarification = controller_input.planning_clarification
+        if clarification is not None:
+            if controller_input.context.user_message_count <= clarification.observed_user_message_count:
+                return self._pause(
+                    controller_input.cursor, reason="needs_input",
+                    reconciliation_required=False,
+                )
+            clarification_context = controller_input.context.model_copy(update={
+                "user_request": clarification.original_user_request,
+                "clarification": controller_input.context.user_request,
+            })
+            resumed = controller_input.model_copy(update={"context": clarification_context})
+            request = self._build_planning_request(
+                resumed, operation=clarification.operation,
+                trigger=clarification.trigger,
+                reason=clarification.replan_reason,
+                suggested_constraints=clarification.suggested_constraints,
+            )
+            return self._planning_dispatch(resumed, request, "Planner clarification received.").model_copy(
+                update={"clear_planning_clarification": True})
         if controller_input.planning_request is not None:
             request = controller_input.planning_request
             self._validate_planning_request(controller_input, request)
@@ -164,11 +193,9 @@ class CortexController:
         match planner_result.outcome:
 
             case PlannerOutcome.DIRECT_RESPONSE:
-                return self._dispatch_brain(
-                    cursor=controller_input.cursor,
-                    reason="Direct response.",
-                    direct_response=True,
-                )
+                if controller_input.planning_request.operation == PlanningOperation.REVISE:
+                    return self._terminate(controller_input.cursor, "invalid_no_plan_required_for_revise")
+                return self._dispatch_summary(controller_input.cursor, "no_plan_required")
 
             case PlannerOutcome.EXECUTION_PLAN:
                 plan = planner_result.proposed_plan
@@ -237,18 +264,45 @@ class CortexController:
                 )
             
             case PlannerOutcome.CLARIFICATION_REQUIRED:
-                return self._dispatch_brain(
-                    cursor=controller_input.cursor,
-                    reason="Clarification required.",
+                request = controller_input.planning_request
+                prompt = (planner_result.message.strip() or "Additional planning input is required.")[:2000]
+                marker = PlanningClarification(
+                    prompt=prompt, source_request_id=request.request_id,
+                    episode_id=request.episode_id, operation=request.operation,
+                    original_user_request=request.context.user_request,
+                    observed_user_message_count=controller_input.context.user_message_count,
+                    base_plan_id=request.base_plan_id, base_revision=request.base_revision,
+                    trigger=request.trigger, replan_reason=request.reason,
+                    suggested_constraints=request.suggested_constraints,
                 )
+                return self._pause(
+                    controller_input.cursor, reason="needs_input",
+                    reconciliation_required=False,
+                ).model_copy(update={"planning_clarification": marker})
 
             case PlannerOutcome.FAILED:
+                request = controller_input.planning_request
+                if (planner_result.failure_category in {
+                        PlanningFailureCategory.INVALID_OUTPUT,
+                        PlanningFailureCategory.PROVIDER_FAILURE,
+                    } and request.attempt < request.max_attempts):
+                    retry_request = self._build_planning_request(
+                        controller_input, operation=request.operation,
+                        trigger=request.trigger, reason=request.reason,
+                        suggested_constraints=request.suggested_constraints,
+                        episode_id=request.episode_id, attempt=request.attempt + 1,
+                        context_override=request.context,
+                    )
+                    return self._planning_dispatch(
+                        controller_input, retry_request, "Retry Planner.",
+                    )
                 failure_reason = (
                     planner_result.message.strip() or "planner_failed"
                 )
                 return self._terminate(
                     controller_input.cursor,
-                    "planner_failed",
+                    ("unplannable" if planner_result.failure_category == PlanningFailureCategory.UNPLANNABLE
+                     else "planning_retry_exhausted"),
                     failure_reason=failure_reason,
                 )
 
@@ -943,8 +997,13 @@ class CortexController:
         self, context: ControllerInput, *, operation: PlanningOperation,
         trigger: ReplanTrigger | None = None, reason: str = "",
         suggested_constraints: tuple[str, ...] = (), failure: ToolResult | None = None,
+        episode_id: str | None = None, attempt: int = 1,
+        context_override=None,
     ) -> PlanningRequest:
         sequence = context.planning_sequence + 1
+        episode_id = episode_id or str(uuid5(
+            NAMESPACE_URL, f"{context.identity.execution_id}:planning-episode:{sequence}"
+        ))
         revision = operation == PlanningOperation.REVISE
         plan = context.active_plan if revision else None
         completed_ids = tuple(dict.fromkeys((
@@ -956,8 +1015,9 @@ class CortexController:
                          if record.execution_id in (None, context.identity.execution_id)) if revision else ()
         return PlanningRequest(
             request_id=str(uuid5(NAMESPACE_URL, f"{context.identity.execution_id}:planning:{sequence}")),
+            episode_id=episode_id, attempt=attempt, max_attempts=2,
             identity=context.identity, operation=operation,
-            context=context.context.model_copy(update={"role": WorkerRole.PLANNER}),
+            context=(context_override or context.context).model_copy(update={"role": WorkerRole.PLANNER}),
             capabilities=self._planning_capabilities,
             sequence=sequence, created_at_utc=self._as_utc(self._now_utc()),
             base_plan=plan.model_copy(deep=True) if plan else None,
@@ -969,6 +1029,10 @@ class CortexController:
             interrupted_step=context.active_step.model_copy(deep=True) if revision and context.active_step else None,
             trigger=trigger, reason=reason, suggested_constraints=suggested_constraints,
             evidence_json=evidence, failure_json=failure.model_dump_json() if failure else None,
+            progress=build_planner_progress(
+                context.identity.execution_id,
+                context.tool_execution_history if revision else (),
+            ),
             retry=context.retry if revision else RetryMetadata(max_retries=context.retry.max_retries),
         )
 

@@ -485,6 +485,7 @@ def test_build_app_runs_submission_await_poll_capture_and_resume_end_to_end():
         capture_node = create_capture_tool_output_node()
 
         def planner_node(_state):
+            request_id = _state["execution_state"].protocol_visible.planning_request.request_id
             step = ExecutionStep(
                 step_id="step-1",
                 title="Generate image",
@@ -493,6 +494,7 @@ def test_build_app_runs_submission_await_poll_capture_and_resume_end_to_end():
             return {
                 "planner_result": PlannerResult(
                     outcome=PlannerOutcome.EXECUTION_PLAN,
+                    request_id=request_id,
                     proposed_plan=ExecutionPlan(
                         plan_id="plan-1",
                         revision=1,

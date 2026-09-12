@@ -23,6 +23,7 @@ from .enums import (
     PlannerOutcome,
     PlanningFailureCategory,
     PlanningOperation,
+    PlanningPauseReason,
     ReplanTrigger,
     StepStatus,
     WorkerRole,
@@ -449,6 +450,7 @@ class ControllerInput(ImmutableProtocolModel):
     tool_execution_history: tuple[ToolExecutionRecord, ...] = Field(default_factory=tuple)
     planning_request: PlanningRequest | None = None
     planning_sequence: int = Field(default=0, ge=0)
+    planning_clarification: PlanningClarification | None = None
     completed_step_ids: StepIdList = ()
 
     def get_step_records(self, step_id: str | None = None) -> tuple[ToolExecutionRecord, ...]:
@@ -645,6 +647,36 @@ class PlanningCapabilities(ImmutableProtocolModel):
         return self
 
 
+class ProjectedPlannerAction(ImmutableProtocolModel):
+    """Bounded observable action history; never an authoritative semantic fact."""
+
+    signature: str | None = None
+    tool_name: str = Field(min_length=1)
+    step_ids: StepIdList = ()
+    source_request_ids: tuple[str, ...] = ()
+    omitted_source_request_count: int = Field(default=0, ge=0)
+    occurrence_count: int = Field(ge=1)
+    success_count: int = Field(default=0, ge=0)
+    failure_count: int = Field(default=0, ge=0)
+    latest_outcome: Literal["operational_success", "tool_or_transport_failure"]
+    semantic_conclusion: Literal["unknown"] = "unknown"
+    first_plan_revision: int | None = Field(default=None, ge=1)
+    last_plan_revision: int | None = Field(default=None, ge=1)
+    arguments_json: str
+    latest_error_code: str | None = None
+    latest_message: str = ""
+    latest_result_summary: str = ""
+
+
+class PlannerProgressProjection(ImmutableProtocolModel):
+    """Controller-owned, stable revision-decision context derived from tool history."""
+
+    schema_version: int = 1
+    action_groups: tuple[ProjectedPlannerAction, ...] = ()
+    total_action_group_count: int = Field(default=0, ge=0)
+    omitted_action_group_count: int = Field(default=0, ge=0)
+
+
 class PlanningRequest(ImmutableProtocolModel):
     """Durable Controller authorization. Snapshots never authorize execution.
 
@@ -652,6 +684,9 @@ class PlanningRequest(ImmutableProtocolModel):
     """
 
     request_id: str = Field(min_length=1)
+    episode_id: str = Field(min_length=1)
+    attempt: int = Field(default=1, ge=1)
+    max_attempts: int = Field(default=2, ge=1)
     identity: ExecutionIdentity
     operation: PlanningOperation
     context: ExecutionContext
@@ -669,17 +704,21 @@ class PlanningRequest(ImmutableProtocolModel):
     suggested_constraints: ConstraintList = ()
     evidence_json: tuple[str, ...] = ()
     failure_json: str | None = None
+    progress: PlannerProgressProjection = Field(default_factory=PlannerProgressProjection)
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
 
     @model_validator(mode="after")
     def validate_operation(self):
+        if self.attempt > self.max_attempts:
+            raise ValueError("planning attempt exceeds episode budget")
         if self.created_at_utc.tzinfo is None:
             raise ValueError("planning request creation time must be timezone aware")
         if self.operation == PlanningOperation.CREATE:
             if any((self.base_plan, self.base_plan_id, self.base_revision,
                     self.completed_step_ids, self.completed_steps, self.interrupted_step,
                     self.trigger, self.reason, self.suggested_constraints,
-                    self.evidence_json, self.failure_json)):
+                    self.evidence_json, self.failure_json,
+                    self.progress.action_groups, self.progress.total_action_group_count)):
                 raise ValueError("CREATE cannot contain revision facts")
         elif (self.base_plan is None or self.base_plan_id != self.base_plan.plan_id
               or self.base_revision != self.base_plan.revision
@@ -713,11 +752,26 @@ class PlannerResult(ImmutableProtocolModel):
     """
 
     outcome: PlannerOutcome
+    request_id: str = Field(min_length=1)
     proposed_plan: ExecutionPlan | None = None
     message: str = ""
     planning_rationale: str = ""
     change_summary: str = ""
     failure_category: PlanningFailureCategory | None = None
+
+    @model_validator(mode="after")
+    def validate_outcome_payload(self):
+        if self.outcome == PlannerOutcome.EXECUTION_PLAN:
+            if self.proposed_plan is None or self.failure_category is not None:
+                raise ValueError("execution_plan requires a plan and no failure category")
+        elif self.outcome == PlannerOutcome.FAILED:
+            if self.proposed_plan is not None or self.failure_category is None:
+                raise ValueError("failed requires a failure category and no plan")
+        elif self.proposed_plan is not None or self.failure_category is not None:
+            raise ValueError("non-plan Planner outcomes cannot contain a plan or failure category")
+        if self.outcome == PlannerOutcome.CLARIFICATION_REQUIRED and not self.message.strip():
+            raise ValueError("clarification_required requires a clarification message")
+        return self
 
 class ExecutionSummary(ImmutableProtocolModel):
     """Terminal summary generated from accepted protocol-visible facts.
@@ -805,6 +859,23 @@ class CheckpointState(ImmutableProtocolModel):
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
 
 
+class PlanningClarification(ImmutableProtocolModel):
+    """Durable Controller-owned wait marker for Planner clarification."""
+
+    reason: PlanningPauseReason = PlanningPauseReason.NEEDS_INPUT
+    prompt: str = Field(min_length=1, max_length=2000)
+    source_request_id: str = Field(min_length=1)
+    episode_id: str = Field(min_length=1)
+    operation: PlanningOperation
+    original_user_request: str = Field(min_length=1)
+    observed_user_message_count: int = Field(ge=1)
+    base_plan_id: str | None = None
+    base_revision: int | None = None
+    trigger: ReplanTrigger | None = None
+    replan_reason: str = ""
+    suggested_constraints: ConstraintList = ()
+
+
 class ProtocolVisibleState(ImmutableProtocolModel):
     """Protocol-visible state for legality, replay, and conformance evaluation.
 
@@ -831,6 +902,7 @@ class ProtocolVisibleState(ImmutableProtocolModel):
     resolved_coverages: tuple[ResolvedCoverage, ...] = ()
     planning_request: PlanningRequest | None = None
     planning_sequence: int = Field(default=0, ge=0)
+    planning_clarification: PlanningClarification | None = None
 
 
 class WorkingState(ImmutableProtocolModel):
@@ -883,6 +955,8 @@ class ExecutionContext(ImmutableProtocolModel):
     user_request: str = Field(min_length=1)
     retrieval_messages: MessageList = Field(default_factory=tuple)
     recent_history: MessageList = Field(default_factory=tuple)
+    clarification: str | None = None
+    user_message_count: int = Field(default=1, ge=1)
     role: WorkerRole = WorkerRole.BRAIN
 
 
@@ -898,6 +972,8 @@ class ControllerDecision(ImmutableProtocolModel):
     accepted_plan: ExecutionPlan | None = None
     planning_request: PlanningRequest | None = None
     clear_planning_request: bool = False
+    planning_clarification: PlanningClarification | None = None
+    clear_planning_clarification: bool = False
     consume_tool_result: bool = False
     decision_type: ControllerDecisionType
     reason: str = ""

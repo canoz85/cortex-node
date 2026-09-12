@@ -476,26 +476,6 @@ def _legacy_replan_request_to_model(value: Any) -> ReplanRequest | None:
     )
 
 
-def _legacy_planner_result_to_model(legacy_state: LegacyState | None, execution_plan: ExecutionPlan | None) -> PlannerResult | None:
-    state = _state_or_empty(legacy_state)
-    if execution_plan is None:
-        return None
-
-    planner_message = _to_str(state.get("planner_message"), default="")
-    planner_rationale = _to_str(state.get("planner_rationale"), default="")
-    planner_change_summary = _to_str(state.get("planner_change_summary"), default="")
-
-    if not any((planner_message.strip(), planner_rationale.strip(), planner_change_summary.strip(), execution_plan.objective.strip())):
-        return None
-
-    return PlannerResult(
-        proposed_plan=execution_plan,
-        message=planner_message,
-        planning_rationale=planner_rationale,
-        change_summary=planner_change_summary,
-    )
-
-
 def _legacy_brain_result_to_model(legacy_state: LegacyState | None) -> BrainResult | None:
     state = _state_or_empty(legacy_state)
 
@@ -567,12 +547,20 @@ def build_execution_context(
 
     resolved_user_request = (user_request or _latest_user_request(messages)).strip() or _DEFAULT_USER_REQUEST
     retrieval_messages = tuple(_message_text(item) for item in retrieval)
-    recent_history = tuple(_message_text(item) for item in conversational_messages(list(messages))[-32:])
+    conversation = conversational_messages(list(messages))
+    user_message_count = sum(1 for item in conversation if item.__class__.__name__ == "HumanMessage")
+    prior_conversation = list(conversation)
+    for index in range(len(prior_conversation) - 1, -1, -1):
+        if prior_conversation[index].__class__.__name__ == "HumanMessage":
+            prior_conversation.pop(index)
+            break
+    recent_history = tuple(_message_text(item) for item in prior_conversation[-32:])
 
     return ExecutionContext(
         user_request=resolved_user_request,
         retrieval_messages=retrieval_messages,
         recent_history=recent_history,
+        user_message_count=max(1, user_message_count),
         role=role,
     )
 
@@ -773,27 +761,6 @@ def build_planner_input(legacy_state: LegacyState | None = None) -> PlanningRequ
         raise ValueError("REVISE request base revision does not match accepted plan")
     return request.model_copy(deep=True)
 
-def planner_result_to_legacy(result: PlannerResult) -> dict[str, Any]:
-    """Translate PlannerResult into a legacy-friendly dictionary payload."""
-
-    payload: LegacyPayload = {
-        "planner_message": result.message,
-    }
-
-    if result.proposed_plan is not None:
-        payload["plan"] = result.proposed_plan.objective
-        payload["plan_id"] = result.proposed_plan.plan_id
-        payload["plan_revision"] = result.proposed_plan.revision
-
-
-    if result.planning_rationale:
-        payload["planner_rationale"] = result.planning_rationale
-
-    if result.change_summary:
-        payload["planner_change_summary"] = result.change_summary
-    
-    return payload
-
 def build_brain_input(legacy_state: LegacyState | None = None) -> BrainInput:
     """Build BrainInput contract from legacy runtime state."""
 
@@ -853,6 +820,7 @@ def build_controller_input(
         accepted_requirements=protocol.accepted_requirements,
         planning_request=protocol.planning_request,
         planning_sequence=protocol.planning_sequence,
+        planning_clarification=protocol.planning_clarification,
         completed_step_ids=protocol.completed_step_ids,
     )
 

@@ -209,6 +209,10 @@ def apply_controller_decision_to_state(
                         decision.planning_request.sequence if decision.planning_request
                         else protocol_visible.planning_sequence
                     ),
+                    "planning_clarification": (
+                        None if decision.clear_planning_clarification or decision.terminal
+                        else decision.planning_clarification or protocol_visible.planning_clarification
+                    ),
                     "active_step": active_step,
                     "pending_tool_request": pending_tool_request,
                     "completed_step_ids": completed_step_ids,

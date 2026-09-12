@@ -126,19 +126,19 @@ def execution_state():
 
 
 def test_adapter_delegates_and_preserves_execution_state():
-    expected = PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE, message="fake result")
     calls = []
     class FakeService:
         def run(self, planner_input, *, retrieve):
             calls.append(planner_input)
             assert retrieve(planner_input.context.user_request) == ("retrieved context",)
-            return expected
+            return PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE,
+                                 request_id=planner_input.request_id, message="fake result")
     state = {"execution_state": execution_state(), "messages": [HumanMessage(content="hello")]}
     before = state["execution_state"].model_dump(mode="json")
     node = create_planner_node(planner_service=FakeService(), rag_service=DummyRAG(),
                                rag_top_k=4, tools_set=set())
     update = node(authorize(state))
-    assert update["planner_result"] is expected
+    assert update["planner_result"].message == "fake result"
     assert len(calls) == 1
     assert calls[0].identity == state["execution_state"].protocol_visible.identity
     assert set(update) == {"planner_result", "retrieval_messages"}
@@ -152,12 +152,16 @@ def test_failure_reaches_existing_controller_path(content):
     state = {"execution_state": execution_state(), "messages": [HumanMessage(content="inspect")]}
     before = state["execution_state"].model_dump(mode="json")
     llm = DummyPlannerLLM(content)
-    update = make_node(llm, DummyRAG())(state)
+    authorized = authorize(state)
+    node = create_planner_node(planner_llm=llm, router_llm=llm, rag_service=DummyRAG(),
+                               rag_top_k=4, tools_set={"list_files", "write_file", "query_abap_table"})
+    update = node(authorized)
     assert update["planner_result"].outcome == PlannerOutcome.FAILED
     assert state["execution_state"].model_dump(mode="json") == before
-    applied = create_controller_node()({**state, **update})
-    assert applied["controller_decision"].terminal is True
-    assert applied["execution_state"].protocol_visible.status == ExecutionStatus.FAILED
+    applied = create_controller_node()({**authorized, **update})
+    assert applied["controller_decision"].decision_type.value == "dispatch_planner"
+    assert applied["execution_state"].protocol_visible.status == ExecutionStatus.NON_TERMINAL
+    assert applied["execution_state"].protocol_visible.planning_request.attempt == 2
     assert applied["planner_result"] is None
     assert len(llm.invocations) == 1
 

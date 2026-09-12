@@ -78,9 +78,9 @@ def test_new_create_request_has_conversation_but_no_prior_execution_artifacts():
     request = CortexController(24).decide(build_controller_input(app.initial_state)).planning_request
     assert request.operation.value == "create"
     assert request.context.recent_history == (
-        "Previous request", "Explicit clarification", "Previous final answer", "hi",
+        "Previous request", "Explicit clarification", "Previous final answer",
     )
-    assert [message.content for message in history] == list(request.context.recent_history)
+    assert [message.content for message in history] == [*request.context.recent_history, request.context.user_request]
 
 
 def test_revise_keeps_typed_execution_facts_outside_recent_history():
@@ -117,7 +117,7 @@ def test_revise_keeps_typed_execution_facts_outside_recent_history():
     }
     request = CortexController(24).decide(build_controller_input(state)).planning_request
     assert request.operation.value == "revise"
-    assert request.context.recent_history == ("Inspect workspace",)
+    assert request.context.recent_history == ()
     assert request.base_plan == plan
     assert request.completed_step_ids == ("done",)
     assert request.interrupted_step == active

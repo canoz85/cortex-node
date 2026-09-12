@@ -238,13 +238,14 @@ Controller authority guarantees:
 ## 9. Graph Execution Cycle
 Current runtime realizes the following cycle for each turn. Each execution cycle MUST begin and end with a controller validation point.
 
-1. Planner produces plan and route metadata.
-2. Controller decision context is established from planner route and state.
-3. Brain executes with role-scoped context.
-4. Tool Runtime executes only when Brain emits executable tool calls.
-5. Tool Capture normalizes tool outcomes for subsequent reasoning.
-6. Controller re-evaluates legal transition after each Brain pass.
-7. Cycle repeats until controller-selected terminal path is reached.
+1. Controller authorizes a durable PlanningRequest when planning is required.
+2. Planner produces one request-bound structured PlannerResult.
+3. Controller consumes that result and selects the next lifecycle state.
+4. Brain executes with role-scoped context only after a plan is accepted.
+5. Tool Runtime executes only when Brain emits executable tool calls.
+6. Tool Capture normalizes tool outcomes for subsequent reasoning.
+7. Controller re-evaluates legal transition after each Brain pass.
+8. Cycle repeats until controller-selected terminal path is reached.
 
 Conceptual cycle:
 Planner

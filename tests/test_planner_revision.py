@@ -31,7 +31,7 @@ BASE = ExecutionPlan(plan_id="plan", revision=3, objective="Finish", steps=(DONE
 
 def request(**updates):
     value = PlanningRequest(
-        request_id="revision", identity=IDENTITY, operation=PlanningOperation.REVISE,
+        request_id="revision", episode_id="revision-episode", identity=IDENTITY, operation=PlanningOperation.REVISE,
         context=ExecutionContext(user_request="Finish"), capabilities=PlanningCapabilities(),
         sequence=2, created_at_utc=datetime(2026, 1, 1, tzinfo=timezone.utc),
         base_plan=BASE, base_plan_id="plan", base_revision=3,
@@ -101,7 +101,7 @@ def test_rejection_decision_is_atomic_and_provenance_survives_acceptance_round_t
     rejected = ctrl.decide(ControllerInput(
         identity=IDENTITY, cursor=protocol.cursor,
         context=ExecutionContext(user_request="Finish"), active_plan=BASE,
-        planner_result=PlannerResult(outcome="execution_plan", proposed_plan=proposal(
+        planner_result=PlannerResult(outcome="execution_plan", request_id="revision", proposed_plan=proposal(
             FAILED.model_copy(update={"status": StepStatus.PENDING, "attempt": 0}))),
         planning_request=request(), planning_sequence=2, completed_step_ids=("done",),
     ))
@@ -113,7 +113,7 @@ def test_rejection_decision_is_atomic_and_provenance_survives_acceptance_round_t
     accepted = ctrl.decide(ControllerInput(
         identity=IDENTITY, cursor=protocol.cursor,
         context=ExecutionContext(user_request="Finish"), active_plan=BASE,
-        planner_result=PlannerResult(outcome="execution_plan", proposed_plan=proposal(replacement())),
+        planner_result=PlannerResult(outcome="execution_plan", request_id="revision", proposed_plan=proposal(replacement())),
         planning_request=request(), planning_sequence=2, completed_step_ids=("done",),
     ))
     restored = ExecutionState.model_validate_json(
@@ -125,11 +125,17 @@ def test_rejection_decision_is_atomic_and_provenance_survives_acceptance_round_t
 
 def test_create_path_is_not_revision_reconciled():
     plan = ExecutionPlan(plan_id="fresh", revision=1, steps=(replacement(),))
-    decision = CortexController(20).decide(ControllerInput(
-        identity=IDENTITY, cursor=ExecutionCursor(),
-        context=ExecutionContext(user_request="Finish"),
-        planner_result=PlannerResult(outcome="execution_plan", proposed_plan=plan),
-    ))
+    ctrl = CortexController(20)
+    initial = ControllerInput(identity=IDENTITY, cursor=ExecutionCursor(),
+                              context=ExecutionContext(user_request="Finish"))
+    dispatch = ctrl.decide(initial)
+    request = dispatch.planning_request
+    decision = ctrl.decide(initial.model_copy(update={
+        "cursor": dispatch.cursor, "planning_request": request,
+        "planning_sequence": request.sequence,
+        "planner_result": PlannerResult(outcome="execution_plan",
+            request_id=request.request_id, proposed_plan=plan),
+    }))
     assert decision.accepted_plan == plan
 
 

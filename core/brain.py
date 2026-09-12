@@ -33,6 +33,11 @@ def build_brain_output_protocol(*, supports_native_tool_calls: bool, tools_enabl
             "Do not return an outcome object or write a tool name and arguments as text.\n"
             "Lifecycle actions describe only the active step. For completion, provide only "
             "the semantic completion message; runtime binds provenance deterministically.\n"
+            "Use an executable tool to continue the same valid step without restructuring the plan. "
+            "Use brain_replan_requested when a changed plan may still achieve the overall objective; "
+            "this asks Controller to authorize Planner revision and needs no repeated-failure threshold. "
+            "Use brain_step_failed only when no reasonable revised plan could achieve the request; "
+            "Controller may retry the same step and ultimately terminate the execution.\n"
         )
     return BRAIN_OUTPUT_PROTOCOL + (
         "Outcome formats:\n"
@@ -40,6 +45,9 @@ def build_brain_output_protocol(*, supports_native_tool_calls: bool, tools_enabl
         '{"kind":"STEP_FAILED","step_id":"active-id","message":"failure reason"}\n'
         '{"kind":"REPLAN_REQUESTED","step_id":"active-id","reason":"reason","constraints":[]}\n'
         "step_id identifies the supplied step. Runtime binds completion provenance.\n"
+        "TOOL_REQUESTED continues the same valid step without restructuring the plan.\n"
+        "REPLAN_REQUESTED asks Controller to authorize Planner revision when a changed plan may still work; repeated failures are not required.\n"
+        "STEP_FAILED means no reasonable revised plan could achieve the request; Controller may retry the same step and ultimately terminate.\n"
             'Tool format: JSON using the available tool schema.\n'
             '{"kind":"TOOL_REQUESTED","tool":{"name":"available_tool_name","arguments":{}}}\n'
     )
@@ -305,8 +313,24 @@ def _build_step_progress_messages(
             "step": record.step_id,
             "tool": record.tool_name,
             "args": bounded_value(record.arguments),
+            "success": False,
             "error": error,
         }
+
+        if result.signature:
+            payload["signature"] = result.signature
+            matching_failure_count = 0
+            for candidate in history:
+                if candidate.result.signature != result.signature:
+                    if candidate is record:
+                        break
+                    continue
+                matching_failure_count = (
+                    0 if candidate.result.success else matching_failure_count + 1
+                )
+                if candidate is record:
+                    break
+            payload["matching_failure_count"] = matching_failure_count
 
         return payload
 
@@ -345,6 +369,10 @@ def _build_step_progress_messages(
             else None
         ),
         "current_attempts": current_attempts[-max_current_records:],
+        "current_step_failure_count": sum(
+            1 for record in history
+            if record.step_id == active_step_id and not record.result.success
+        ),
         "prior_facts": prior_facts[-max_prior_records:],
         "prior_failures": prior_failures[-max_prior_records:],
     }
@@ -452,11 +480,33 @@ def _build_brain_execution_brief(
         "step_id": current_step.step_id,
         "title": current_step.title,
         "description": current_step.description,
+        "attempt": current_step.attempt,
+        "controller_retry": {
+            "count": brain_input.retry.retry_count,
+            "maximum": brain_input.retry.max_retries,
+        },
     }
     if current_step.primary_tool is not None:
         # A planning hint, not an exclusive capability set. Supporting tools
         # remain available when the active objective genuinely requires them.
         payload["primary_tool"] = current_step.primary_tool
+        payload["primary_tool_is_exclusive"] = False
     if current_step.completion_requirement is not None:
         payload["completion_requirement"] = current_step.completion_requirement.model_dump(mode="json")
+    plan = brain_input.active_plan
+    if plan is not None:
+        payload["accepted_plan_context"] = {
+            "plan_id": plan.plan_id,
+            "revision": plan.revision,
+            "dependency_rule": "Every dependency must have COMPLETED status before a pending step is executable.",
+            "steps": [
+                {
+                    "step_id": step.step_id,
+                    "status": step.status.value,
+                    "depends_on_step_ids": list(step.depends_on_step_ids),
+                }
+                for step in plan.steps
+            ],
+            "context_only": "Other steps are context only; the active step remains the sole executable objective.",
+        }
     return "Active step:\n" + json.dumps(payload, ensure_ascii=True)

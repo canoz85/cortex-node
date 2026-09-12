@@ -83,7 +83,7 @@ def test_initial_controller_authorizes_create_without_revision_facts():
     assert request.operation == PlanningOperation.CREATE
     assert request.identity == IDENTITY
     assert request.context.user_request == "Inspect the workspace"
-    assert request.context.recent_history == ("Inspect the workspace",)
+    assert request.context.recent_history == ()
     assert request.capabilities == CAPABILITIES
     assert request.created_at_utc == NOW
     assert request.sequence == 1
@@ -117,6 +117,11 @@ def test_both_sources_share_helper_and_capture_revision_facts(trigger):
     assert request.completed_steps == (original.active_plan.steps[0],)
     assert request.interrupted_step == original.active_step
     assert request.retry == original.retry
+    assert request.progress == ctrl.decide(build_controller_input(state)).planning_request.progress
+    assert len(request.progress.action_groups) == 2
+    repeated = request.progress.action_groups[-1]
+    assert repeated.signature == "read:a.txt"
+    assert repeated.occurrence_count == 3
     assert request.sequence == 2
     assert request.capabilities == CAPABILITIES
     evidence = [json.loads(record) for record in request.evidence_json]
@@ -188,7 +193,18 @@ def test_revise_prompt_contains_facts_and_enforced_ceiling(trigger):
     assert payload["reason"] == request.reason
     assert payload["capabilities"]["unavailable_tools"] == ["write_file"]
     assert payload["suggested_constraints"] == list(request.suggested_constraints)
-    assert payload["evidence"][-1]["result"]["error_code"] == "DENIED"
+    progress = payload["previous_execution_progress"]
+    failed = progress["action_groups"][-1]
+    assert failed["latest_error_code"] == "DENIED"
+    assert failed["signature"] == "read:a.txt"
+    assert failed["occurrence_count"] == 3
+    assert failed["failure_count"] == 3
+    assert failed["semantic_conclusion"] == "unknown"
+    assert payload["raw_evidence"] == {
+        "authoritative_record_count": 4,
+        "included_in_prompt": False,
+        "reason": "Durable raw history is represented by the bounded deterministic progress projection.",
+    }
     assert request.model_dump_json() == before
 
 
@@ -216,12 +232,14 @@ def test_worker_consumption_through_controller_planner_controller(trigger, conte
     assert ci.planner_result is not None and ci.brain_result is ci.tool_result is None
     final = ctrl_node(next_state)
     assert final["planner_result"] is None
-    assert final["execution_state"].protocol_visible.planning_request is None
+    if content != "malformed":
+        assert final["execution_state"].protocol_visible.planning_request is None
     assert final["execution_state"].working.last_tool_result is None
     assert final["execution_state"].working.tool_execution_history == state["execution_state"].working.tool_execution_history
     if content == "malformed":
         assert final["execution_state"].protocol_visible.active_plan == accepted_before
-        assert final["execution_state"].protocol_visible.status == ExecutionStatus.FAILED
+        assert final["execution_state"].protocol_visible.status == ExecutionStatus.NON_TERMINAL
+        assert final["execution_state"].protocol_visible.planning_request.attempt == 2
 
 
 @pytest.mark.parametrize("revise", [False, True])
@@ -233,6 +251,7 @@ def test_request_serializes_and_resume_reuses_authorization(revise):
     restored = ExecutionState.model_validate_json(applied.model_dump_json())
     assert restored == applied
     request = build_planner_input({"execution_state": restored})
+    assert request.progress == decision.planning_request.progress
     resumed = ctrl.decide(build_controller_input({"execution_state": restored}))
     assert resumed.planning_request == request
     assert resumed.planning_request.request_id == decision.planning_request.request_id

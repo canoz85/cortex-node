@@ -1,4 +1,5 @@
 import pytest
+from datetime import datetime, timezone
 
 from core.protocol.controller import CortexController
 from core.protocol.bridge import build_brain_input
@@ -8,6 +9,9 @@ from core.protocol.enums import (
     ExecutionPhase,
     ExecutionStatus,
     PlannerOutcome,
+    PlanningFailureCategory,
+    PlanningOperation,
+    ReplanTrigger,
     StepStatus,
     WorkerRole,
 )
@@ -22,6 +26,8 @@ from core.protocol.models import (
     ExecutionState,
     ExecutionStep,
     PlannerResult,
+    PlanningCapabilities,
+    PlanningRequest,
     ProtocolVisibleState,
     ReplanRequest,
     RetryMetadata,
@@ -84,31 +90,18 @@ def _input(**updates) -> ControllerInput:
 
 
 def test_direct_response_context_is_explicit_and_final_answer_completes():
-    direct = _controller().decide(
-        _input(
-            cursor=ExecutionCursor(phase=ExecutionPhase.PLANNING),
-            planner_result=PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE),
-        )
-    )
-
-    assert direct.decision_type == ControllerDecisionType.DISPATCH_BRAIN
-    assert direct.direct_response is True
-    assert direct.execution_status == ExecutionStatus.NON_TERMINAL
-
-    completed = _controller().decide(
-        _input(
-            cursor=direct.cursor,
-            brain_result=BrainResult(
-                outcome=BrainOutcome.FINAL_ANSWER,
-            ),
-        )
-    )
-
+    controller = _controller()
+    dispatch = controller.decide(_input())
+    request = dispatch.planning_request
+    completed = controller.decide(_input(
+        cursor=dispatch.cursor, planning_request=request, planning_sequence=request.sequence,
+        planner_result=PlannerResult(
+            outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=request.request_id,
+        ),
+    ))
     assert completed.decision_type == ControllerDecisionType.DISPATCH_SUMMARY
     assert completed.execution_status == ExecutionStatus.COMPLETED
-    assert completed.cursor is not None
-    assert completed.cursor.phase == ExecutionPhase.COMPLETED
-    assert completed.terminal is True
+    assert completed.accepted_plan is None and completed.terminal
 
 def test_final_answer_after_completed_plan_does_not_require_active_step():
     execution = _active_execution()
@@ -138,29 +131,18 @@ def test_final_answer_after_completed_plan_does_not_require_active_step():
     assert completed.cursor.phase == ExecutionPhase.COMPLETED
     assert completed.terminal is True
 
-def test_direct_response_marker_crosses_bridge_without_graph_state():
-    direct = _controller().decide(
-        _input(
-            cursor=ExecutionCursor(phase=ExecutionPhase.PLANNING),
-            planner_result=PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE),
-        )
-    )
-    execution_state = ExecutionState(
-        protocol_visible=ProtocolVisibleState(
-            identity=IDENTITY,
-            cursor=direct.cursor,
-        )
-    )
-
-    brain_input = build_brain_input(
-        {
-            "execution_state": execution_state,
-            "controller_decision": direct,
-            "messages": (),
-        }
-    )
-
-    assert brain_input.direct_response is True
+def test_no_plan_required_does_not_create_a_brain_direct_response_marker():
+    controller = _controller()
+    dispatch = controller.decide(_input())
+    request = dispatch.planning_request
+    decision = controller.decide(_input(
+        cursor=dispatch.cursor, planning_request=request, planning_sequence=request.sequence,
+        planner_result=PlannerResult(
+            outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=request.request_id,
+        ),
+    ))
+    assert decision.decision_type == ControllerDecisionType.DISPATCH_SUMMARY
+    assert decision.direct_response is False
 
 
 def test_cancelled_and_failed_termination_carry_matching_status_and_cursor():
@@ -187,15 +169,17 @@ def test_cancelled_and_failed_termination_carry_matching_status_and_cursor():
 
 
 def test_planner_failure_terminates_with_failed_status():
-    decision = _controller().decide(
-        _input(
-            cursor=ExecutionCursor(phase=ExecutionPhase.PLANNING),
-            planner_result=PlannerResult(
-                outcome=PlannerOutcome.FAILED,
-                message="planner unavailable",
-            ),
-        )
-    )
+    controller = _controller()
+    dispatch = controller.decide(_input())
+    request = dispatch.planning_request
+    decision = controller.decide(_input(
+        cursor=dispatch.cursor, planning_request=request, planning_sequence=request.sequence,
+        planner_result=PlannerResult(
+            outcome=PlannerOutcome.FAILED, request_id=request.request_id,
+            failure_category=PlanningFailureCategory.UNPLANNABLE,
+            message="planner unavailable",
+        ),
+    ))
 
     assert decision.decision_type == ControllerDecisionType.TERMINATE
     assert decision.execution_status == ExecutionStatus.FAILED
@@ -325,16 +309,26 @@ def test_accepting_replacement_plan_clears_old_retry_history(replacement_step_id
         update={"last_error_code": "old-plan", "last_error_message": "replan me"}
     )
     replacement = ExecutionPlan(
-        plan_id="plan-2",
+        plan_id="plan-1",
         revision=2,
         steps=(ExecutionStep(step_id=replacement_step_id, title="Replacement"),),
     )
 
+    request = PlanningRequest(
+        request_id="replace", episode_id="replace-episode", identity=IDENTITY, operation=PlanningOperation.REVISE,
+        context=CONTEXT, capabilities=PlanningCapabilities(), sequence=1,
+        created_at_utc=datetime.now(timezone.utc), base_plan=execution["active_plan"],
+        base_plan_id="plan-1", base_revision=1,
+        interrupted_step=execution["active_step"], trigger=ReplanTrigger.BRAIN_REQUESTED,
+        reason="replace plan",
+    )
     decision = _controller().decide(
         _input(
             **execution,
+            planning_request=request, planning_sequence=1,
             planner_result=PlannerResult(
                 outcome=PlannerOutcome.EXECUTION_PLAN,
+                request_id="replace",
                 proposed_plan=replacement,
             ),
         )

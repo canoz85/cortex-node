@@ -49,7 +49,11 @@ LIFECYCLE_ACTION_SCHEMAS = (
         "type": "function",
         "function": {
             "name": "brain_step_failed",
-            "description": "Report that the active execution step failed.",
+            "description": (
+                "Report genuine impossibility: the active step and overall request cannot "
+                "reasonably be achieved, including by a reasonable revised plan. Controller "
+                "may retry the same step and ultimately terminate the execution."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -64,7 +68,11 @@ LIFECYCLE_ACTION_SCHEMAS = (
         "type": "function",
         "function": {
             "name": "brain_replan_requested",
-            "description": "Request replanning because the active step or plan cannot proceed safely.",
+            "description": (
+                "Request Controller-authorized replanning because the accepted strategy or plan "
+                "must change, while the overall objective may still be achievable. Repeated "
+                "identical tool failures are not required."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

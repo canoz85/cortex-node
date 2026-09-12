@@ -14,6 +14,7 @@ from core.protocol.enums import (PlannerOutcome, PlanningFailureCategory, Planni
                                  ReplanTrigger, StepStatus, WorkerRole)
 from core.protocol.models import (ExecutionContext, ExecutionIdentity, ExecutionPlan,
     ExecutionStep, PlanningCapabilities, PlanningRequest, RetryMetadata)
+from core.protocol.models import PlannerResult
 
 VALID = {"result":"PLAN_PROPOSED", "objective":"Inspect then write", "steps":[
     {"step_id":"inspect", "title":"Inspect", "description":"Inspect workspace", "primary_tool":"list_files", "dependencies":[]},
@@ -22,7 +23,7 @@ VALID = {"result":"PLAN_PROPOSED", "objective":"Inspect then write", "steps":[
 
 def planner_input(**updates):
     plan = updates.pop("active_plan", None)
-    return PlanningRequest(request_id="fixture-request", sequence=1,
+    return PlanningRequest(request_id="fixture-request", episode_id="fixture-episode", sequence=1,
         created_at_utc=datetime(2026,1,1,tzinfo=timezone.utc),
         operation=PlanningOperation.REVISE if plan else PlanningOperation.CREATE,
         base_plan=plan, base_plan_id=plan.plan_id if plan else None,
@@ -113,10 +114,33 @@ def test_revise_preserves_request_and_versions_candidate():
     context=provider.messages[0][-2].content
     assert '"completed_step_ids": ["done"]' in context and '"base_revision": 3' in context
 
-def test_normal_path_does_not_invoke_legacy_parser(monkeypatch):
-    import core.planner_normalization as normalization
-    monkeypatch.setattr(normalization,"legacy_numbered_execution_steps",lambda _:pytest.fail("legacy invoked"))
-    assert service(FakeProvider()).run(planner_input()).outcome==PlannerOutcome.EXECUTION_PLAN
+def test_numbered_prose_has_no_compatibility_parser():
+    result = service(FakeProvider("1. Inspect - Use `list_files`")).run(planner_input())
+    assert result.outcome == PlannerOutcome.FAILED
+    assert result.failure_category == PlanningFailureCategory.INVALID_OUTPUT
+
+
+def test_planner_results_are_bound_and_outcome_payloads_are_strict():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError, match="request_id"):
+        PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE)
+    with pytest.raises(ValidationError, match="requires a plan"):
+        PlannerResult(outcome=PlannerOutcome.EXECUTION_PLAN, request_id="request")
+    with pytest.raises(ValidationError, match="failure category"):
+        PlannerResult(outcome=PlannerOutcome.FAILED, request_id="request")
+
+
+def test_planning_request_requires_explicit_episode_identity():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError, match="episode_id"):
+        PlanningRequest(
+            request_id="request", sequence=1,
+            created_at_utc=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            operation=PlanningOperation.CREATE,
+            capabilities=PlanningCapabilities(),
+            identity=ExecutionIdentity(execution_id="p6", protocol_version="1"),
+            context=ExecutionContext(user_request="work", role=WorkerRole.PLANNER),
+        )
 
 def discovery_dependent_proposal():
     return {"result":"PLAN_PROPOSED","objective":"Discover and process resources","steps":[

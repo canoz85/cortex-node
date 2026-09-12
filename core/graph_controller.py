@@ -112,6 +112,10 @@ def create_controller_node(
             "execution_state": execution_state,
             "controller_decision": decision,
         }
+        if decision.planning_clarification is not None:
+            update["clarification_request"] = decision.planning_clarification.prompt
+        elif decision.clear_planning_clarification:
+            update["clarification_request"] = ""
 
         brain_result = controller_input.brain_result
 

@@ -365,7 +365,7 @@ Related CEP references:
 - CEP-002 (failure and retry paths)
 - CEP-004 (Controller-owned decisions)
 
-### 6.9 PlannerInput
+### 6.9 PlanningRequest
 Purpose:
 - Represents information supplied to Planner for new planning or replanning.
 
@@ -383,9 +383,11 @@ Consumer:
 
 Required Contract Elements:
 - execution goal
-- current plan revision
-- replanning context
-- completed work
+- request and planning-episode identity
+- CREATE or REVISE operation
+- accepted base revision and completed work for REVISE
+- bounded observable progress projection for REVISE
+- typed clarification for a resumed episode when applicable
 
 Optional Contract Elements:
 - protocol-visible planning constraints
@@ -406,7 +408,8 @@ Purpose:
 - Represents planner output after planning or replanning.
 
 Definition:
-- Represents the canonical protocol contract for an Accepted Plan Revision candidate proposed by Planner.
+- Represents one request-bound structured Planner outcome. A plan is only a candidate
+  when the outcome is `PLAN_PROPOSED`.
 
 Canonical Owner:
 - Controller.
@@ -415,11 +418,11 @@ Produced By:
 - Planner.
 
 Consumer:
-- Controller, Brain, Summary.
+- Controller.
 
 Required Contract Elements:
-- Accepted Plan Revision
-- planning rationale visible at protocol level
+- matching PlanningRequest identity
+- typed outcome and its outcome-specific payload
 
 Optional Contract Elements:
 - plan change summary
@@ -428,7 +431,8 @@ Invariants:
 - planner output does not transition execution directly
 - controller determines transition after accepting planner result
 - completed history remains immutable
-- one PlannerResult corresponds to one Plan Revision Identity
+- one PlannerResult corresponds to one PlanningRequest identity
+- only Controller may accept a proposed plan or choose lifecycle state
 
 Related CEP references:
 - CEP-001 (PlanCreated, PlanRevised)

@@ -1,10 +1,4 @@
-"""Deterministic normalization for structured Planner proposals.
-
-The isolated legacy helper remains solely for explicit compatibility callers.
-The normal PlannerService path cannot call it.
-"""
-
-import re
+"""Deterministic normalization for structured Planner proposals."""
 from pydantic import ValidationError
 
 from core.planner_contract import PlannerProposal, PlannerProposalResultType
@@ -12,35 +6,13 @@ from core.protocol.enums import PlannerOutcome, PlanningFailureCategory, Plannin
 from core.protocol.models import ExecutionPlan, ExecutionStep, PlanningRequest, PlannerResult
 
 MAX_PROPOSED_STEPS = 4
-STEP_RE = re.compile(r"^\s*(\d+)\.\s+(.*?)\s+[–-]\s+(.*)$")
-TOOL_RE = re.compile(r"Use\s+`?([A-Za-z_][A-Za-z0-9_]*)`?", re.IGNORECASE)
-
-
-def planner_failure(category: PlanningFailureCategory, message: str) -> PlannerResult:
-    return PlannerResult(outcome=PlannerOutcome.FAILED, message=message, failure_category=category)
-
-
-def legacy_numbered_execution_steps(text: str) -> tuple[ExecutionStep, ...]:
-    """P1 compatibility parser; never used by normal P3 execution."""
-    steps = []
-    previous_step_id = None
-    for line in text.splitlines():
-        match = STEP_RE.match(line.strip())
-        if not match:
-            continue
-        number, title, description = match.groups()
-        step_id = f"step-{number}"
-        tool_match = TOOL_RE.search(description)
-        steps.append(ExecutionStep(
-            step_id=step_id, title=title.strip(), description=description.strip(),
-            primary_tool=tool_match.group(1) if tool_match else None,
-            status=StepStatus.PENDING, attempt=0,
-            depends_on_step_ids=(previous_step_id,) if previous_step_id else (),
-        ))
-        previous_step_id = step_id
-    if not steps:
-        raise ValueError("Planner produced no executable steps.")
-    return tuple(steps)
+def planner_failure(
+    request_id: str, category: PlanningFailureCategory, message: str,
+) -> PlannerResult:
+    return PlannerResult(
+        outcome=PlannerOutcome.FAILED, request_id=request_id,
+        message=message, failure_category=category,
+    )
 
 
 def _validate_graph(step_ids: tuple[str, ...], dependencies: dict[str, tuple[str, ...]]) -> None:
@@ -80,20 +52,21 @@ def normalize_planner_proposal(
     try:
         proposal = PlannerProposal.model_validate(content)
     except (ValidationError, TypeError, ValueError, AttributeError) as exc:
-        return planner_failure(PlanningFailureCategory.INVALID_OUTPUT,
+        return planner_failure(planner_input.request_id, PlanningFailureCategory.INVALID_OUTPUT,
                                f"Planner output is invalid ({type(exc).__name__}).")
 
     if proposal.result == PlannerProposalResultType.NO_PLAN_REQUIRED:
-        return PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE,
+        return PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=planner_input.request_id,
                              message=proposal.message or "No execution plan required.",
                              planning_rationale=rationale)
     if proposal.result == PlannerProposalResultType.NEEDS_INPUT:
-        return PlannerResult(outcome=PlannerOutcome.CLARIFICATION_REQUIRED,
+        return PlannerResult(outcome=PlannerOutcome.CLARIFICATION_REQUIRED, request_id=planner_input.request_id,
                              message=proposal.message or "Planner needs additional input.",
                              planning_rationale=rationale)
     if proposal.result == PlannerProposalResultType.PLANNING_FAILED:
         category = PlanningFailureCategory(proposal.failure_category.value)
-        return planner_failure(category, proposal.message or "Planner could not produce a plan.")
+        return planner_failure(planner_input.request_id, category,
+                               proposal.message or "Planner could not produce a plan.")
 
     try:
         if not proposal.steps:
@@ -133,12 +106,10 @@ def normalize_planner_proposal(
                 depends_on_step_ids=dependencies[step.step_id.strip()],
             ) for step in proposal.steps),
         )
-        return PlannerResult(outcome=PlannerOutcome.EXECUTION_PLAN, proposed_plan=plan,
+        return PlannerResult(outcome=PlannerOutcome.EXECUTION_PLAN,
+                             request_id=planner_input.request_id, proposed_plan=plan,
                              message=proposal.message or "Plan generated successfully.",
                              planning_rationale=rationale)
     except (ValueError, TypeError, AttributeError) as exc:
-        return planner_failure(PlanningFailureCategory.INVALID_OUTPUT,
+        return planner_failure(planner_input.request_id, PlanningFailureCategory.INVALID_OUTPUT,
                                f"Planner proposal is invalid: {exc}")
-
-
-_legacy_execution_steps = legacy_numbered_execution_steps

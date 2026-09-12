@@ -37,6 +37,7 @@ def test_build_controller_input_maps_protocol_outputs_from_legacy_state():
         "plan_revision": 3,
         "planner_result": PlannerResult(
             outcome="execution_plan",
+            request_id="planner-request-1",
             message="Plan generated successfully.",
             proposed_plan=ExecutionPlan(
                 plan_id="p-1",

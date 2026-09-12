@@ -31,8 +31,7 @@ A worker implementation may be replaced without requiring protocol changes, prov
 
 ## 3. Planner Contract
 
-Planner always produces plan revisions.
-
+Planner produces exactly one structured result for a Controller-authorized request.
 Planner never produces runtime decisions.
 
 ### Owns
@@ -45,23 +44,22 @@ Planner never produces runtime decisions.
 - step execution
 
 ### Inputs
-- CreatePlan command
-- optional replanning context from Controller
+- Controller-owned `PlanningRequest` (`CREATE` or `REVISE`)
 
 ### Outputs
-- PlanCreated event
-- PlanRevised event
+- request-bound `PlannerResult`: `PLAN_PROPOSED`, `NO_PLAN_REQUIRED`,
+  `NEEDS_INPUT`, or `PLANNING_FAILED`
 
 ### Preconditions
 - valid execution identity exists
 - planning request is accepted by Controller
 
 ### Postconditions
-- plan revision is emitted as a new immutable fact
+- a proposal/result is emitted without changing accepted state
 - planner does not dispatch step or tool work
 
 ### Failure Behavior
-- planner failure must be surfaced as inability to emit PlanCreated or PlanRevised
+- planner failure must use a typed planning failure category
 - Controller decides retry, cancellation, or alternate terminal path
 
 ### Non-Permissions

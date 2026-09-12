@@ -163,10 +163,12 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
             return controller(state)
 
         def planner(_state):
+            request_id = _state["execution_state"].protocol_visible.planning_request.request_id
             if direct:
-                return {"planner_result": PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE)}
+                return {"planner_result": PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=request_id)}
             return {"planner_result": PlannerResult(
                 outcome=PlannerOutcome.EXECUTION_PLAN,
+                request_id=request_id,
                 proposed_plan=ExecutionPlan(plan_id="p1", steps=(ExecutionStep(step_id="s1", title="Read the file"),)),
             )}
 

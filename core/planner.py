@@ -190,6 +190,7 @@ class PlannerService:
             routing = self.provider.route(user_request)
         except Exception as exc:
             return self._logged_result(planner_failure(
+                planner_input.request_id,
                 PlanningFailureCategory.PROVIDER_FAILURE,
                 f"Planner provider failed ({type(exc).__name__}).",
             ))
@@ -216,6 +217,7 @@ class PlannerService:
                          retrieve(user_request) if retrieve is not None else planner_input.context.retrieval_messages)
         except Exception as exc:
             return self._logged_result(planner_failure(
+                planner_input.request_id,
                 PlanningFailureCategory.PROVIDER_FAILURE,
                 f"Planner context retrieval failed ({type(exc).__name__}).",
             ))
@@ -231,11 +233,13 @@ class PlannerService:
             content = self.provider.generate(messages)
         except PlannerInvalidOutputError as exc:
             return self._logged_result(planner_failure(
+                planner_input.request_id,
                 PlanningFailureCategory.INVALID_OUTPUT,
                 f"Planner output is invalid ({type(exc).__name__}).",
             ))
         except Exception as exc:
             return self._logged_result(planner_failure(
+                planner_input.request_id,
                 PlanningFailureCategory.PROVIDER_FAILURE,
                 f"Planner provider failed ({type(exc).__name__}).",
             ))
@@ -258,7 +262,17 @@ class PlannerService:
 def planning_request_context(request: PlanningRequest) -> str:
     """Expose durable facts; instructions are guidance, not acceptance validation."""
     payload = request.model_dump(mode="json")
-    payload["evidence"] = [json.loads(record) for record in payload.pop("evidence_json")]
+    if request.operation == PlanningOperation.REVISE:
+        raw_evidence_count = len(payload.pop("evidence_json"))
+        payload["previous_execution_progress"] = payload.pop("progress")
+        payload["raw_evidence"] = {
+            "authoritative_record_count": raw_evidence_count,
+            "included_in_prompt": False,
+            "reason": "Durable raw history is represented by the bounded deterministic progress projection.",
+        }
+    else:
+        payload["evidence"] = [json.loads(record) for record in payload.pop("evidence_json")]
+        payload.pop("progress")
     payload["failure"] = json.loads(request.failure_json) if request.failure_json else None
     payload.pop("failure_json")
     instructions = (
@@ -271,6 +285,10 @@ def planning_request_context(request: PlanningRequest) -> str:
             "This is REVISE, not initial planning. Revise unfinished work only. "
             "Do not repeat completed work. Use the failure reason, partial effects and evidence "
             "to explain why the previous approach cannot continue unchanged in your step definitions. "
+            "Previous execution progress describes observable actions and outcomes, not semantic facts. "
+            "Operational success does not necessarily imply task success, and semantic_conclusion remains unknown. "
+            "Do not repeat an exact exhausted action unless new evidence makes it applicable. "
+            "Different signatures are not automatically equivalent approaches. "
             "Do not change completed facts or perform retries. Return the structured result contract only. "
         )
     return instructions + "\n" + json.dumps(payload, ensure_ascii=True)

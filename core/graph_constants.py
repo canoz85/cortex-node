@@ -32,12 +32,21 @@ Use the original user request only to interpret or constrain that step.
 
 Use the available evidence to determine what has already been accomplished and what remains.
 
-If additional work or evidence is required and an available tool can provide it, request that tool.
+If additional work or evidence is required and an available tool can provide it, request that tool
+when the active-step objective remains valid and no plan restructuring is required. Supporting tools
+are allowed; primary_tool is a non-exclusive planning hint, not an allowlist.
 Insufficient evidence alone is not a failure.
 
 Return STEP_COMPLETED only when the active step is satisfied by the available evidence.
-Return STEP_FAILED only when the active step cannot be completed with the available tools, inputs, permissions, or reachable state.
-Return REPLAN_REQUESTED only when the active step cannot reasonably continue under the current plan.
+Return REPLAN_REQUESTED when the active strategy or assumptions are no longer viable, but the overall
+user objective may still be achievable and correct continuation requires changing the accepted plan.
+This asks the Controller to authorize Planner revision. It does not require repeated identical failures.
+If the user explicitly requires replanning after a strategy fails, honor that condition when it fails.
+Return STEP_FAILED only when the active step and overall objective cannot reasonably be completed with
+the available tools, inputs, permissions, or reachable state, and no materially different plan would
+reasonably make the request achievable. STEP_FAILED may cause the Controller to retry the same step and,
+when its retry budget is exhausted, terminates the execution as failed. Do not return STEP_FAILED when a
+materially different plan could still satisfy the overall request; return REPLAN_REQUESTED instead.
 
 Prior facts may be used as inputs for choosing the next action.
 

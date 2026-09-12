@@ -477,8 +477,21 @@ def test_execution_prompt_supplies_step_evidence_and_capability_without_auto_com
     assert all(rendered.count(section) == 1 for section in sections)
     assert "Output capability is specified" not in rendered
     brief = next(m.content for m in messages if m.content.startswith("Active step:"))
-    assert json.loads(brief.split("\n", 1)[1]) == {
-        "step_id": "step-1", "title": "Inspect test_workspace", "description": "Use list_files",
+    brief_payload = json.loads(brief.split("\n", 1)[1])
+    assert brief_payload["step_id"] == "step-1"
+    assert brief_payload["title"] == "Inspect test_workspace"
+    assert brief_payload["description"] == "Use list_files"
+    assert brief_payload["attempt"] == 0
+    assert brief_payload["controller_retry"] == {"count": 0, "maximum": 1}
+    assert brief_payload["accepted_plan_context"] == {
+        "plan_id": "p1",
+        "revision": 1,
+        "dependency_rule": "Every dependency must have COMPLETED status before a pending step is executable.",
+        "steps": [
+            {"step_id": "step-1", "status": "active", "depends_on_step_ids": []},
+            {"step_id": "step-2", "status": "pending", "depends_on_step_ids": []},
+        ],
+        "context_only": "Other steps are context only; the active step remains the sole executable objective.",
     }
     evidence = next(m.content for m in messages if m.content.startswith("Execution evidence v1:"))
     attempt = json.loads(evidence.split("\n", 1)[1])["current_attempts"][0]
@@ -504,6 +517,127 @@ def test_execution_prompt_supplies_step_evidence_and_capability_without_auto_com
     # Success in history does not bypass Brain judgment or rescue invalid prose.
     assert result.error_code == "expected_structured_outcome"
     assert result.completion_evidence is None
+
+
+def test_failure_escalation_context_is_explicit_compact_and_deterministic():
+    step = ExecutionStep(
+        step_id="attempt", title="Read target", description="Read missing.txt",
+        primary_tool="read_file", status=StepStatus.ACTIVE, attempt=2,
+    )
+    recovery = ExecutionStep(
+        step_id="recover", title="Recover from history",
+        depends_on_step_ids=("attempt",),
+    )
+    failed = ToolExecutionRecord(
+        execution_id="brain-outcome-test", plan_id="p1", plan_revision=4,
+        step_id="attempt", tool_name="read_file", arguments={"path": "missing.txt"},
+        result=ToolResult(
+            request_id="failed-read", signature="read:missing.txt", success=False,
+            error_code="FILE_FILE_NOT_FOUND", message="File not found",
+        ),
+    )
+    context = brain_input(retry_count=1, max_retries=3).model_copy(update={
+        "context": ExecutionContext(
+            user_request="Read missing.txt; if this strategy fails, revise the plan.",
+        ),
+        "cursor": brain_input().cursor.model_copy(update={
+            "step_id": "attempt", "step_attempt": 2, "plan_revision": 4,
+        }),
+        "active_step": step,
+        "active_plan": ExecutionPlan(plan_id="p1", revision=4, steps=(step, recovery)),
+        "retry": RetryMetadata(step_id="attempt", retry_count=1, max_retries=3),
+        "tool_execution_history": (failed,),
+        "last_tool_result": failed.result,
+    })
+    messages = _build_execution_messages(
+        system_prompt=SYSTEM_PROMPT_TEMPLATE.format(
+            available_tools="read_file, git_show", model="test",
+            workspace_dir="workspace", knowledge_dir="knowledge",
+        ),
+        brain_input=context, retrieval_messages=(),
+        instruction_brief=None,
+        output_protocol=build_brain_output_protocol(
+            supports_native_tool_calls=True, tools_enabled=True,
+        ),
+    )
+    rendered = "\n".join(message.content for message in messages)
+    assert "if this strategy fails, revise the plan" in rendered
+    assert "Do not return STEP_FAILED when a\nmaterially different plan could still satisfy" in rendered
+    assert "authorize Planner revision" in rendered
+    assert "terminates the execution as failed" in rendered
+
+    brief = json.loads(next(
+        message.content for message in messages if message.content.startswith("Active step:")
+    ).split("\n", 1)[1])
+    assert brief["attempt"] == 2
+    assert brief["controller_retry"] == {"count": 1, "maximum": 3}
+    assert brief["primary_tool"] == "read_file"
+    assert brief["primary_tool_is_exclusive"] is False
+    assert brief["accepted_plan_context"]["steps"][1] == {
+        "step_id": "recover", "status": "pending", "depends_on_step_ids": ["attempt"],
+    }
+
+    evidence = json.loads(next(
+        message.content for message in messages
+        if message.content.startswith("Execution evidence v1:")
+    ).split("\n", 1)[1])
+    failure = evidence["current_attempts"][0]
+    assert failure == {
+        "step": "attempt", "tool": "read_file", "args": {"path": "missing.txt"},
+        "success": False,
+        "error": {"code": "FILE_FILE_NOT_FOUND", "message": "File not found"},
+        "signature": "read:missing.txt", "matching_failure_count": 1,
+    }
+    assert evidence["current_step_failure_count"] == 1
+
+
+def test_native_lifecycle_descriptions_preserve_schema_and_distinguish_failure_from_replan():
+    schemas = {item["function"]["name"]: item["function"] for item in LIFECYCLE_ACTION_SCHEMAS}
+    failed = schemas["brain_step_failed"]
+    replan = schemas["brain_replan_requested"]
+    assert "revised plan" in failed["description"]
+    assert "terminate" in failed["description"]
+    assert "overall objective may still be achievable" in replan["description"]
+    assert "Controller-authorized replanning" in replan["description"]
+    assert set(failed["parameters"]["properties"]) == {"message"}
+    assert set(replan["parameters"]["properties"]) == {"reason", "constraints"}
+
+
+def test_one_failure_allows_supporting_tool_or_immediate_replan_without_threshold():
+    context = evidence_context(success=False)
+    primary_step = context.active_step.model_copy(update={"primary_tool": "read_file"})
+    context = context.model_copy(update={
+        "active_step": primary_step,
+        "active_plan": context.active_plan.model_copy(update={"steps": (primary_step,)}),
+    })
+    supporting = normalize_brain_output(
+        {"kind": "TOOL_REQUESTED", "tool": {
+            "name": "list_files", "arguments": {"path": "."},
+        }},
+        context, {"read_file", "list_files"}, allow_text_tool_calls=True,
+    )
+    assert supporting.kind == Kind.TOOL_REQUESTED
+    assert supporting.tool_request.tool_name == "list_files"
+    assert context.active_step.primary_tool == "read_file"
+
+    replan = normalize_brain_output(
+        {"kind": "REPLAN_REQUESTED", "step_id": context.active_step.step_id,
+         "reason": "The accepted read strategy is no longer viable", "constraints": []},
+        context, {"read_file", "list_files"}, allow_text_tool_calls=True,
+    )
+    assert replan.kind == Kind.REPLAN_REQUESTED
+    assert replan.replan_request.failed_step_id == context.active_step.step_id
+    assert len(context.tool_execution_history) == 1
+
+
+def test_genuine_impossibility_remains_a_distinct_step_failed_outcome():
+    result = normalize_brain_output(
+        {"kind": "STEP_FAILED", "step_id": "s1",
+         "message": "No available capability or revised plan can satisfy the request"},
+        brain_input(), {"read_file"}, allow_text_tool_calls=True,
+    )
+    assert result.kind == Kind.STEP_FAILED
+    assert result.replan_request is None
 
 
 @pytest.mark.parametrize("supports_native_tool_calls", [True, False])

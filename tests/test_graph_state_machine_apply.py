@@ -456,8 +456,9 @@ def test_failed_step_replan_and_replacement_plan_can_proceed(replacement_step_id
         replanning,
         planner_result=PlannerResult(
             outcome=PlannerOutcome.EXECUTION_PLAN,
+            request_id=replanning.protocol_visible.planning_request.request_id,
             proposed_plan=ExecutionPlan(
-                plan_id="plan-2",
+                plan_id=replanning.protocol_visible.active_plan.plan_id,
                 revision=2,
                 steps=(ExecutionStep(step_id=replacement_step_id, title="Replacement"),),
             ),

@@ -77,14 +77,28 @@ def evaluate(service, ctx, frozen=(), previous=None):
                             ctx.tool_execution_history, frozen, previous, ctx.accepted_requirements)
 
 
+def planner_context(ctx, plan):
+    controller = CortexController(20)
+    initial = ControllerInput(identity=ctx.identity, cursor=ExecutionCursor(), context=ctx.context)
+    dispatch = controller.decide(initial)
+    request = dispatch.planning_request
+    return initial.model_copy(update={
+        "cursor": dispatch.cursor, "planning_request": request,
+        "planning_sequence": request.sequence,
+        "planner_result": PlannerResult(
+            outcome=PlannerOutcome.EXECUTION_PLAN, request_id=request.request_id,
+            proposed_plan=plan,
+        ),
+    })
+
+
 def test_validation_and_unknown_provider_block_plan_acceptance():
     service = CompletionService({"fake": FakeProvider()})
     ctx = context()
     receipt, error = service.validate_plan(ctx.active_plan)
     assert receipt and error is None
-    planner = ctx.model_copy(update={"brain_result": None, "planner_result": PlannerResult(
-        outcome=PlannerOutcome.EXECUTION_PLAN, proposed_plan=ctx.active_plan.model_copy(update={
-            "steps": (ctx.active_step.model_copy(update={"status": StepStatus.PENDING}),)}))})
+    planner = planner_context(ctx, ctx.active_plan.model_copy(update={
+        "steps": (ctx.active_step.model_copy(update={"status": StepStatus.PENDING}),)}))
     plan = planner.planner_result.proposed_plan
     receipt, error = CompletionService().validate_plan(plan)
     decision = CortexController(20).decide(planner.model_copy(update={
@@ -95,8 +109,10 @@ def test_validation_and_unknown_provider_block_plan_acceptance():
         provider_id="fake", specification={"invalid": True})})
     assert service.validate_plan(ctx.active_plan.model_copy(update={"steps": (invalid,)}))[1] == "invalid_completion_specification"
     receipt, error = service.validate_plan(plan)
+    bindings = service.bind_plan(ctx.identity, plan)[2]
     assert CortexController(20).decide(planner.model_copy(update={
-        "completion_validation_id": receipt, "completion_validation_error": error})).accepted_plan == plan
+        "completion_validation_id": receipt, "completion_validation_error": error,
+        "accepted_requirements": bindings})).accepted_plan == plan
 
 
 def test_unresolved_retries_on_new_evidence_and_empty_is_resolved():
@@ -261,10 +277,12 @@ def test_acceptance_binding_survives_recovery_before_resolution():
     pending = ctx.active_step.model_copy(update={"status": StepStatus.PENDING})
     plan = ctx.active_plan.model_copy(update={"steps": (pending,)})
     state = ExecutionState(protocol_visible=ProtocolVisibleState(identity=ctx.identity,
-        cursor=ExecutionCursor(phase=ExecutionPhase.PLANNING)))
+        cursor=ExecutionCursor()))
     node = create_controller_node(completion_service=CompletionService({"fake": provider}))
-    result = node({"execution_state": state, "planner_result": PlannerResult(
-        outcome=PlannerOutcome.EXECUTION_PLAN, proposed_plan=plan)})
+    authorized = node({"execution_state": state})
+    request = authorized["execution_state"].protocol_visible.planning_request
+    result = node({**authorized, "planner_result": PlannerResult(
+        outcome=PlannerOutcome.EXECUTION_PLAN, request_id=request.request_id, proposed_plan=plan)})
     restored = ExecutionState.model_validate_json(result["execution_state"].model_dump_json())
     assert not restored.protocol_visible.resolved_coverages
     binding = restored.protocol_visible.accepted_requirements[0]

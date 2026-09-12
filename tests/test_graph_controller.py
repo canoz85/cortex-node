@@ -97,9 +97,14 @@ def test_authorized_success_finalizer_owns_answer_summary_and_preserves_route(ca
 
 def test_failed_terminal_transition_is_finalized_from_controller_facts():
     observer = ObservingFinalizer()
-    update = create_controller_node(finalizer=observer)(_state(
-        planner_result=PlannerResult(outcome=PlannerOutcome.FAILED, message="Planning failed"),
-    ))
+    node = create_controller_node(finalizer=observer)
+    initial = _state()
+    authorized = node(initial)
+    request = authorized["execution_state"].protocol_visible.planning_request
+    update = node({**initial, **authorized,
+        "planner_result": PlannerResult(
+            outcome=PlannerOutcome.FAILED, request_id=request.request_id,
+            failure_category="UNPLANNABLE", message="Planning failed")})
 
     request = observer.requests[0]
     assert update["controller_decision"].decision_type == ControllerDecisionType.TERMINATE
@@ -177,15 +182,20 @@ def test_finalizer_failure_is_observable_and_never_falls_back_to_brain_answer():
 
 def test_non_terminal_controller_decision_does_not_invoke_finalizer():
     observer = ObservingFinalizer()
-    update = create_controller_node(finalizer=observer)(_state(
-        planner_result=PlannerResult(
+    node = create_controller_node(finalizer=observer)
+    initial = _state()
+    authorized = node(initial)
+    request = authorized["execution_state"].protocol_visible.planning_request
+    update = node({**initial, **authorized,
+        "planner_result": PlannerResult(
             outcome=PlannerOutcome.EXECUTION_PLAN,
+            request_id=request.request_id,
             proposed_plan=ExecutionPlan(
                 plan_id="p1",
                 steps=(ExecutionStep(step_id="s1", title="Work"),),
             ),
         ),
-    ))
+    })
 
     assert observer.requests == []
     assert "finalization_result" not in update
