@@ -34,6 +34,7 @@ from .models import (
 )
 from .completion_identity import (requirement_scope, evidence_identity, plan_validation_identity,
     eligible_records, completion_provenance_records, accepted_step, binding_for)
+from core.planner_revision import RevisionRejection, reconcile_revision
 
 
 class CortexController:
@@ -177,6 +178,17 @@ class CortexController:
                         controller_input.cursor,
                         "Planner returned PLAN_CREATED without a plan.",
                     )
+
+                request = controller_input.planning_request
+                if request is not None and request.operation == PlanningOperation.REVISE:
+                    try:
+                        plan = reconcile_revision(request, controller_input.active_plan, plan)
+                    except RevisionRejection as exc:
+                        return self._pause(
+                            controller_input.cursor,
+                            reconciliation_required=True,
+                            reason=f"revision_rejected:{exc.reason}",
+                        )
 
                 if (controller_input.completion_validation_error is not None
                         or any(step.completion_requirement is not None for step in plan.steps)):

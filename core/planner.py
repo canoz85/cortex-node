@@ -31,7 +31,7 @@ AVAILABLE TOOLS FOR THIS REQUEST (CLOSED SET — the ONLY tools you may referenc
 {available_tools}
 
 PLANNING RULES:
-1. Produce between 1 and 4 execution steps. Never exceed 4 steps; merge
+1. Produce between 1 and 8 execution steps. Never exceed 8 steps; merge
    only within the same category (see rule 2), never across categories.
 2. SINGLE-RESPONSIBILITY STEPS (STRICT): Each step maps to exactly ONE category:
    - INSPECT (read-only lookups: list_files, read_file, git_status, rag_search, ...)
@@ -103,7 +103,7 @@ FORBIDDEN PATTERNS (never produce a step like these):
   (retries belong to the Controller, not the plan)
 
 RESULT CONTRACT:
-- PLAN_PROPOSED: provide objective and 1-4 structured steps. Each step has a stable
+- PLAN_PROPOSED: provide objective and 1-8 structured steps. Each step has a stable
   step_id, non-empty title and description, optional primary_tool, and dependencies
   containing only step_ids in this proposal. Dependencies must be acyclic.
 - NO_PLAN_REQUIRED: explicitly select this when no tool execution plan is needed.

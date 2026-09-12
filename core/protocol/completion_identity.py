@@ -25,8 +25,15 @@ def plan_validation_identity(plan):
 
 
 def eligible_records(identity, plan, records):
+    # A reconciled completed step is an explicit structural continuity grant.
+    # Its historical records may support downstream coverage in the new revision;
+    # records for removed/changed/pending old steps remain ineligible.
+    carried_completed = {step.step_id for step in plan.steps if step.status == "completed"}
     return tuple(r for r in records if r.execution_id == identity.execution_id
-                 and r.plan_id == plan.plan_id and r.plan_revision == plan.revision)
+                 and r.plan_id == plan.plan_id
+                 and (r.plan_revision == plan.revision
+                      or (r.plan_revision is not None and r.plan_revision < plan.revision
+                          and r.step_id in carried_completed)))
 
 
 def completion_provenance_records(identity, plan, step, records):

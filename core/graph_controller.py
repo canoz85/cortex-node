@@ -11,6 +11,8 @@ from core.protocol.models import ControllerDecision, ControllerInput, ExecutionS
 from core.state import AgentState
 from core.completion import CompletionService
 from core.protocol.completion_identity import accepted_step
+from core.planner_revision import RevisionRejection, reconcile_revision
+from core.protocol.enums import PlanningOperation
 
 
 def create_controller_node(
@@ -51,6 +53,20 @@ def create_controller_node(
         bindings = protocol.accepted_requirements
         validation_id, validation_error = None, None
         if controller_input.planner_result is not None and controller_input.planner_result.proposed_plan is not None:
+            request = controller_input.planning_request
+            if request is not None and request.operation == PlanningOperation.REVISE:
+                try:
+                    reconciled = reconcile_revision(
+                        request, controller_input.active_plan,
+                        controller_input.planner_result.proposed_plan,
+                    )
+                    controller_input = controller_input.model_copy(update={
+                        "planner_result": controller_input.planner_result.model_copy(update={
+                            "proposed_plan": reconciled,
+                        }),
+                    })
+                except RevisionRejection:
+                    pass
             validation_id, validation_error, bindings = completion_service.bind_plan(
                 controller_input.identity, controller_input.planner_result.proposed_plan, bindings)
         controller_input = controller_input.model_copy(update={
