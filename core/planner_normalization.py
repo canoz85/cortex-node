@@ -85,14 +85,13 @@ def normalize_planner_proposal(
         for step in proposal.steps:
             if not step.title.strip() or not step.description.strip():
                 raise ValueError("proposed step titles and descriptions must be non-empty")
-            if step.primary_tool is not None:
-                tool = step.primary_tool.strip()
-                if not tool:
-                    raise ValueError("primary_tool cannot be empty")
-                if tool in unavailable:
-                    raise ValueError(f"primary_tool '{tool}' is unavailable")
-                if tool not in available:
-                    raise ValueError(f"primary_tool '{tool}' is unknown")
+            tool = step.primary_tool.strip()
+            if not tool:
+                raise ValueError("primary_tool cannot be empty")
+            if tool in unavailable:
+                raise ValueError(f"primary_tool '{tool}' is unavailable")
+            if tool not in available:
+                raise ValueError(f"primary_tool '{tool}' is unknown")
         revising = planner_input.operation == PlanningOperation.REVISE
         plan = ExecutionPlan(
             plan_id=planner_input.base_plan_id if revising else f"{planner_input.identity.execution_id}:plan",
@@ -101,7 +100,7 @@ def normalize_planner_proposal(
             steps=tuple(ExecutionStep(
                 step_id=step.step_id.strip(), title=step.title.strip(),
                 description=step.description.strip(),
-                primary_tool=step.primary_tool.strip() if step.primary_tool else None,
+                primary_tool=step.primary_tool.strip(),
                 status=StepStatus.PENDING, attempt=0,
                 depends_on_step_ids=dependencies[step.step_id.strip()],
             ) for step in proposal.steps),

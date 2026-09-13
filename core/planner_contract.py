@@ -22,7 +22,7 @@ class ProposedStep(BaseModel):
     step_id: str = Field(min_length=1)
     title: str = Field(min_length=1)
     description: str = Field(min_length=1)
-    primary_tool: str | None = None
+    primary_tool: str = Field(min_length=1)
     dependencies: tuple[str, ...] = ()
 
 

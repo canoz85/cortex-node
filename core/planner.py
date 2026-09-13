@@ -13,104 +13,38 @@ from core.protocol.enums import PlanningFailureCategory, PlanningOperation
 
 DIRECT_RESPONSE_ROUTES = frozenset({"conversation", "clarify"})
 
-PLANNER_SYSTEM_PROMPT = """You are the Planner worker of CortexNode.
-
-Your responsibility is to transform a user request into a deterministic execution plan.
-You NEVER execute tools.
-You NEVER answer the user.
-You ONLY produce one structured planning proposal/result.
+PLANNER_SYSTEM_PROMPT = """You are the CortexNode Planner. Transform the Controller-authorized request into one structured planning result. Never execute tools or answer the user.
 
 ROUTER CONTEXT:
 Route: {route}
-
-{system_capabilities_text}
 
 AVAILABLE TOOLS FOR THIS REQUEST (CLOSED SET — the ONLY tools you may reference):
 {available_tools}
 
 PLANNING RULES:
-1. Produce between 1 and 8 execution steps. Never exceed 8 steps; merge
-   only within the same category (see rule 2), never across categories.
-2. SINGLE-RESPONSIBILITY STEPS (STRICT): Each step maps to exactly ONE category:
-   - INSPECT (read-only lookups: list_files, read_file, git_status, rag_search, ...)
-   - CREATE/MODIFY (write_file, make_directory)
-   - INSTALL/PREPARE (install_package)
-   - EXECUTE (run_python, execute_abap_report)
-   - VERIFY (post-hoc read_file/list_files to confirm the outcome)
-   Never combine two categories in one step, even if they touch the same file.
-3. Every executable step MUST name exactly ONE primary tool, taken verbatim from the
-   CLOSED SET above. Never invent tool names.
-   Plan only the external/runtime operations needed to obtain information or cause
-   effects. Do NOT create separate steps for reasoning that the Brain can perform over
-   tool results, including arithmetic, comparison, interpretation, summarization, or
-   transformation.
-   If one available tool can provide all external information needed for the Brain to
-   finish the user's request, produce only that tool step.
-   Use "Unsupported capability" only when an external/runtime operation required by the
-   request cannot be performed by any tool in the CLOSED SET. Never mark reasoning over
-   obtainable tool results as an unsupported capability.
-4. DIRECT TOOL PREFERENCE:
-   When a single available tool directly provides the capability required by the
-   request, prefer that tool over constructing an indirect workflow.
-   Do not create files, generate scripts, or execute code to reproduce a capability
-   already provided by an available tool.
-   Among equally valid plans, prefer fewer steps and fewer side effects.
-5. Safe execution order: INSPECT -> CREATE/MODIFY -> INSTALL/PREPARE -> EXECUTE -> VERIFY.
-   - Insert an INSPECT step before any CREATE/MODIFY or EXECUTE step unless the user gave
-     an explicit, unambiguous target that is known-new.
-   - Insert an INSTALL/PREPARE step before EXECUTE whenever the request implies a new or
-     third-party dependency.
-6. Do not merge unrelated actions into one step.
-7. Do not include maintenance, setup, or initialization steps that do not change the
-   correctness of the plan (e.g., no redundant re-inspection once evidence exists).
-8. Describe WHAT should be accomplished with the tool, not HOW to invoke it:
-   - Do not include tool arguments or parameter values.
-   - Do not include filenames unless explicitly required by the user; when generating a
-     new file, prefer a task-specific name over a generic one (e.g., not `script.py`).
-   - Do not include code, shell commands, JSON, queries, or prompts.
-   - Leave execution details and batching logic to the Brain worker.
-   - A plan step is a logical unit of work, not necessarily one tool invocation.
-     The Brain may invoke the step's primary tool multiple times when processing a
-     collection of items discovered at runtime.
-   - Concrete tool arguments may be derived by the Brain from evidence produced by
-     dependency steps. Express that relationship with dependencies; the arguments do
-     not need to be known or enumerated while planning.
-   - Do not select NEEDS_INPUT or PLANNING_FAILED merely because tool arguments or the
-     number or identities of items are discoverable only during execution.
-9. Do not explain the plan or add conversational fluff.
-10. Return exactly one structured result matching the bound output schema.
-11. Do not assume any file, directory, or dependency state persists from a previous,
-    unrelated request unless this turn's context confirms it.
-12. Re-planning boundary: you own step definitions only, never retries. Do not emit
-    steps such as "Retry step 2" or "Fix previous error" — if context indicates a prior
-    step failed repeatedly, plan a fresh INSPECT step to gather new evidence instead of
-    repeating the failed action.
+1. Produce the smallest valid plan within the bound schema's step limit. Every executable step has exactly one primary_tool from the closed set. Do not merge unrelated operations.
+2. Plan external/runtime work only. Reasoning, arithmetic, comparison, interpretation, summarization, and transformation over tool results belong to Brain, not separate steps.
+3. Prefer one direct tool over an indirect workflow. Add prerequisite inspection, dependency preparation, or post-change verification only when correctness requires it. Preserve required ordering with dependencies.
+4. Describe what each step accomplishes, not tool arguments, code, commands, JSON, queries, or prompts.
+5. A logical step may invoke its primary tool repeatedly for items discovered at runtime. Arguments may come from dependency evidence and need not be known during planning. Runtime-discoverable arguments or item identities are not grounds for NEEDS_INPUT or PLANNING_FAILED.
+6. Planner owns step definitions; Controller owns retries. On REVISE, define a materially valid unfinished path rather than retry steps.
+7. Do not assume file, dependency, or runtime state from unrelated executions.
+8. Return only the bound structured result.
 
-GENERATION VS INSPECTION RULE:
-- When the user explicitly requests generating media or content (e.g., "draw a cat", "generate a cat picture and save it"):
-  1. DO NOT initiate an 'INSPECT' step (such as calling `get_comfy_history`) prior to workflow submission.
-  2. Plan a 'QUEUE/SUBMIT' step using `run_comfy_workflow`. Name the step title explicitly with queuing/submission intent (e.g., "Queue cat image generation workflow").
-  3. Append a separate 'RETRIEVE/DOWNLOAD' step using `get_comfy_history` and `download_comfy_output_image` AFTER the submission step to fetch and save the generated cat image.
-  
-FORBIDDEN PATTERNS (never produce a step like these):
-- "Setup and run – Use `write_file` and `run_python` to create and execute the script."
-  (two tools in one step; split into CREATE/MODIFY and EXECUTE)
-- "Update config – Use `edit_settings` to change the value."
-  (`edit_settings` is not in the CLOSED SET; never invent tool names)
-- "Retry the failed write – Use `write_file` again with the same arguments."
-  (retries belong to the Controller, not the plan)
+{capability_guidance}
 
 RESULT CONTRACT:
-- PLAN_PROPOSED: provide objective and 1-8 structured steps. Each step has a stable
-  step_id, non-empty title and description, optional primary_tool, and dependencies
-  containing only step_ids in this proposal. Dependencies must be acyclic.
-- NO_PLAN_REQUIRED: explicitly select this when no tool execution plan is needed.
-- NEEDS_INPUT: explicitly select this when required user information is missing.
-- PLANNING_FAILED: select this with failure_category UNPLANNABLE when no valid plan
-  can be proposed because a required capability is absent from the closed tool set.
-  Runtime-discoverable inputs do not make a request unplannable. INVALID_OUTPUT and
-  PROVIDER_FAILURE are runtime-generated categories.
-For non-plan results, steps must be empty. Do not emit prose outside the schema.
+- PLAN_PROPOSED: external/runtime work is required; provide objective and steps.
+- NO_PLAN_REQUIRED: no execution plan is needed.
+- NEEDS_INPUT: intent is known but required non-discoverable user information is missing.
+- PLANNING_FAILED / UNPLANNABLE: a required external/runtime capability is absent.
+"""
+
+COMFYUI_PLANNING_GUIDANCE = """CAPABILITY-SPECIFIC GUIDANCE — COMFYUI GENERATION:
+- Start generation with a `run_comfy_workflow` step. Do not inspect `get_comfy_history` before submission.
+- After submission, use a dependent `get_comfy_history` step to discover the output.
+- Then use a dependent `download_comfy_output_image` step to save it.
+- Keep submission, history retrieval, and download as separate logical steps.
 """
 
 
@@ -173,10 +107,13 @@ class PlannerService:
         if not isinstance(planner_input, PlanningRequest):
             raise TypeError("PlannerService requires PlanningRequest")
         if self.show_raw_llm:
-            log_planner("request", planner_input.model_dump(mode="json", include={
+            request_debug = planner_input.model_dump(mode="json", include={
                 "request_id", "operation", "base_plan_id", "base_revision",
                 "completed_step_ids", "interrupted_step", "trigger", "reason", "capabilities",
-            }))
+            })
+            log_planner("request", {
+                "user_request": planner_input.context.user_request, **request_debug,
+            })
         user_request = planner_input.context.user_request
         log_planner("router", {"input": user_request}, enabled=self.show_raw_llm)
         try:
@@ -201,9 +138,9 @@ class PlannerService:
         filtered.intersection_update(planner_input.capabilities.available_tools)
         prompt = PLANNER_SYSTEM_PROMPT.format(
             route=routing.route,
-            system_capabilities_text=self.system_capabilities_text,
             available_tools="\n".join(f"- {name}" for name in sorted(filtered) if name)
             or "- No tool access allowed for this step",
+            capability_guidance=planner_capability_guidance(routing.route, frozenset(filtered)),
         )
         try:
             retrieval = (() if routing.route in DIRECT_RESPONSE_ROUTES else
@@ -248,7 +185,28 @@ class PlannerService:
     def _logged_result(self, result: PlannerResult) -> PlannerResult:
         if self.show_raw_llm:
             log_planner("normalized", result.model_dump(mode="json"))
+            if result.proposed_plan is not None:
+                log_planner("execution_plan", format_execution_plan(result.proposed_plan))
         return result
+
+
+def planner_capability_guidance(route: str, effective_tools: frozenset[str]) -> str:
+    """Select policy from existing route and authorized-capability facts only."""
+    if route == "action" and "run_comfy_workflow" in effective_tools:
+        return COMFYUI_PLANNING_GUIDANCE
+    return ""
+
+
+def format_execution_plan(plan) -> str:
+    lines = [f"Objective: {plan.objective}"]
+    for step in plan.steps:
+        lines.extend((
+            "",
+            f"{step.step_id}. {step.title}",
+            f"   tool: {step.primary_tool}",
+            f"   depends_on: {list(step.depends_on_step_ids)}",
+        ))
+    return "\n".join(lines)
 
 
 def planning_request_context(request: PlanningRequest) -> str:

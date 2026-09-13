@@ -54,6 +54,11 @@ def _render_planner(node_update: NodeUpdate) -> None:
 
     planner = node_update.planner_result
 
+    # Successful plans are rendered once by the authoritative detailed Planner
+    # debug logger. Keep console rendering here for non-plan outcomes only.
+    if planner.proposed_plan is not None:
+        return
+
     header = "[planner]"
     if planner.outcome:
         header = f"[planner:{planner.outcome.value}]"

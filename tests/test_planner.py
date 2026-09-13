@@ -54,10 +54,13 @@ def service(provider):
         system_capabilities_text="fixture capabilities")
 
 def test_valid_dependent_plan():
-    result=service(FakeProvider()).run(planner_input(), retrieve=lambda _:("retrieved",))
+    provider = FakeProvider()
+    result=service(provider).run(planner_input(), retrieve=lambda _:("retrieved",))
     assert result.outcome==PlannerOutcome.EXECUTION_PLAN
     assert result.proposed_plan.steps[1].depends_on_step_ids==("inspect",)
     assert result.proposed_plan.steps[0].primary_tool=="list_files"
+    assert [step.primary_tool for step in result.proposed_plan.steps] == ["list_files", "write_file"]
+    assert "Add prerequisite inspection" in provider.messages[0][0].content
 
 def test_valid_independent_steps():
     value={**VALID,"steps":[{**VALID["steps"][0]},{**VALID["steps"][1],"dependencies":[]}]}
@@ -84,6 +87,44 @@ def test_invalid_plan_constraints_rejected(mutate,needle):
 def test_malformed_structured_output_is_invalid(content):
     result=service(FakeProvider(content)).run(planner_input())
     assert result.failure_category==PlanningFailureCategory.INVALID_OUTPUT
+
+
+@pytest.mark.parametrize("step_update", [
+    {"primary_tool": None},
+    {"primary_tool": ""},
+    {"primary_tool": "   "},
+])
+def test_list_files_proposal_requires_non_empty_primary_tool(step_update):
+    step = {"step_id":"list", "title":"List files",
+            "description":"Invoke the list_files tool to list files",
+            "primary_tool":"list_files", "dependencies":[]}
+    step.update(step_update)
+    request = planner_input().model_copy(update={"context": ExecutionContext(
+        user_request="list files", role=WorkerRole.PLANNER)})
+    result = service(FakeProvider({"result":"PLAN_PROPOSED", "objective":"List files",
+                                   "steps":[step]}, route="info")).run(request)
+    assert result.outcome == PlannerOutcome.FAILED
+    assert result.failure_category == PlanningFailureCategory.INVALID_OUTPUT
+    assert result.proposed_plan is None
+
+
+def test_list_files_proposal_rejects_missing_primary_tool():
+    request = planner_input().model_copy(update={"context": ExecutionContext(
+        user_request="list files", role=WorkerRole.PLANNER)})
+    result = service(FakeProvider({"result":"PLAN_PROPOSED", "objective":"List files",
+        "steps":[{"step_id":"list", "title":"List files",
+                  "description":"Invoke the list_files tool", "dependencies":[]}]},
+        route="info")).run(request)
+    assert result.outcome == PlannerOutcome.FAILED
+    assert result.failure_category == PlanningFailureCategory.INVALID_OUTPUT
+
+
+def test_unauthorized_primary_tool_is_deterministically_invalid():
+    value = {**VALID, "steps":[{**VALID["steps"][0], "primary_tool":"invented"}]}
+    result = normalize_planner_proposal(value, planner_input(), route="action")
+    assert result.outcome == PlannerOutcome.FAILED
+    assert result.failure_category == PlanningFailureCategory.INVALID_OUTPUT
+    assert "unknown" in result.message
 
 @pytest.mark.parametrize("error_at",["route","generate"])
 def test_provider_exception_is_provider_failure(error_at):
@@ -165,11 +206,62 @@ def test_prompt_defers_dynamic_arguments_and_batching_to_brain():
     result=service(provider).run(planner_input())
     prompt=provider.messages[0][0].content
     assert result.outcome==PlannerOutcome.EXECUTION_PLAN
-    assert "Concrete tool arguments may be derived by the Brain from evidence" in prompt
-    assert "not necessarily one tool invocation" in prompt
-    assert "may invoke the step's primary tool multiple times" in prompt
-    assert "Runtime-discoverable inputs do not make a request unplannable" in prompt
+    assert "A logical step may invoke its primary tool repeatedly" in prompt
+    assert "Arguments may come from dependency evidence" in prompt
+    assert "Runtime-discoverable arguments or item identities are not grounds" in prompt
     assert "tool arguments" not in ProposedStep.model_fields
+
+
+def test_core_prompt_prefers_direct_tool_and_keeps_reasoning_in_brain():
+    provider = FakeProvider({"result":"PLAN_PROPOSED", "objective":"List files", "steps":[
+        {"step_id":"list", "title":"List files", "description":"List files directly",
+         "primary_tool":"list_files", "dependencies":[]}]}, route="info")
+    request = planner_input().model_copy(update={"context": ExecutionContext(
+        user_request="list files", role=WorkerRole.PLANNER)})
+    result = service(provider).run(request)
+    prompt = provider.messages[0][0].content
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert len(result.proposed_plan.steps) == 1
+    assert "Prefer one direct tool" in prompt
+    assert "summarization, and transformation over tool results belong to Brain" in prompt
+
+
+def test_comfy_guidance_uses_action_route_and_authorized_capability_only():
+    capabilities = PlanningCapabilities(available_tools=(
+        "list_files", "run_comfy_workflow", "get_comfy_history",
+        "download_comfy_output_image"))
+    ordinary = FakeProvider(route="info")
+    ordinary_request = planner_input().model_copy(update={
+        "capabilities": capabilities,
+        "context": ExecutionContext(user_request="Generate a cat image and save it.",
+                                    role=WorkerRole.PLANNER),
+    })
+    service(ordinary).run(ordinary_request)
+    assert "CAPABILITY-SPECIFIC GUIDANCE" not in ordinary.messages[0][0].content
+
+    image = FakeProvider(route="action")
+    image_request = planner_input().model_copy(update={
+        "capabilities": capabilities,
+        "context": ExecutionContext(user_request="Generate a cat image and save it.", role=WorkerRole.PLANNER),
+    })
+    service(image).run(image_request)
+    prompt = image.messages[0][0].content
+    assert "CAPABILITY-SPECIFIC GUIDANCE — COMFYUI GENERATION" in prompt
+    assert "run_comfy_workflow" in prompt
+    fragment = prompt.split("CAPABILITY-SPECIFIC GUIDANCE — COMFYUI GENERATION:", 1)[1]
+    submission = fragment.index("run_comfy_workflow")
+    history = fragment.index("get_comfy_history", submission)
+    download = fragment.index("download_comfy_output_image", history)
+    assert submission < history < download
+
+    unrelated_action = FakeProvider(route="action")
+    unrelated_request = planner_input().model_copy(update={
+        "capabilities": capabilities,
+        "context": ExecutionContext(user_request="perform the authorized action",
+                                    role=WorkerRole.PLANNER),
+    })
+    service(unrelated_action).run(unrelated_request)
+    assert "CAPABILITY-SPECIFIC GUIDANCE — COMFYUI GENERATION" in unrelated_action.messages[0][0].content
 
 def test_genuinely_missing_capability_can_remain_unplannable():
     proposal={"result":"PLANNING_FAILED","failure_category":"UNPLANNABLE",
