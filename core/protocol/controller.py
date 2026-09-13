@@ -243,7 +243,8 @@ class CortexController:
                         "Plan contains no executable steps.",
                     )
 
-                cursor = controller_input.cursor.model_copy(
+                cursor = self._brain_dispatch_cursor(
+                    controller_input.cursor,
                     update={
                         "phase": ExecutionPhase.EXECUTING,
                         "step_id": next_step.step_id,
@@ -435,7 +436,8 @@ class CortexController:
                 }
             )
             retry_plan = self._replace_plan_step(plan, retry_step)
-            cursor = controller_input.cursor.model_copy(
+            cursor = self._brain_dispatch_cursor(
+                controller_input.cursor,
                 update={
                     "phase": ExecutionPhase.EXECUTING,
                     "step_id": active_step.step_id,
@@ -1111,7 +1113,8 @@ class CortexController:
         if resolved_step_id is None and not clear_active_step:
             resolved_step_id = cursor.step_id
 
-        next_cursor = cursor.model_copy(
+        next_cursor = self._brain_dispatch_cursor(
+            cursor,
             update={
                 "current_worker": WorkerRole.BRAIN,
                 "step_id": resolved_step_id,
@@ -1333,7 +1336,8 @@ class CortexController:
         retry = RetryMetadata(max_retries=controller_input.retry.max_retries)
 
         if next_step is None:
-            cursor = controller_input.cursor.model_copy(
+            cursor = self._brain_dispatch_cursor(
+                controller_input.cursor,
                 update={
                     "phase": ExecutionPhase.EXECUTING,
                     "step_id": None,
@@ -1354,7 +1358,8 @@ class CortexController:
                 retry=retry,
             )
 
-        cursor = controller_input.cursor.model_copy(
+        cursor = self._brain_dispatch_cursor(
+            controller_input.cursor,
             update={
                 "phase": ExecutionPhase.EXECUTING,
                 "step_id": next_step.step_id,
@@ -1373,3 +1378,15 @@ class CortexController:
             next_step_id=next_step.step_id,
             retry=retry,
         )
+
+    @staticmethod
+    def _brain_dispatch_cursor(
+        cursor: ExecutionCursor,
+        *,
+        update: dict,
+    ) -> ExecutionCursor:
+        """Advance the protocol reasoning count for one authorized Brain cycle."""
+        return cursor.model_copy(update={
+            **update,
+            "controller_iteration": (cursor.controller_iteration or 0) + 1,
+        })

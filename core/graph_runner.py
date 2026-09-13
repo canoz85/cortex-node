@@ -172,6 +172,8 @@ def run_prompt(
                 if node_update is None:
                     continue
 
+                metrics.node_updates += 1
+
                 if node_update.transition:
                     log_event(
                         logger,

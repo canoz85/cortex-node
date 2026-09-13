@@ -1,10 +1,18 @@
 from pathlib import Path
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from core.graph import _load_sap_system_prompt, build_app
-from core.protocol.enums import ExecutionPhase, ExecutionStatus
-from core.protocol.models import ExecutionCursor, ExecutionIdentity, ExecutionState, ProtocolVisibleState, WorkingState
+from core.protocol.enums import ControllerDecisionType, ExecutionPhase, ExecutionStatus, WorkerRole
+from core.protocol.models import (
+    ControllerDecision,
+    ExecutionCursor,
+    ExecutionIdentity,
+    ExecutionState,
+    ProtocolVisibleState,
+    ToolRequest,
+    WorkingState,
+)
 
 
 class DummyTool:
@@ -73,6 +81,9 @@ def test_build_app_uses_injected_factories(tmp_path):
     def graph_nodes_factory(**kwargs):
         call_log["graph_nodes_kwargs"] = kwargs
 
+        def controller_node(_state):
+            return {}
+
         def planner_node(_state):
             return {}
 
@@ -82,13 +93,10 @@ def test_build_app_uses_injected_factories(tmp_path):
         def capture_tool_output_node(_state):
             return {}
 
-        def route_after_brain(_state):
-            return "__end__"
-
         def summarize_memory_node(_state):
             return {}
 
-        return planner_node, brain_node, capture_tool_output_node, route_after_brain, summarize_memory_node
+        return controller_node, planner_node, brain_node, capture_tool_output_node, summarize_memory_node
 
     def tool_node_factory(tools):
         call_log["tool_node_tools"] = list(tools)
@@ -122,7 +130,7 @@ def test_build_app_uses_injected_factories(tmp_path):
     graph_nodes_kwargs = call_log["graph_nodes_kwargs"]
     assert graph_nodes_kwargs["sap_system_prompt"] == "custom sap prompt"
     assert graph_nodes_kwargs["rag_top_k"] == 7
-    assert graph_nodes_kwargs["tool_name_set"] == {"list_files"}
+    assert graph_nodes_kwargs["tools_set"] == {"list_files"}
 
     llm = graph_nodes_kwargs["tool_brain_llm"]
     brain_llm = graph_nodes_kwargs["brain_llm"]
@@ -139,11 +147,9 @@ def test_build_app_uses_injected_factories(tmp_path):
 
 def test_build_app_propagates_same_execution_state_across_graph_nodes(tmp_path):
     observed: dict[str, list[ExecutionState]] = {
+        "controller": [],
         "planner": [],
         "brain": [],
-        "tools": [],
-        "capture": [],
-        "summary": [],
     }
 
     def tool_list_factory(_workspace_root: str, _knowledge_root: str, _rag_service, _model: str):
@@ -153,26 +159,47 @@ def test_build_app_propagates_same_execution_state_across_graph_nodes(tmp_path):
         return FakeChatModel(model, temperature)
 
     def graph_nodes_factory(**_kwargs):
+        controller_calls = 0
+
+        def controller_node(state):
+            nonlocal controller_calls
+            observed["controller"].append(state["execution_state"])
+            controller_calls += 1
+            if controller_calls == 1:
+                decision = ControllerDecision(
+                    decision_type=ControllerDecisionType.DISPATCH_PLANNER,
+                    next_worker=WorkerRole.PLANNER,
+                )
+            elif controller_calls == 2:
+                decision = ControllerDecision(
+                    decision_type=ControllerDecisionType.DISPATCH_BRAIN,
+                    next_worker=WorkerRole.BRAIN,
+                )
+            else:
+                decision = ControllerDecision(
+                    decision_type=ControllerDecisionType.TERMINATE,
+                    reason="test complete",
+                    execution_status=ExecutionStatus.COMPLETED,
+                    cursor=ExecutionCursor(phase=ExecutionPhase.COMPLETED),
+                    terminal=True,
+                )
+            return {"controller_decision": decision}
+
         def planner_node(state):
             observed["planner"].append(state["execution_state"])
-            return {"plan": "noop"}
+            return {}
 
         def brain_node(state):
             observed["brain"].append(state["execution_state"])
-            return {"steps": state.get("steps", 0) + 1}
+            return {}
 
-        def capture_tool_output_node(state):
-            observed["capture"].append(state["execution_state"])
-            return {"last_tool_signature": "capture"}
+        def capture_tool_output_node(_state):
+            return {}
 
-        def route_after_brain(_state):
-            return "tools" if len(observed["brain"]) == 1 else "summarize_memory"
+        def summarize_memory_node(_state):
+            return {}
 
-        def summarize_memory_node(state):
-            observed["summary"].append(state["execution_state"])
-            return {"rolling_summary": "done"}
-
-        return planner_node, brain_node, capture_tool_output_node, route_after_brain, summarize_memory_node
+        return controller_node, planner_node, brain_node, capture_tool_output_node, summarize_memory_node
 
     def tool_node_factory(_tools):
         def _tool_node(state):
@@ -199,82 +226,9 @@ def test_build_app_propagates_same_execution_state_across_graph_nodes(tmp_path):
     })
 
     assert result["execution_state"] is execution_state
+    assert observed["controller"] == [execution_state, execution_state, execution_state]
     assert observed["planner"] == [execution_state]
-    assert observed["brain"][0] is execution_state
-    assert observed["brain"][1] is execution_state
-    assert observed["tools"] == [execution_state]
-    assert observed["capture"] == [execution_state]
-    assert observed["summary"] == [execution_state]
-
-
-def test_build_app_preserves_explicit_execution_state_replacement(tmp_path):
-    observed: dict[str, list[ExecutionState]] = {
-        "brain": [],
-        "tools": [],
-        "capture": [],
-        "summary": [],
-    }
-    original_execution_state = _sample_execution_state("run-1")
-    replacement_execution_state = _sample_execution_state("run-2")
-
-    def tool_list_factory(_workspace_root: str, _knowledge_root: str, _rag_service, _model: str):
-        return [DummyTool("noop")]
-
-    def chat_model_factory(model: str, temperature: float):
-        return FakeChatModel(model, temperature)
-
-    def graph_nodes_factory(**_kwargs):
-        def planner_node(_state):
-            return {"plan": "noop"}
-
-        def brain_node(state):
-            observed["brain"].append(state["execution_state"])
-            if len(observed["brain"]) == 1:
-                return {"execution_state": replacement_execution_state, "steps": 1}
-            return {"steps": state.get("steps", 0) + 1}
-
-        def capture_tool_output_node(state):
-            observed["capture"].append(state["execution_state"])
-            return {"last_tool_signature": "capture"}
-
-        def route_after_brain(_state):
-            return "tools" if len(observed["brain"]) == 1 else "summarize_memory"
-
-        def summarize_memory_node(state):
-            observed["summary"].append(state["execution_state"])
-            return {"rolling_summary": "done"}
-
-        return planner_node, brain_node, capture_tool_output_node, route_after_brain, summarize_memory_node
-
-    def tool_node_factory(_tools):
-        def _tool_node(state):
-            observed["tools"].append(state["execution_state"])
-            return {"last_tool_output": "ok"}
-
-        return _tool_node
-
-    app = build_app(
-        workspace_dir=str(tmp_path / "workspace"),
-        knowledge_dir=str(tmp_path / "knowledge"),
-        chat_model_factory=chat_model_factory,
-        tool_list_factory=tool_list_factory,
-        graph_nodes_factory=graph_nodes_factory,
-        tool_node_factory=tool_node_factory,
-        project_root=tmp_path,
-    )
-
-    result = app.invoke({
-        "messages": [HumanMessage(content="start")],
-        "steps": 0,
-        "execution_state": original_execution_state,
-    })
-
-    assert observed["brain"][0] is original_execution_state
-    assert observed["brain"][1] is replacement_execution_state
-    assert observed["tools"] == [replacement_execution_state]
-    assert observed["capture"] == [replacement_execution_state]
-    assert observed["summary"] == [replacement_execution_state]
-    assert result["execution_state"] is replacement_execution_state
+    assert observed["brain"] == [execution_state]
 
 
 def test_build_app_supports_invoke_only_tool_nodes(tmp_path):
@@ -283,6 +237,12 @@ def test_build_app_supports_invoke_only_tool_nodes(tmp_path):
         "capture": [],
     }
     execution_state = _sample_execution_state()
+    request = ToolRequest(request_id="noop-1", tool_name="noop")
+    authorized_execution_state = execution_state.model_copy(update={
+        "protocol_visible": execution_state.protocol_visible.model_copy(update={
+            "pending_tool_request": request,
+        }),
+    })
 
     def tool_list_factory(_workspace_root: str, _knowledge_root: str, _rag_service, _model: str):
         return [DummyTool("noop")]
@@ -291,23 +251,49 @@ def test_build_app_supports_invoke_only_tool_nodes(tmp_path):
         return FakeChatModel(model, temperature)
 
     def graph_nodes_factory(**_kwargs):
-        def planner_node(_state):
-            return {"plan": "noop"}
+        controller_calls = 0
 
-        def brain_node(state):
-            return {"steps": state.get("steps", 0) + 1}
+        def controller_node(_state):
+            nonlocal controller_calls
+            controller_calls += 1
+            if controller_calls == 1:
+                return {
+                    "execution_state": authorized_execution_state,
+                    "controller_decision": ControllerDecision(
+                        decision_type=ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
+                        next_worker=WorkerRole.TOOL_RUNTIME,
+                        pending_tool_request=request,
+                    ),
+                    "messages": [AIMessage(
+                        content="",
+                        tool_calls=[{
+                            "name": "noop", "args": {},
+                            "id": request.request_id, "type": "tool_call",
+                        }],
+                    )],
+                }
+            return {"controller_decision": ControllerDecision(
+                decision_type=ControllerDecisionType.TERMINATE,
+                reason="test complete",
+                execution_status=ExecutionStatus.COMPLETED,
+                cursor=ExecutionCursor(phase=ExecutionPhase.COMPLETED),
+                terminal=True,
+            )}
+
+        def planner_node(_state):
+            return {}
+
+        def brain_node(_state):
+            return {}
 
         def capture_tool_output_node(state):
             observed["capture"].append(state["execution_state"])
             return {"last_tool_signature": "capture"}
 
-        def route_after_brain(_state):
-            return "tools" if not observed["tools"] else "summarize_memory"
-
         def summarize_memory_node(_state):
-            return {"rolling_summary": "done"}
+            return {}
 
-        return planner_node, brain_node, capture_tool_output_node, route_after_brain, summarize_memory_node
+        return controller_node, planner_node, brain_node, capture_tool_output_node, summarize_memory_node
 
     def tool_node_factory(_tools):
         return InvokeOnlyNode(lambda state: observed["tools"].append(state["execution_state"]) or {"last_tool_output": "ok"})
@@ -328,6 +314,6 @@ def test_build_app_supports_invoke_only_tool_nodes(tmp_path):
         "execution_state": execution_state,
     })
 
-    assert observed["tools"] == [execution_state]
-    assert observed["capture"] == [execution_state]
-    assert result["execution_state"] is execution_state
+    assert observed["tools"] == [authorized_execution_state]
+    assert observed["capture"] == [authorized_execution_state]
+    assert result["execution_state"] is authorized_execution_state

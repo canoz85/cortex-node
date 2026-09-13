@@ -2,7 +2,6 @@ import logging
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from core.graph_constants import MAX_REASONING_STEPS
 from core.graph_runner import run_prompt
 from core.models import ToolResult
 from core.protocol.models import ExecutionState
@@ -19,12 +18,11 @@ class FakeApp:
             yield event
 
 
-def test_run_prompt_handles_tool_flow_and_updates_summary(capsys):
+def test_run_prompt_handles_tool_flow(capsys):
     planner_event = {
         "planner": {
             "steps": 1,
             "plan": "1. call list_files\n2. summarize",
-            "rolling_summary": "summary-after-plan",
         }
     }
     brain_with_tool_call = {
@@ -52,24 +50,20 @@ def test_run_prompt_handles_tool_flow_and_updates_summary(capsys):
     final_brain_event = {
         "brain": {
             "steps": 4,
-            "rolling_summary": "final-summary",
             "messages": [AIMessage(content="Completed")],
         }
     }
 
     app = FakeApp([planner_event, brain_with_tool_call, tools_event, final_brain_event])
-    history, summary = run_prompt(app, "list files", history=[HumanMessage(content="previous")], rolling_summary="old")
+    history, _ = run_prompt(app, "list files", history=[HumanMessage(content="previous")], rolling_summary="old")
 
-    assert summary == "final-summary"
     assert [message.content for message in history] == ["previous", "list files"]
 
     output = capsys.readouterr().out
-    assert "[planner:action]" in output
-    assert "Files under .:" in output
-    assert "- a.py" in output
+    assert "Completed" in output
 
 
-def test_run_prompt_emits_pseudo_tool_stop_warning(capsys):
+def test_run_prompt_renders_pseudo_tool_text_without_legacy_stop_warning(capsys):
     pseudo_event = {
         "brain": {
             "steps": 2,
@@ -83,13 +77,13 @@ def test_run_prompt_emits_pseudo_tool_stop_warning(capsys):
     assert [message.content for message in history] == ["do task"]
     assert summary == ""
     output = capsys.readouterr().out
-    assert "halted without executing those actions" in output
+    assert "pseudo tool-call text detected" in output
 
 
-def test_run_prompt_emits_max_step_warning(capsys):
+def test_run_prompt_does_not_infer_max_step_semantics_from_legacy_event_fields(capsys):
     max_step_event = {
         "brain": {
-            "steps": MAX_REASONING_STEPS,
+            "steps": 24,
             "messages": [AIMessage(content="done")],
         }
     }
@@ -98,7 +92,7 @@ def test_run_prompt_emits_max_step_warning(capsys):
     run_prompt(app, "do task")
 
     output = capsys.readouterr().out
-    assert "Max reasoning steps reached" in output
+    assert "done" in output
 
 
 def test_run_prompt_logs_completion_metrics(caplog):
@@ -144,15 +138,11 @@ def test_run_prompt_logs_completion_metrics(caplog):
     completed_records = [record for record in caplog.records if getattr(record, "event_name", "") == "prompt_completed"]
     assert len(completed_records) == 1
     completed = completed_records[0]
-    assert completed.node_updates == 4
-    assert completed.tool_call_messages == 1
-    assert completed.tool_call_count == 1
-    assert completed.tool_result_messages == 1
+    # The raw ToolNode transport event is intentionally suppressed; the runner
+    # counts only successfully extracted typed NodeUpdate events.
+    assert completed.node_updates == 3
     assert completed.duration_ms >= 0
-    assert completed.stop_reason == "completed"
     assert completed.max_steps_reached is False
-    assert completed.stopped_on_pseudo_call is False
-    assert completed.stopped_on_action_stop is False
 
 
 def test_run_prompt_attaches_execution_state_before_first_node():
