@@ -11,7 +11,7 @@ from core.planner_normalization import normalize_planner_proposal, planner_failu
 from core.protocol.models import PlanningRequest, PlannerResult
 from core.protocol.enums import PlanningFailureCategory, PlanningOperation
 
-DIRECT_RESPONSE_ROUTES = frozenset({"conversation", "clarify_domain"})
+DIRECT_RESPONSE_ROUTES = frozenset({"conversation", "clarify"})
 
 PLANNER_SYSTEM_PROMPT = """You are the Planner worker of CortexNode.
 
@@ -22,8 +22,6 @@ You ONLY produce one structured planning proposal/result.
 
 ROUTER CONTEXT:
 Route: {route}
-Domain: {domain}
-Reason: {reason}
 
 {system_capabilities_text}
 
@@ -121,9 +119,6 @@ class PlannerRouting:
     """Internal routing value, not a new execution outcome contract."""
 
     route: str
-    domain: str
-    confidence: float
-    reason: str
 
 
 @dataclass(frozen=True)
@@ -143,12 +138,10 @@ class PlannerProvider(Protocol):
 
 
 def filter_planner_tools(
-    all_tools: Set[str], *, route: str, domain: str,
-    domain_tool_map: Mapping[str, Set[str]], mutating_tools: Set[str],
+    all_tools: Set[str], *, route: str, mutating_tools: Set[str],
 ) -> set[str]:
-    """Preserve P1 prompt filtering, including unregistered ubiquitous tools."""
-    filtered = set(all_tools).intersection(domain_tool_map.get(domain, all_tools))
-    filtered.update({"current_time", "agent_info", "token_usage"})
+    """Narrow the Controller capability ceiling by execution mode only."""
+    filtered = set(all_tools)
     if route == "info":
         filtered.difference_update(mutating_tools)
     return filtered
@@ -197,17 +190,17 @@ class PlannerService:
 
         if planner_input.operation == PlanningOperation.REVISE and routing.route in DIRECT_RESPONSE_ROUTES:
             # A reclassification cannot discard a Controller-authorized revision.
-            routing = PlannerRouting("action", routing.domain, routing.confidence, routing.reason)
+            routing = PlannerRouting("action")
 
         log_planner("router", {"selected": vars(routing)}, enabled=self.show_raw_llm)
         filtered = filter_planner_tools(
-            frozenset(planner_input.capabilities.available_tools), route=routing.route, domain=routing.domain,
-            domain_tool_map=self.domain_tool_map, mutating_tools=self.mutating_tools,
+            frozenset(planner_input.capabilities.available_tools), route=routing.route,
+            mutating_tools=self.mutating_tools,
         )
         # Routing may narrow the Controller's capability ceiling, never widen it.
         filtered.intersection_update(planner_input.capabilities.available_tools)
         prompt = PLANNER_SYSTEM_PROMPT.format(
-            route=routing.route, domain=routing.domain, reason=routing.reason,
+            route=routing.route,
             system_capabilities_text=self.system_capabilities_text,
             available_tools="\n".join(f"- {name}" for name in sorted(filtered) if name)
             or "- No tool access allowed for this step",
@@ -248,7 +241,6 @@ class PlannerService:
         return self._logged_result(normalize_planner_proposal(
             content, planner_input,
             route=routing.route,
-            confidence=routing.confidence,
             effective_tools=frozenset(filtered),
         ))
 

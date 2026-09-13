@@ -151,7 +151,7 @@ class FakeProvider:
                 {"step_id": "inspect", "title": "Inspect", "description": "Inspect workspace", "primary_tool": "list_files", "dependencies": []}
             ]}
         self.content = content
-        self.routing = PlannerRouting(route, "workspace", 0.99, "fixture")
+        self.routing = PlannerRouting(route)
         self.messages = []
 
     def route(self, text):

@@ -16,11 +16,11 @@ class LangChainPlannerProvider:
         self.router_llm = router_llm
 
     def route(self, user_request: str) -> PlannerRouting:
-        # Keep confidence arbitration; invocation exceptions must reach FAILED.
+        # Invocation exceptions must reach FAILED.
         decision = planner_routing_decision(
             user_request, router_llm=self.router_llm, propagate_errors=True, show_raw_llm=self.show_raw_llm,
         )
-        return PlannerRouting(decision.route, decision.domain, decision.confidence, decision.reason)
+        return PlannerRouting(decision.route)
 
     def generate(self, messages: tuple[PlannerMessage, ...]) -> PlannerProposal:
         provider_messages = [

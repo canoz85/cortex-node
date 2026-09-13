@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from langchain_core.messages import AIMessage, HumanMessage
 
 from core.graph import build_app
+from core.graph_intents import RouterDecisionSchema
 from core.protocol.bridge import build_execution_state
 from core.protocol.enums import PlanningOperation, ExecutionStatus
 
@@ -13,8 +14,9 @@ class FakeModel:
         return self
 
     def with_structured_output(self, schema, method):
-        return SimpleNamespace(invoke=lambda messages: schema(
-            route="conversation", domain="general", confidence=1.0, enforced=False, reason="hello"))
+        value = ({"route": "conversation"} if schema is RouterDecisionSchema
+                 else {"result": "NO_PLAN_REQUIRED"})
+        return SimpleNamespace(invoke=lambda messages: schema(**value))
 
     def invoke(self, messages):
         return AIMessage(content="Hello.")
@@ -40,7 +42,7 @@ def test_production_graph_starts_at_controller_and_authorizes_create(tmp_path):
     assert ("__start__", "controller") in edges
     assert ("__start__", "planner") not in edges
     events = list(app.stream(state_for(), {"configurable": {"thread_id": "p2-entry"}}))
-    assert [next(iter(event)) for event in events] == ["controller", "planner", "controller", "brain", "controller"]
+    assert [next(iter(event)) for event in events] == ["controller", "planner", "controller"]
     request = events[0]["controller"]["execution_state"].protocol_visible.planning_request
     assert request.operation == PlanningOperation.CREATE
     assert request.context.user_request == "hello"

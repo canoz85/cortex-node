@@ -44,11 +44,11 @@ def _validate_graph(step_ids: tuple[str, ...], dependencies: dict[str, tuple[str
 
 
 def normalize_planner_proposal(
-    content: object, planner_input: PlanningRequest, *, route: str, confidence: float,
+    content: object, planner_input: PlanningRequest, *, route: str,
     effective_tools: frozenset[str] | None = None,
 ) -> PlannerResult:
     """Validate a proposal and convert it to the existing PlannerResult path."""
-    rationale = f"Route '{route}' selected with confidence {confidence:.2f}."
+    rationale = f"Execution mode: {route}."
     try:
         proposal = PlannerProposal.model_validate(content)
     except (ValidationError, TypeError, ValueError, AttributeError) as exc:

@@ -26,8 +26,7 @@ def authorize(state):
 class DummyPlannerLLM:
     def __init__(self, text, *, route="action", domain="workspace", confidence=0.95):
         self.text = text
-        self.routing = SimpleNamespace(route=route, domain=domain, confidence=confidence,
-                                       enforced=False, reason="fixture")
+        self.routing = SimpleNamespace(route=route)
         self.invocations = []
         self.routes = []
 
@@ -89,7 +88,7 @@ def test_numbered_prose_is_invalid_output():
     assert result.outcome == PlannerOutcome.FAILED
 
 
-@pytest.mark.parametrize("route", ["conversation", "clarify_domain"])
+@pytest.mark.parametrize("route", ["conversation", "clarify"])
 def test_direct_routes_require_explicit_structured_result(route):
     llm, rag = DummyPlannerLLM({"result":"NO_PLAN_REQUIRED","message":"direct"}, route=route), DummyRAG()
     update = make_node(llm, rag)({"messages": [HumanMessage(content="hello")]})
@@ -107,14 +106,17 @@ def test_current_tool_filtering(route, has_write):
     tools = prompt.split("AVAILABLE TOOLS FOR THIS REQUEST", 1)[1].split("PLANNING RULES:", 1)[0]
     assert "- list_files" in tools
     assert ("- write_file" in tools) == has_write
-    assert "- query_abap_table" not in tools
+    assert "- query_abap_table" in tools
     assert all(f"- {tool}" in tools for tool in ("agent_info", "token_usage", "current_time"))
 
 
-def test_low_confidence_router_preserves_conversation_fallback():
-    llm, rag = DummyPlannerLLM({"result":"NO_PLAN_REQUIRED"}, confidence=0.5), DummyRAG()
+def test_router_route_is_not_subject_to_confidence_fallback():
+    proposal = {"result":"PLAN_PROPOSED","steps":[
+        {"step_id":"inspect","title":"Inspect","description":"Inspect",
+         "primary_tool":"list_files","dependencies":[]}]}
+    llm, rag = DummyPlannerLLM(proposal, route="info", confidence=0.5), DummyRAG()
     result = make_node(llm, rag)({"messages": [HumanMessage(content="inspect")]})["planner_result"]
-    assert result.outcome == PlannerOutcome.DIRECT_RESPONSE
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
     assert len(llm.invocations) == 1
 
 

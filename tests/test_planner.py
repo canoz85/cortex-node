@@ -36,7 +36,7 @@ def planner_input(**updates):
 
 class FakeProvider:
     def __init__(self, content=VALID, *, route="action", error_at=None):
-        self.content=content; self.routing=PlannerRouting(route,"workspace",.95,"fixture")
+        self.content=content; self.routing=PlannerRouting(route)
         self.error_at=error_at; self.requests=[]; self.messages=[]
     def route(self, text):
         self.requests.append(text)
@@ -61,7 +61,7 @@ def test_valid_dependent_plan():
 
 def test_valid_independent_steps():
     value={**VALID,"steps":[{**VALID["steps"][0]},{**VALID["steps"][1],"dependencies":[]}]}
-    result=normalize_planner_proposal(value,planner_input(),route="action",confidence=1)
+    result=normalize_planner_proposal(value,planner_input(),route="action")
     assert [s.depends_on_step_ids for s in result.proposed_plan.steps]==[(),()]
 
 @pytest.mark.parametrize("mutate,needle", [
@@ -75,7 +75,7 @@ def test_valid_independent_steps():
 def test_invalid_plan_constraints_rejected(mutate,needle):
     import copy
     value=copy.deepcopy(VALID); mutate(value)
-    result=normalize_planner_proposal(value,planner_input(),route="action",confidence=1)
+    result=normalize_planner_proposal(value,planner_input(),route="action")
     assert result.outcome==PlannerOutcome.FAILED
     assert result.failure_category==PlanningFailureCategory.INVALID_OUTPUT
     assert needle in result.message
@@ -178,9 +178,9 @@ def test_genuinely_missing_capability_can_remain_unplannable():
     assert result.outcome==PlannerOutcome.FAILED
     assert result.failure_category==PlanningFailureCategory.UNPLANNABLE
 
-def test_unknown_domain_filter_does_not_mutate_inputs():
+def test_info_filter_removes_mutating_tools_without_mutating_inputs():
     tools={"custom","write_file"}; domains={"workspace":{"list_files"}}; mutating={"write_file"}
-    assert filter_planner_tools(tools,route="info",domain="unknown",domain_tool_map=domains,mutating_tools=mutating)=={"custom","current_time","agent_info","token_usage"}
+    assert filter_planner_tools(tools,route="info",mutating_tools=mutating)=={"custom"}
     assert tools=={"custom","write_file"}
 
 def test_service_runs_with_framework_imports_blocked():
