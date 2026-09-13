@@ -17,7 +17,6 @@ from typing import Any
 
 from langchain_core.messages import ToolMessage
 
-from core.graph_state_machine import apply_controller_decision_to_state
 from core.protocol.enums import ControllerDecisionType, WorkerRole
 from core.protocol.models import (
     ControllerDecision,
@@ -25,6 +24,7 @@ from core.protocol.models import (
     ToolRequest,
 )
 from core.runtime.gpu_resources import GpuResourceCoordinator, RuntimeGpuObserver
+from core.runtime.controller_transition import apply_controller_decision_to_state
 
 
 @dataclass(frozen=True, slots=True)

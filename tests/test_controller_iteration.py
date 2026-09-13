@@ -1,5 +1,5 @@
 from core.graph_controller import create_controller_node
-from core.graph_state_machine import apply_controller_decision_to_state
+from core.runtime.controller_transition import apply_controller_decision_to_state
 from core.protocol.bridge import build_controller_input
 from core.protocol.controller import CortexController
 from core.protocol.enums import (

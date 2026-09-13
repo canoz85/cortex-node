@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage
 
 from core.graph_controller import create_controller_node
 from core.graph_planner import create_planner_node
-from core.graph_state_machine import apply_controller_decision_to_state
+from core.runtime.controller_transition import apply_controller_decision_to_state
 from core.planner import PlannerService, PlannerRouting
 from core.protocol.bridge import build_controller_input, build_planner_input
 from core.protocol.controller import CortexController

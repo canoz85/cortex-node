@@ -12,7 +12,7 @@ from core.protocol.models import (
 )
 from core.protocol.controller import CortexController
 from core.protocol.bridge import build_controller_input, build_execution_state
-from core.graph_state_machine import apply_controller_decision_to_state
+from core.runtime.controller_transition import apply_controller_decision_to_state
 from core.planner_contract import PlannerProposal
 
 

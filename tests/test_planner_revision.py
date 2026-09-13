@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from core.graph_state_machine import apply_controller_decision_to_state
+from core.runtime.controller_transition import apply_controller_decision_to_state
 from core.planner_revision import RevisionRejection, reconcile_revision
 from core.protocol.controller import CortexController
 from core.protocol.completion_identity import eligible_records

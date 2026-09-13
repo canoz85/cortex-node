@@ -4,7 +4,6 @@ from core.protocol.controller import CortexController
 from core.finalizer import Finalizer
 
 from core.graph_constants import MAX_REASONING_STEPS
-from core.graph_state_machine import apply_controller_decision_to_state
 from core.protocol.bridge import build_controller_input
 from core.protocol.enums import WorkerRole, BrainOutcome, ExecutionStatus
 from core.protocol.models import ControllerDecision, ControllerInput, ExecutionState, FinalizationRequest, PlanningCapabilities
@@ -13,6 +12,7 @@ from core.completion import CompletionService
 from core.protocol.completion_identity import accepted_step
 from core.planner_revision import RevisionRejection, reconcile_revision
 from core.protocol.enums import PlanningOperation
+from core.runtime.controller_transition import ControllerCoordinator
 
 
 def create_controller_node(
@@ -27,6 +27,7 @@ def create_controller_node(
         planning_capabilities=planning_capabilities,
     )
     finalizer = finalizer or Finalizer()
+    coordinator = ControllerCoordinator(controller)
 
     def controller_node(state: AgentState):
         """
@@ -74,16 +75,14 @@ def create_controller_node(
             "completion_validation_error": validation_error,
         })
 
-        decision = controller.decide(controller_input)
+        transition = coordinator.transition(initial_state, controller_input)
+        decision = transition.decision
 
         # print("\n=== CONTROLLER DECISION ===")
         # print("decision:", decision)
         #print("before:", state["execution_state"].protocol_visible)
 
-        execution_state = apply_controller_decision_to_state(
-            initial_state,
-            decision,
-        )
+        execution_state = transition.execution_state
         # Freeze membership on activation and commit it with the graph transition.
         if decision.accepted_plan is None:
             bindings = protocol.accepted_requirements

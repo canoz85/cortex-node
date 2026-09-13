@@ -1,6 +1,6 @@
 """Runtime-owned completion provenance regressions."""
 
-from core.graph_state_machine import apply_controller_decision_to_state
+from core.runtime.controller_transition import apply_controller_decision_to_state
 from core.protocol.completion_identity import completion_provenance_records, evidence_identity
 from core.protocol.controller import CortexController
 from core.protocol.enums import BrainOutcomeKind, ExecutionPhase, StepStatus
