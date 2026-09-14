@@ -5,14 +5,22 @@ from core.finalizer import Finalizer
 
 from core.graph_constants import MAX_REASONING_STEPS
 from core.protocol.bridge import build_controller_input
-from core.protocol.enums import WorkerRole, BrainOutcome, ExecutionStatus
-from core.protocol.models import ControllerDecision, ControllerInput, ExecutionState, FinalizationRequest, PlanningCapabilities
+from core.protocol.models import FinalizationResult, PlanningCapabilities
 from core.state import AgentState
 from core.completion import CompletionService
-from core.protocol.completion_identity import accepted_step
-from core.planner_revision import RevisionRejection, reconcile_revision
-from core.protocol.enums import PlanningOperation
 from core.runtime.controller_transition import ControllerCoordinator
+from core.runtime.execution_driver import ExecutionDriver
+from core.runtime.portable_orchestration import PortableExecutionRuntime
+
+
+class _GraphDeferredWorkerPort:
+    """Non-terminal workers remain physical graph nodes in Slice 3."""
+
+    def run(self, _value):
+        raise RuntimeError("graph worker dispatch must be deferred")
+
+    def execute(self, _value):
+        raise RuntimeError("graph tool dispatch must be deferred")
 
 
 def create_controller_node(
@@ -28,75 +36,40 @@ def create_controller_node(
     )
     finalizer = finalizer or Finalizer()
     coordinator = ControllerCoordinator(controller)
+    deferred = _GraphDeferredWorkerPort()
+    runtime = PortableExecutionRuntime(
+        driver=ExecutionDriver(
+            coordinator=coordinator,
+            planner=deferred,
+            brain=deferred,
+            tool_runtime=deferred,
+            finalizer=finalizer,
+        ),
+        completion_service=completion_service,
+    )
 
     def controller_node(state: AgentState):
         """
         LangGraph adapter for the protocol Controller.
 
-        Responsibilities:
-          1. Build ControllerInput from legacy state.
-          2. Invoke the protocol Controller.
-          3. Apply the ControllerDecision to runtime state.
-          4. Store the decision for routing.
+        This function translates graph transport into and out of the portable
+        runtime. Existing graph nodes temporarily perform non-terminal dispatch.
         """
 
         controller_input = build_controller_input(state)
 
-        initial_state = state["execution_state"]
-        protocol = initial_state.protocol_visible
-        if controller_input.active_step is not None:
-            accepted_step(controller_input.active_plan, controller_input.active_step, controller_input.cursor)
-        assessment, frozen = completion_service.evaluate(
-            controller_input.identity, controller_input.active_plan, controller_input.active_step,
-            controller_input.tool_execution_history, protocol.resolved_coverages,
-            previous=initial_state.working.coverage_assessment, bindings=protocol.accepted_requirements,
+        portable_turn = runtime.turn(
+            state["execution_state"], controller_input, dispatch_worker=False
         )
-        bindings = protocol.accepted_requirements
-        validation_id, validation_error = None, None
-        if controller_input.planner_result is not None and controller_input.planner_result.proposed_plan is not None:
-            request = controller_input.planning_request
-            if request is not None and request.operation == PlanningOperation.REVISE:
-                try:
-                    reconciled = reconcile_revision(
-                        request, controller_input.active_plan,
-                        controller_input.planner_result.proposed_plan,
-                    )
-                    controller_input = controller_input.model_copy(update={
-                        "planner_result": controller_input.planner_result.model_copy(update={
-                            "proposed_plan": reconciled,
-                        }),
-                    })
-                except RevisionRejection:
-                    pass
-            validation_id, validation_error, bindings = completion_service.bind_plan(
-                controller_input.identity, controller_input.planner_result.proposed_plan, bindings)
-        controller_input = controller_input.model_copy(update={
-            "coverage_assessment": assessment, "accepted_requirements": bindings, "completion_validation_id": validation_id,
-            "completion_validation_error": validation_error,
-        })
-
-        transition = coordinator.transition(initial_state, controller_input)
-        decision = transition.decision
+        controller_input = portable_turn.controller_input
+        turn = portable_turn.driver_turn
+        decision = turn.decision
 
         # print("\n=== CONTROLLER DECISION ===")
         # print("decision:", decision)
         #print("before:", state["execution_state"].protocol_visible)
 
-        execution_state = transition.execution_state
-        # Freeze membership on activation and commit it with the graph transition.
-        if decision.accepted_plan is None:
-            bindings = protocol.accepted_requirements
-        next_protocol = execution_state.protocol_visible
-        if next_protocol.active_step != protocol.active_step or next_protocol.active_plan != protocol.active_plan:
-            assessment, frozen = completion_service.evaluate(
-                controller_input.identity, next_protocol.active_plan, next_protocol.active_step,
-                controller_input.tool_execution_history, frozen,
-                previous=assessment, bindings=bindings,
-            )
-        execution_state = execution_state.model_copy(update={
-            "protocol_visible": next_protocol.model_copy(update={"resolved_coverages": frozen, "accepted_requirements": bindings}),
-            "working": execution_state.working.model_copy(update={"coverage_assessment": assessment}),
-        })
+        execution_state = turn.execution_state
 
         print("\n=== AFTER APPLY ===")
         # print("cursor:", execution_state.protocol_visible.cursor)
@@ -116,8 +89,6 @@ def create_controller_node(
         elif decision.clear_planning_clarification:
             update["clarification_request"] = ""
 
-        brain_result = controller_input.brain_result
-
         if controller_input.brain_result is not None:
             update["brain_result"] = None
 
@@ -125,20 +96,10 @@ def create_controller_node(
             update["planner_result"] = None
 
         if decision.terminal:
-            previous_decision = state.get("controller_decision")
-            request = _build_finalization_request(
-                execution_state=execution_state,
-                decision=decision,
-                controller_input=controller_input,
-                previous_decision=(
-                    previous_decision
-                    if isinstance(previous_decision, ControllerDecision)
-                    else None
-                ),
-                brain_result=brain_result,
-            )
             try:
-                result = finalizer.finalize(request)
+                result = runtime.dispatch(portable_turn)
+                if not isinstance(result, FinalizationResult):
+                    raise TypeError("portable driver did not return FinalizationResult")
                 execution_state = execution_state.model_copy(update={
                     "protocol_visible": execution_state.protocol_visible.model_copy(update={
                         "summary": result.execution_summary,
@@ -151,8 +112,8 @@ def create_controller_node(
                 update["messages"] = [AIMessage(content=result.final_answer)]
                 print(
                     "[finalizer] "
-                    f"execution_id={request.identity.execution_id} "
-                    f"status={request.status.value} "
+                    f"execution_id={controller_input.identity.execution_id} "
+                    f"status={execution_state.protocol_visible.status.value} "
                     f"summary={result.execution_summary.model_dump(mode='json')}"
                 )
             except Exception as exc:
@@ -163,7 +124,7 @@ def create_controller_node(
                 update["messages"] = [AIMessage(content=final_answer)]
                 print(
                     "[finalizer] "
-                    f"execution_id={request.identity.execution_id} error={error}"
+                    f"execution_id={controller_input.identity.execution_id} error={error}"
                 )
 
 
@@ -184,35 +145,3 @@ def create_controller_node(
         return update
 
     return controller_node
-
-
-def _build_finalization_request(
-    *,
-    execution_state: ExecutionState,
-    decision: ControllerDecision,
-    controller_input: ControllerInput,
-    previous_decision: ControllerDecision | None,
-    brain_result,
-) -> FinalizationRequest:
-    """Translate an already-authorized terminal transition into finalization facts."""
-
-    protocol = execution_state.protocol_visible
-    direct_response = bool(
-        decision.execution_status == ExecutionStatus.COMPLETED
-        and protocol.active_plan is None
-        and brain_result is not None
-        and brain_result.outcome == BrainOutcome.FINAL_ANSWER
-        and previous_decision is not None
-        and previous_decision.direct_response
-    )
-    return FinalizationRequest(
-        identity=protocol.identity,
-        status=protocol.status,
-        context=controller_input.context,
-        accepted_plan=protocol.active_plan,
-        tool_execution_history=controller_input.tool_execution_history,
-        completed_step_ids=protocol.completed_step_ids,
-        terminal_reason=decision.failure_reason or decision.reason,
-        direct_response=direct_response,
-        cancellation_source=protocol.cancellation_source,
-    )

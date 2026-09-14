@@ -68,22 +68,39 @@ class ExecutionDriver:
         self,
         execution_state: ExecutionState,
         controller_input: ControllerInput,
+        *,
+        dispatch_worker: bool = True,
     ) -> ExecutionDriverTurn:
-        """Perform one decision/application/dispatch turn without graph inference."""
+        """Perform one decision/application turn and optionally dispatch its worker.
+
+        ``dispatch_worker=False`` is the topology-preserving LangGraph bridge: the
+        returned decision is still produced and applied here, while the existing
+        graph edge invokes the authorized non-terminal worker.
+        """
 
         transition = self._coordinator.transition(execution_state, controller_input)
         decision = transition.decision
         updated_state = transition.execution_state
-        worker_result = self._dispatch(
-            updated_state,
-            decision,
-            controller_input,
+        worker_result = (
+            self._dispatch(updated_state, decision, controller_input)
+            if dispatch_worker
+            else None
         )
         return ExecutionDriverTurn(
             execution_state=updated_state,
             decision=decision,
             worker_result=worker_result,
         )
+
+    def dispatch_authorized(
+        self,
+        execution_state: ExecutionState,
+        decision: ControllerDecision,
+        controller_input: ControllerInput,
+    ) -> WorkerResult | None:
+        """Dispatch a previously applied authorization without recomputing it."""
+
+        return self._dispatch(execution_state, decision, controller_input)
 
     def _dispatch(
         self,
