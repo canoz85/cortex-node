@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from core.completion import CompletionService
 from core.planner_revision import RevisionRejection, reconcile_revision
 from core.protocol.completion_identity import accepted_step
-from core.protocol.enums import PlanningOperation
-from core.protocol.models import ControllerInput, ExecutionState
+from core.protocol.enums import ControllerDecisionType, PlanningOperation
+from core.protocol.models import ControllerInput, ExecutionState, FinalizationResult
 from core.runtime.execution_driver import ExecutionDriver, ExecutionDriverTurn
 
 
@@ -18,6 +18,7 @@ class PortableRuntimeTurn:
 
     driver_turn: ExecutionDriverTurn
     controller_input: ControllerInput
+    terminal_dispatch_error: Exception | None = None
 
 
 class PortableExecutionRuntime:
@@ -37,9 +38,10 @@ class PortableExecutionRuntime:
         prepared, bindings, assessment, frozen = self._prepare(
             execution_state, controller_input
         )
-        driver_turn = self._driver.turn(
-            execution_state, prepared, dispatch_worker=dispatch_worker
-        )
+        # The portable runtime owns dispatch sequencing.  Asking the driver for
+        # the applied transition first lets terminal dispatch consume that exact
+        # authorization without recomputing or applying it again.
+        driver_turn = self._driver.transition(execution_state, prepared)
         decision = driver_turn.decision
         transitioned = driver_turn.execution_state
         previous_protocol = execution_state.protocol_visible
@@ -70,21 +72,39 @@ class PortableExecutionRuntime:
                 "coverage_assessment": assessment,
             }),
         })
+        worker_result = None
+        terminal_dispatch_error = None
+        dispatchable = decision.terminal or decision.decision_type in {
+            ControllerDecisionType.DISPATCH_PLANNER,
+            ControllerDecisionType.DISPATCH_BRAIN,
+            ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
+            ControllerDecisionType.PAUSE,
+        }
+        if dispatch_worker and dispatchable or decision.terminal:
+            try:
+                worker_result = self._driver.dispatch_authorized(
+                    transitioned, decision, prepared
+                )
+            except Exception as exc:
+                if not decision.terminal:
+                    raise
+                terminal_dispatch_error = exc
+        if decision.terminal and worker_result is not None and not isinstance(
+            worker_result, FinalizationResult
+        ):
+            terminal_dispatch_error = TypeError(
+                "portable driver did not return FinalizationResult"
+            )
+            worker_result = None
+
         return PortableRuntimeTurn(
             driver_turn=ExecutionDriverTurn(
                 execution_state=transitioned,
                 decision=decision,
-                worker_result=driver_turn.worker_result,
+                worker_result=worker_result,
             ),
             controller_input=prepared,
-        )
-
-    def dispatch(self, turn: PortableRuntimeTurn):
-        """Dispatch the authorization carried by an existing portable turn."""
-
-        value = turn.driver_turn
-        return self._driver.dispatch_authorized(
-            value.execution_state, value.decision, turn.controller_input
+            terminal_dispatch_error=terminal_dispatch_error,
         )
 
     def _prepare(

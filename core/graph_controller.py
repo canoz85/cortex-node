@@ -28,6 +28,7 @@ def create_controller_node(
     completion_service: CompletionService | None = None,
     finalizer: Finalizer | None = None,
     planning_capabilities: PlanningCapabilities | None = None,
+    worker_ports=None,
 ):
     completion_service = completion_service or CompletionService()
     controller = controller or CortexController(
@@ -36,7 +37,7 @@ def create_controller_node(
     )
     finalizer = finalizer or Finalizer()
     coordinator = ControllerCoordinator(controller)
-    deferred = _GraphDeferredWorkerPort()
+    deferred = worker_ports or _GraphDeferredWorkerPort()
     runtime = PortableExecutionRuntime(
         driver=ExecutionDriver(
             coordinator=coordinator,
@@ -53,13 +54,18 @@ def create_controller_node(
         LangGraph adapter for the protocol Controller.
 
         This function translates graph transport into and out of the portable
-        runtime. Existing graph nodes temporarily perform non-terminal dispatch.
+        runtime. Production workers execute through the injected driver ports;
+        standalone legacy adapters may still defer dispatch for compatibility.
         """
 
         controller_input = build_controller_input(state)
 
+        if worker_ports is not None:
+            worker_ports.begin_turn(state)
         portable_turn = runtime.turn(
-            state["execution_state"], controller_input, dispatch_worker=False
+            state["execution_state"],
+            controller_input,
+            dispatch_worker=worker_ports is not None,
         )
         controller_input = portable_turn.controller_input
         turn = portable_turn.driver_turn
@@ -84,6 +90,15 @@ def create_controller_node(
             "execution_state": execution_state,
             "controller_decision": decision,
         }
+        if worker_ports is not None:
+            worker_update = worker_ports.consume_update()
+            transported_state = worker_update.pop("execution_state", None)
+            if transported_state is not None:
+                execution_state = execution_state.model_copy(
+                    update={"working": transported_state.working}
+                )
+            update.update(worker_update)
+            update["execution_state"] = execution_state
         if decision.planning_clarification is not None:
             update["clarification_request"] = decision.planning_clarification.prompt
         elif decision.clear_planning_clarification:
@@ -96,10 +111,9 @@ def create_controller_node(
             update["planner_result"] = None
 
         if decision.terminal:
-            try:
-                result = runtime.dispatch(portable_turn)
-                if not isinstance(result, FinalizationResult):
-                    raise TypeError("portable driver did not return FinalizationResult")
+            result = turn.worker_result
+            error = portable_turn.terminal_dispatch_error
+            if isinstance(result, FinalizationResult):
                 execution_state = execution_state.model_copy(update={
                     "protocol_visible": execution_state.protocol_visible.model_copy(update={
                         "summary": result.execution_summary,
@@ -116,15 +130,19 @@ def create_controller_node(
                     f"status={execution_state.protocol_visible.status.value} "
                     f"summary={result.execution_summary.model_dump(mode='json')}"
                 )
-            except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
+            else:
+                error_text = (
+                    f"{type(error).__name__}: {error}"
+                    if error is not None
+                    else "TypeError: portable runtime returned no terminal result"
+                )
                 final_answer = "Execution finished, but finalization failed."
-                update["finalization_error"] = error
+                update["finalization_error"] = error_text
                 update["final_answer"] = final_answer
                 update["messages"] = [AIMessage(content=final_answer)]
                 print(
                     "[finalizer] "
-                    f"execution_id={controller_input.identity.execution_id} error={error}"
+                    f"execution_id={controller_input.identity.execution_id} error={error_text}"
                 )
 
 
@@ -144,4 +162,5 @@ def create_controller_node(
 
         return update
 
+    controller_node._portable_dispatch = worker_ports is not None
     return controller_node

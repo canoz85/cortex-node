@@ -71,16 +71,11 @@ class ExecutionDriver:
         *,
         dispatch_worker: bool = True,
     ) -> ExecutionDriverTurn:
-        """Perform one decision/application turn and optionally dispatch its worker.
+        """Perform one decision/application turn and optionally dispatch its worker."""
 
-        ``dispatch_worker=False`` is the topology-preserving LangGraph bridge: the
-        returned decision is still produced and applied here, while the existing
-        graph edge invokes the authorized non-terminal worker.
-        """
-
-        transition = self._coordinator.transition(execution_state, controller_input)
-        decision = transition.decision
-        updated_state = transition.execution_state
+        authorized = self.transition(execution_state, controller_input)
+        decision = authorized.decision
+        updated_state = authorized.execution_state
         worker_result = (
             self._dispatch(updated_state, decision, controller_input)
             if dispatch_worker
@@ -90,6 +85,19 @@ class ExecutionDriver:
             execution_state=updated_state,
             decision=decision,
             worker_result=worker_result,
+        )
+
+    def transition(
+        self,
+        execution_state: ExecutionState,
+        controller_input: ControllerInput,
+    ) -> ExecutionDriverTurn:
+        """Produce and apply one authorization without dispatching it."""
+
+        value = self._coordinator.transition(execution_state, controller_input)
+        return ExecutionDriverTurn(
+            execution_state=value.execution_state,
+            decision=value.decision,
         )
 
     def dispatch_authorized(
@@ -123,7 +131,12 @@ class ExecutionDriver:
                     raise WorkerDispatchError(
                         "DISPATCH_PLANNER requires a PlanningRequest"
                     )
-                result = self._planner.run(request)
+                run_authorized = getattr(self._planner, "run_authorized", None)
+                result = (
+                    run_authorized(request, execution_state, decision)
+                    if callable(run_authorized)
+                    else self._planner.run(request)
+                )
                 if not isinstance(result, PlannerResult):
                     raise WorkerDispatchError("Planner returned an invalid result type")
                 if result.request_id != request.request_id:
@@ -151,7 +164,12 @@ class ExecutionDriver:
                     direct_response=decision.direct_response,
                     coverage_assessment=controller_input.coverage_assessment,
                 )
-                result = self._brain.run(brain_input)
+                run_authorized = getattr(self._brain, "run_authorized", None)
+                result = (
+                    run_authorized(brain_input, execution_state, decision)
+                    if callable(run_authorized)
+                    else self._brain.run(brain_input)
+                )
                 if not isinstance(result, BrainResult):
                     raise WorkerDispatchError("Brain returned an invalid result type")
                 return result
@@ -167,7 +185,14 @@ class ExecutionDriver:
                     raise WorkerDispatchError(
                         "Tool request does not match the authorized execution state"
                     )
-                result = self._tool_runtime.execute(request)
+                execute_authorized = getattr(
+                    self._tool_runtime, "execute_authorized", None
+                )
+                result = (
+                    execute_authorized(request, execution_state, decision)
+                    if callable(execute_authorized)
+                    else self._tool_runtime.execute(request)
+                )
                 if not isinstance(result, ToolResult):
                     raise WorkerDispatchError("Tool runtime returned an invalid result type")
                 if result.request_id != request.request_id:

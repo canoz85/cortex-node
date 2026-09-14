@@ -15,6 +15,7 @@ from core.graph_authorization import require_tool_authorization
 from core.graph_nodes import create_graph_nodes
 from core.brain_provider import native_brain_tools, text_tool_definitions
 from core.graph_routing import  route_after_controller
+from core.graph_worker_runtime import GraphWorkerRuntimePorts
 from core.graph_runner import run_prompt
 from core.rag import WorkspaceRAG
 from core.runtime.async_poller import CheckpointedGraphApp, LocalAsyncPollingRuntime
@@ -306,6 +307,7 @@ def build_app(
     if supports_native_tool_calls:
         tool_brain_llm = tool_brain_llm.bind_tools(native_brain_tools(tools))
 
+    worker_ports = GraphWorkerRuntimePorts()
     controller_node, planner_node, brain_node, capture_tool_output_node, summarize_memory_node = graph_nodes_factory(
         brain_llm=brain_llm,
         tool_brain_llm=tool_brain_llm,
@@ -318,6 +320,7 @@ def build_app(
         tools_set=tools_set,
         show_raw_llm=show_raw_llm,
         supports_native_tool_calls=supports_native_tool_calls,
+        worker_ports=worker_ports,
     )
 
     resource_observer = (
@@ -328,52 +331,91 @@ def build_app(
 
     workflow = StateGraph(AgentState)
     wrapped_tool_node = _wrap_tool_node_for_protocol_request_id(tool_node_factory(tools))
-    _register_state_node(
-        workflow,
-        "planner",
-        planner_node,
-        resource_observer=resource_observer,
+    worker_ports.bind_nodes(
+        planner=planner_node,
+        brain=brain_node,
+        tool=wrapped_tool_node,
+        capture=capture_tool_output_node,
     )
-    _register_state_node(
-        workflow,
-        "controller",
-        controller_node,
-        resource_observer=resource_observer,
-    )
-    _register_state_node(
-        workflow,
-        "brain",
-        brain_node,
-        resource_observer=resource_observer,
-    )
-    _register_state_node(
-        workflow,
-        "tools",
-        wrapped_tool_node,
-        resource_observer=resource_observer,
-    )
-    _register_state_node(
-        workflow,
-        "capture_tool_output",
-        capture_tool_output_node,
-        resource_observer=resource_observer,
-    )
-    _register_state_node(
-        workflow,
-        "summarize_memory",
-        summarize_memory_node,
-        resource_observer=resource_observer,
-    )
+    if getattr(controller_node, "_portable_dispatch", False):
+        _register_state_node(
+            workflow,
+            "controller",
+            controller_node,
+            resource_observer=resource_observer,
+        )
+        workflow.set_entry_point("controller")
 
-    workflow.set_entry_point("controller")
+        # Stage 6 exception: LocalAsyncPollingRuntime resumes by writing a
+        # polled ToolMessage as_node="tools", then reuses capture normalization.
+        # No normal synchronous edge targets this guarded ToolNode adapter.
+        _register_state_node(
+            workflow,
+            "tools",
+            wrapped_tool_node,
+            resource_observer=resource_observer,
+        )
+        _register_state_node(
+            workflow,
+            "capture_tool_output",
+            capture_tool_output_node,
+            resource_observer=resource_observer,
+        )
 
-    workflow.add_edge("planner", "controller")
-    workflow.add_conditional_edges("controller", route_after_controller)
+        def route_portable_turn(state):
+            destination = route_after_controller(state)
+            return END if destination == END else "controller"
 
-    workflow.add_edge("tools", "capture_tool_output")
-    workflow.add_edge("capture_tool_output", "controller")
-    workflow.add_edge("brain", "controller")
-    workflow.add_edge("summarize_memory", END)
+        workflow.add_conditional_edges("controller", route_portable_turn)
+        workflow.add_edge("tools", "capture_tool_output")
+        workflow.add_edge("capture_tool_output", "controller")
+    else:
+        # Injected topology factories remain a test/integration compatibility
+        # surface. Production normal execution uses the thinned branch above.
+        _register_state_node(
+            workflow,
+            "planner",
+            planner_node,
+            resource_observer=resource_observer,
+        )
+        _register_state_node(
+            workflow,
+            "controller",
+            controller_node,
+            resource_observer=resource_observer,
+        )
+        _register_state_node(
+            workflow,
+            "brain",
+            brain_node,
+            resource_observer=resource_observer,
+        )
+        _register_state_node(
+            workflow,
+            "tools",
+            wrapped_tool_node,
+            resource_observer=resource_observer,
+        )
+        _register_state_node(
+            workflow,
+            "capture_tool_output",
+            capture_tool_output_node,
+            resource_observer=resource_observer,
+        )
+        _register_state_node(
+            workflow,
+            "summarize_memory",
+            summarize_memory_node,
+            resource_observer=resource_observer,
+        )
+
+        workflow.set_entry_point("controller")
+        workflow.add_edge("planner", "controller")
+        workflow.add_conditional_edges("controller", route_after_controller)
+        workflow.add_edge("tools", "capture_tool_output")
+        workflow.add_edge("capture_tool_output", "controller")
+        workflow.add_edge("brain", "controller")
+        workflow.add_edge("summarize_memory", END)
 
     compiled_graph = workflow.compile(
         checkpointer=checkpointer_factory(),

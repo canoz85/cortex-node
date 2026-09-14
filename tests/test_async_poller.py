@@ -480,7 +480,8 @@ def test_build_app_runs_submission_await_poll_capture_and_resume_end_to_end():
             CortexController(
                 max_reasoning_steps=10,
                 now_utc=lambda: OBSERVED_AT,
-            )
+            ),
+            worker_ports=_kwargs["worker_ports"],
         )
         capture_node = create_capture_tool_output_node()
 

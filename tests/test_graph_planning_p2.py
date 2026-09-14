@@ -39,10 +39,17 @@ def state_for():
 def test_production_graph_starts_at_controller_and_authorizes_create(tmp_path):
     app = app_for(tmp_path)
     edges = {(edge.source, edge.target) for edge in app.get_graph().edges}
+    assert set(app.get_graph().nodes) == {
+        "__start__", "controller", "tools", "capture_tool_output", "__end__",
+    }
     assert ("__start__", "controller") in edges
     assert ("__start__", "planner") not in edges
+    assert not any(node in {"planner", "brain", "summarize_memory"}
+                   for edge in edges for node in edge)
+    assert not any(edge[0] == "controller" and edge[1] == "tools" for edge in edges)
     events = list(app.stream(state_for(), {"configurable": {"thread_id": "p2-entry"}}))
-    assert [next(iter(event)) for event in events] == ["controller", "planner", "controller"]
+    assert [next(iter(event)) for event in events] == ["controller", "controller"]
+    assert "planner" not in {node for event in events for node in event}
     request = events[0]["controller"]["execution_state"].protocol_visible.planning_request
     assert request.operation == PlanningOperation.CREATE
     assert request.context.user_request == "hello"
@@ -55,12 +62,13 @@ def test_production_graph_starts_at_controller_and_authorizes_create(tmp_path):
 def test_checkpoint_before_planner_preserves_request_and_resumes(tmp_path):
     app = app_for(tmp_path)
     config = {"configurable": {"thread_id": "p2-checkpoint"}}
-    list(app.stream(state_for(), config, interrupt_before=["planner"]))
+    list(app.stream(state_for(), config, interrupt_after=["controller"]))
     snapshot = app.get_state(config)
     request = snapshot.values["execution_state"].protocol_visible.planning_request
     assert request.operation == PlanningOperation.CREATE
-    assert snapshot.next == ("planner",)
+    assert snapshot.next == ("controller",)
+    assert snapshot.values["planner_result"].request_id == request.request_id
     events = list(app.stream(None, config))
-    assert next(iter(events[0])) == "planner"
+    assert next(iter(events[0])) == "controller"
     assert events[-1]["controller"]["execution_state"].protocol_visible.planning_sequence == request.sequence
     assert events[-1]["controller"]["execution_state"].protocol_visible.planning_request is None

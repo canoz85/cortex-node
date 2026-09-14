@@ -165,11 +165,13 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
 
         controller = create_controller_node(
             finalizer=Finalizer(answer_renderer=Renderer()),
+            worker_ports=kwargs["worker_ports"],
         )
 
         def observe_controller(state):
             snapshots.append(state)
             return controller(state)
+        observe_controller._portable_dispatch = True
 
         def planner(_state):
             request_id = _state["execution_state"].protocol_visible.planning_request.request_id
@@ -248,8 +250,12 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
         assert protocol.completed_step_ids == ("s1",)
         assert protocol.retry.retry_count == 0
         assert protocol.active_plan.steps[0].status == StepStatus.COMPLETED
-    assert app.builder.edges == {
-        ("__start__", "controller"), ("planner", "controller"), ("brain", "controller"),
-        ("tools", "capture_tool_output"), ("capture_tool_output", "controller"), ("summarize_memory", "__end__"),
-    }
+        assert app.builder.edges == {
+            ("__start__", "controller"),
+            ("tools", "capture_tool_output"),
+            ("capture_tool_output", "controller"),
+        }
+        assert set(app.get_graph().nodes) == {
+            "__start__", "controller", "tools", "capture_tool_output", "__end__",
+        }
     assert set(app.builder.branches) == {"controller"}

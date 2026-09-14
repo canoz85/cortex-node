@@ -11,18 +11,13 @@ from core.runtime.execution_driver import ExecutionDriver
 
 def test_live_graph_controller_invokes_execution_driver(monkeypatch):
     calls = []
-    original = ExecutionDriver.turn
+    original = ExecutionDriver.transition
 
-    def observe(self, execution_state, controller_input, *, dispatch_worker=True):
-        calls.append((execution_state, controller_input, dispatch_worker))
-        return original(
-            self,
-            execution_state,
-            controller_input,
-            dispatch_worker=dispatch_worker,
-        )
+    def observe(self, execution_state, controller_input):
+        calls.append((execution_state, controller_input))
+        return original(self, execution_state, controller_input)
 
-    monkeypatch.setattr(ExecutionDriver, "turn", observe)
+    monkeypatch.setattr(ExecutionDriver, "transition", observe)
     state = ExecutionState(protocol_visible=ProtocolVisibleState(
         identity=ExecutionIdentity(execution_id="live-driver", protocol_version="1"),
         cursor=ExecutionCursor(phase=ExecutionPhase.INITIALIZING),
@@ -35,6 +30,4 @@ def test_live_graph_controller_invokes_execution_driver(monkeypatch):
 
     assert len(calls) == 1
     assert calls[0][0] is state
-    assert calls[0][2] is False
     assert update["controller_decision"].planning_request is not None
-

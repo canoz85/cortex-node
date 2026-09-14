@@ -30,6 +30,7 @@ def create_graph_nodes(
     tools_set: Set[str],
     show_raw_llm: bool,
     supports_native_tool_calls: bool = True,
+    worker_ports=None,
 ):
 
     controller_node = create_controller_node(
@@ -39,7 +40,7 @@ def create_graph_nodes(
         }),
         finalizer=Finalizer(answer_renderer=LangChainFinalAnswerRenderer(
             llm=brain_llm, show_raw_llm=show_raw_llm,
-        ), show_raw_llm=show_raw_llm),
+        ), show_raw_llm=show_raw_llm), worker_ports=worker_ports,
     )
     
     planner_node = create_planner_node(
