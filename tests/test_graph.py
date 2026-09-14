@@ -8,7 +8,9 @@ from core.protocol.models import (
     ControllerDecision,
     ExecutionCursor,
     ExecutionIdentity,
+    ExecutionPlan,
     ExecutionState,
+    ExecutionStep,
     ProtocolVisibleState,
     ToolRequest,
     WorkingState,
@@ -238,9 +240,20 @@ def test_build_app_supports_invoke_only_tool_nodes(tmp_path):
     }
     execution_state = _sample_execution_state()
     request = ToolRequest(request_id="noop-1", tool_name="noop")
+    step = ExecutionStep(step_id="noop-step", title="Run noop")
+    plan = ExecutionPlan(plan_id="noop-plan", revision=1, steps=(step,))
+    tool_cursor = ExecutionCursor(
+        phase=ExecutionPhase.EXECUTING,
+        step_id=step.step_id,
+        plan_revision=plan.revision,
+        current_worker=WorkerRole.TOOL_RUNTIME,
+    )
     authorized_execution_state = execution_state.model_copy(update={
         "protocol_visible": execution_state.protocol_visible.model_copy(update={
             "pending_tool_request": request,
+            "cursor": tool_cursor,
+            "active_plan": plan,
+            "active_step": step,
         }),
     })
 
@@ -261,8 +274,9 @@ def test_build_app_supports_invoke_only_tool_nodes(tmp_path):
                     "execution_state": authorized_execution_state,
                     "controller_decision": ControllerDecision(
                         decision_type=ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
-                        next_worker=WorkerRole.TOOL_RUNTIME,
-                        pending_tool_request=request,
+                            next_worker=WorkerRole.TOOL_RUNTIME,
+                            pending_tool_request=request,
+                            cursor=tool_cursor,
                     ),
                     "messages": [AIMessage(
                         content="",

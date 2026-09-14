@@ -526,7 +526,7 @@ def test_build_app_runs_submission_await_poll_capture_and_resume_end_to_end():
                             tool_calls=[{
                                 "name": request.tool_name,
                                 "args": request.arguments,
-                                "id": "model-call-id",
+                                    "id": request.request_id,
                                 "type": "tool_call",
                             }],
                         )

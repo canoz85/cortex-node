@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage
 from core.graph_controller import create_controller_node
 from core.graph_planner import create_planner_node
 from core.runtime.controller_transition import apply_controller_decision_to_state
+from core.runtime.execution_driver import WorkerDispatchError
 from core.planner import PlannerService, PlannerRouting
 from core.protocol.bridge import build_controller_input, build_planner_input
 from core.protocol.controller import CortexController
@@ -264,7 +265,7 @@ def test_adapter_rejects_missing_and_stale_authorizations():
         build_planner_input(state)
     provider = FakeProvider()
     node = create_planner_node(planner_service=planner(provider), rag_service=None, rag_top_k=1, tools_set=set())
-    with pytest.raises(ValueError, match="Controller-authorized"):
+    with pytest.raises(WorkerDispatchError, match="Controller authorization"):
         node(state)
     assert provider.messages == []
     original = active_state()

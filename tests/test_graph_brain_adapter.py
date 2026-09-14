@@ -19,9 +19,9 @@ from core.protocol.bridge import (
     _legacy_brain_result_to_model, brain_result_to_legacy, build_brain_input,
     build_controller_input,
 )
-from core.protocol.enums import BrainOutcomeKind as Kind, ExecutionPhase, ExecutionStatus, PlannerOutcome, StepStatus
+from core.protocol.enums import BrainOutcomeKind as Kind, ControllerDecisionType, ExecutionPhase, ExecutionStatus, PlannerOutcome, StepStatus, WorkerRole
 from core.protocol.models import (
-    BrainOutcome, BrainUsage, ExecutionCursor, ExecutionIdentity, ExecutionPlan,
+    BrainOutcome, BrainUsage, ControllerDecision, ExecutionCursor, ExecutionIdentity, ExecutionPlan,
     ExecutionState, ExecutionStep, PlannerResult, ProtocolVisibleState,
     RetryMetadata, StepCompletionEvidence, ToolRequest, ToolResult, WorkingState,
 )
@@ -32,11 +32,20 @@ def execution_state():
     return ExecutionState(
         protocol_visible=ProtocolVisibleState(
             identity=ExecutionIdentity(execution_id="adapter-test", protocol_version="1.0"),
-            cursor=ExecutionCursor(phase=ExecutionPhase.EXECUTING, step_id="s1"),
+            cursor=ExecutionCursor(phase=ExecutionPhase.EXECUTING, step_id="s1", plan_revision=1, current_worker=WorkerRole.BRAIN),
             active_plan=ExecutionPlan(plan_id="p1", steps=(step,)), active_step=step,
         ),
         working=WorkingState(last_tool_result=ToolResult(request_id="old", success=True, message="Read")),
     )
+
+
+def authorize_brain(state):
+    execution = state["execution_state"]
+    return {**state, "controller_decision": ControllerDecision(
+        decision_type=ControllerDecisionType.DISPATCH_BRAIN,
+        next_worker=WorkerRole.BRAIN,
+        cursor=execution.protocol_visible.cursor,
+    )}
 
 
 def node(**kwargs):
@@ -60,7 +69,7 @@ def test_adapter_only_translates_input_output_and_consumed_tool_evidence():
             invocations.append(value)
             return outcome
 
-    original = {"execution_state": execution_state(), "messages": [HumanMessage(content="read file")], "steps": 2}
+    original = authorize_brain({"execution_state": execution_state(), "messages": [HumanMessage(content="read file")], "steps": 2})
     update = node(brain_service=Service())(original)
     assert invocations == [build_brain_input(original)]
     assert update["brain_result"] is outcome

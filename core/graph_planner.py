@@ -2,10 +2,12 @@
 
 from core.graph_constants import DOMAIN_TOOL_MAP, MUTATING_TOOLS, SYSTEM_CAPABILITIES_TEXT
 from core.graph_context import retrieval_message
+from core.graph_authorization import require_planner_authorization
 from core.planner import PlannerService
 from core.planner_provider import LangChainPlannerProvider
 from core.protocol.bridge import build_planner_input
 from core.state import AgentState
+from core.runtime.execution_driver import WorkerDispatchError
 
 
 def create_planner_node(
@@ -20,7 +22,10 @@ def create_planner_node(
 
     def planner_node(state: AgentState):
         # This reads/validates a durable authorization; it does not create one.
+        authorized_request = require_planner_authorization(state)
         planning_request = build_planner_input(state)
+        if planning_request != authorized_request:
+            raise WorkerDispatchError("Planner input does not match Controller authorization")
         retrieval_messages = []
 
         def retrieve(user_request: str) -> tuple[str, ...]:

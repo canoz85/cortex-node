@@ -1,9 +1,10 @@
 from langchain_core.messages import AIMessage, HumanMessage
 
 import core.graph_brain as graph_brain
-from core.protocol.enums import ExecutionPhase
+from core.protocol.enums import ControllerDecisionType, ExecutionPhase, WorkerRole
 from core.protocol.models import (
     BrainInput,
+    ControllerDecision,
     ExecutionContext,
     ExecutionCursor,
     ExecutionIdentity,
@@ -13,7 +14,33 @@ from core.protocol.models import (
     ProtocolVisibleState,
     ToolExecutionRecord,
     ToolResult,
+    WorkingState,
 )
+
+
+def _authorize_brain(state):
+    execution = state["execution_state"]
+    return {**state, "controller_decision": ControllerDecision(
+        decision_type=ControllerDecisionType.DISPATCH_BRAIN,
+        next_worker=WorkerRole.BRAIN,
+        cursor=execution.protocol_visible.cursor,
+    )}
+
+
+def _state_for_input(brain_input):
+    execution = ExecutionState(
+        protocol_visible=ProtocolVisibleState(
+            identity=brain_input.identity,
+            cursor=brain_input.cursor.model_copy(update={"current_worker": WorkerRole.BRAIN}),
+            active_plan=brain_input.active_plan,
+            active_step=brain_input.active_step,
+        ),
+        working=WorkingState(
+            last_tool_result=brain_input.last_tool_result,
+            tool_execution_history=brain_input.tool_execution_history,
+        ),
+    )
+    return _authorize_brain({"execution_state": execution})
 
 
 class FakeLLM:
@@ -33,7 +60,7 @@ def test_brain_node_constructs_brain_input_once(monkeypatch):
         bridge_calls.append(state)
         return BrainInput(
             identity=ExecutionIdentity(execution_id="run-1", protocol_version="1.0"),
-            cursor=ExecutionCursor(phase=ExecutionPhase.EXECUTING),
+            cursor=ExecutionCursor(phase=ExecutionPhase.EXECUTING, current_worker=WorkerRole.BRAIN),
             context=ExecutionContext(user_request="hello"),
         )
 
@@ -51,7 +78,12 @@ def test_brain_node_constructs_brain_input_once(monkeypatch):
         show_raw_llm=False,
     )
 
-    state = {
+    cursor = ExecutionCursor(phase=ExecutionPhase.EXECUTING, current_worker=WorkerRole.BRAIN)
+    state = _authorize_brain({
+        "execution_state": ExecutionState(protocol_visible=ProtocolVisibleState(
+            identity=ExecutionIdentity(execution_id="run-1", protocol_version="1.0"),
+            cursor=cursor,
+        )),
         "messages": [HumanMessage(content="hello")],
         "plan": "",
         "steps": 0,
@@ -59,7 +91,7 @@ def test_brain_node_constructs_brain_input_once(monkeypatch):
         "rolling_summary": "",
         "last_tool_output": "",
         "last_tool_signature": "",
-    }
+    })
 
     result = brain_node(state)
 
@@ -83,6 +115,8 @@ def _execution_state_with_step(step_id: str) -> ExecutionState:
             cursor=ExecutionCursor(
                 phase=ExecutionPhase.EXECUTING,
                 step_id=step_id,
+                plan_revision=1,
+                current_worker=WorkerRole.BRAIN,
             ),
             active_plan=ExecutionPlan(
                 plan_id="p-1",
@@ -121,7 +155,7 @@ def test_tool_result_keeps_active_step_worker_and_cumulative_evidence(monkeypatc
 
     brain_input = BrainInput(
         identity=ExecutionIdentity(execution_id="run-1", protocol_version="1.0"),
-        cursor=ExecutionCursor(phase=ExecutionPhase.EXECUTING, step_id="s2"),
+        cursor=ExecutionCursor(phase=ExecutionPhase.EXECUTING, step_id="s2", plan_revision=1, current_worker=WorkerRole.BRAIN),
         context=ExecutionContext(user_request="read all python files"),
         active_plan=ExecutionPlan(
             plan_id="p-1",
@@ -159,8 +193,7 @@ def test_tool_result_keeps_active_step_worker_and_cumulative_evidence(monkeypatc
         show_raw_llm=False,
     )
 
-    state = {
-        "execution_state": _execution_state_with_step("s2"),
+    state = {**_state_for_input(brain_input),
         "messages": [HumanMessage(content="read all python files")],
         "retrieval_messages": [],
         "rolling_summary": "",
@@ -194,7 +227,7 @@ def test_normal_execution_messages_include_structured_tool_progress(monkeypatch)
 
     brain_input = BrainInput(
         identity=ExecutionIdentity(execution_id="run-1", protocol_version="1.0"),
-        cursor=ExecutionCursor(phase=ExecutionPhase.EXECUTING, step_id="s2"),
+        cursor=ExecutionCursor(phase=ExecutionPhase.EXECUTING, step_id="s2", plan_revision=1, current_worker=WorkerRole.BRAIN),
         context=ExecutionContext(user_request="read all python files"),
         active_plan=ExecutionPlan(
             plan_id="p-1",
@@ -225,8 +258,7 @@ def test_normal_execution_messages_include_structured_tool_progress(monkeypatch)
         show_raw_llm=False,
     )
 
-    state = {
-        "execution_state": _execution_state_with_step("s2"),
+    state = {**_state_for_input(brain_input),
         "messages": [HumanMessage(content="read all python files")],
         "retrieval_messages": [],
         "rolling_summary": "",

@@ -11,6 +11,7 @@ from langgraph.graph.state import END
 from langgraph.prebuilt import ToolNode
 
 from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE
+from core.graph_authorization import require_tool_authorization
 from core.graph_nodes import create_graph_nodes
 from core.brain_provider import native_brain_tools, text_tool_definitions
 from core.graph_routing import  route_after_controller
@@ -23,6 +24,7 @@ from core.runtime.gpu_resources import (
     RuntimeGpuObserver,
 )
 from core.runtime.state_propagation import propagate_execution_state
+from core.runtime.execution_driver import WorkerDispatchError
 from core.state import AgentState
 from tools.comfy_ops import get_comfy_tools
 from tools.exec_ops import get_exec_tools
@@ -173,54 +175,62 @@ def _register_state_node(
     workflow.add_node(name, _state_node)
 
 
-def _build_tool_transport_state(state: AgentState) -> AgentState | None:
-    execution_state = state.get("execution_state")
-    protocol_visible = getattr(execution_state, "protocol_visible", None)
-    pending_tool_request = getattr(protocol_visible, "pending_tool_request", None)
-    pending_request_id = getattr(pending_tool_request, "request_id", None)
-
-    if not isinstance(pending_request_id, str) or not pending_request_id:
-        return None
+def _build_tool_transport_state(state: AgentState) -> AgentState:
+    pending_tool_request = require_tool_authorization(state)
 
     messages = state.get("messages", [])
     if not isinstance(messages, list) or not messages:
-        return None
+        raise WorkerDispatchError("Tool authorization requires typed AIMessage transport")
 
     last_message = messages[-1]
     if not isinstance(last_message, AIMessage):
-        return None
+        raise WorkerDispatchError("Tool authorization requires typed AIMessage transport")
 
     tool_calls = getattr(last_message, "tool_calls", None)
-    if not isinstance(tool_calls, list) or not tool_calls:
-        return None
+    if not isinstance(tool_calls, list) or len(tool_calls) != 1:
+        raise WorkerDispatchError("Tool authorization requires exactly one tool call")
 
     first_call = tool_calls[0]
     if not isinstance(first_call, dict):
-        return None
-
-    tool_calls_copy = [dict(call) if isinstance(call, dict) else call for call in tool_calls]
-
-    tool_calls_copy[0]["id"] = pending_request_id
-    tool_calls_copy[0]["name"] = pending_tool_request.tool_name
-    tool_calls_copy[0]["args"] = dict(pending_tool_request.arguments)
-
-    copied_last_message = last_message.model_copy(
-        update={"tool_calls": tool_calls_copy}
-    )
-    messages_copy = [*messages[:-1], copied_last_message]
-
-    return {
-        **state,
-        "messages": messages_copy,
+        raise WorkerDispatchError("Tool authorization requires structured tool-call transport")
+    call_arguments = first_call.get("args")
+    authorized_arguments = pending_tool_request.arguments
+    async_correlation = {
+        key: authorized_arguments[key]
+        for key in ("prompt_id", "client_id")
+        if key in authorized_arguments
     }
+    authorized_source_arguments = {
+        key: value
+        for key, value in authorized_arguments.items()
+        if key not in async_correlation
+    }
+    arguments_match = call_arguments == authorized_arguments or (
+        len(async_correlation) == 2 and call_arguments == authorized_source_arguments
+    )
+    if (
+        first_call.get("id") != pending_tool_request.request_id
+        or first_call.get("name") != pending_tool_request.tool_name
+        or not arguments_match
+    ):
+        raise WorkerDispatchError(
+            "Tool transport does not match authorized ToolRequest: "
+            f"call_id={first_call.get('id')!r} request_id={pending_tool_request.request_id!r} "
+            f"call_name={first_call.get('name')!r} request_name={pending_tool_request.tool_name!r} "
+            f"call_args={call_arguments!r} request_args={authorized_arguments!r}"
+        )
+    if call_arguments == authorized_arguments:
+        return state
+
+    effective_call = dict(first_call)
+    effective_call["args"] = dict(authorized_arguments)
+    effective_message = last_message.model_copy(update={"tool_calls": [effective_call]})
+    return {**state, "messages": [*messages[:-1], effective_message]}
 
 
 def _wrap_tool_node_for_protocol_request_id(tool_node: Any) -> StateNodeCallable:
     def _tool_node_adapter(state: AgentState) -> Any:
         transport_state = _build_tool_transport_state(state)
-        if transport_state is None:
-            return _invoke_state_node(tool_node, state)
-
         return _invoke_state_node(tool_node, transport_state)
 
     return _tool_node_adapter

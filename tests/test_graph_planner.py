@@ -20,7 +20,11 @@ def authorize(state):
     controller = CortexController(max_reasoning_steps=24, planning_capabilities=PlanningCapabilities(
         available_tools=("list_files", "write_file", "query_abap_table", "agent_info", "current_time", "token_usage")))
     decision = controller.decide(build_controller_input(state))
-    return {**state, "execution_state": apply_controller_decision_to_state(build_execution_state(state), decision)}
+    return {
+        **state,
+        "execution_state": apply_controller_decision_to_state(build_execution_state(state), decision),
+        "controller_decision": decision,
+    }
 
 
 class DummyPlannerLLM:
