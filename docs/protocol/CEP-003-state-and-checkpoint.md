@@ -9,6 +9,10 @@
 ## 1. Purpose
 This RFC defines protocol-level runtime state semantics, checkpoint requirements, resume behavior, and replay behavior.
 
+The requirements in this document are normative CEP requirements. They are not a
+claim that the current CortexNode production adapter fully implements them. Current
+implementation conformance is stated explicitly in Section 8.
+
 ## 2. ExecutionState (Protocol View)
 ExecutionState is the authoritative protocol state managed by Controller. It is reconstructed from accepted facts and updated only through valid transitions.
 
@@ -124,7 +128,7 @@ Replay operates on protocol events only, including:
 - ExecutionCheckpointed
 - ExecutionCompleted
 - ExecutionCancelled
-- SummaryGenerated
+- FinalizationGenerated
 
 Commands are never replayed as authoritative facts.
 
@@ -156,3 +160,25 @@ Deterministic behavior requires:
 - stable interpretation of terminal and non-terminal events
 - immutable completed-step ledger across resume and replay
 - identical event history produces identical ExecutionState.
+
+## 8. Current Implementation Conformance
+
+The current production runtime implements Controller-owned typed `ExecutionState`, a
+semantic execution cursor, completed-work preservation, and LangGraph-backed snapshot
+persistence. LangGraph serves as a persistence/presentation adapter; its checkpoint
+or traversal state is not the CEP event journal and does not define lifecycle
+semantics.
+
+The current implementation does **not** claim CEP-003 conformance for:
+
+- an append-only journal of every accepted protocol event;
+- deterministic framework-neutral reconstruction from that journal;
+- protocol-level atomic checkpoint commits tied to an ordered event position.
+
+Async continuation does not use a graph node or successor as a protocol cursor. The
+runtime loads adapter state, performs portable Controller-authorized turns, and asks
+the LangGraph adapter to persist/present the resulting update.
+
+The unmet journal, replay, and atomic checkpoint requirements remain normative. They
+must not be weakened or treated as satisfied by LangGraph checkpointing. Their
+resolution is deferred to the separately authorized Stage 8 decision.

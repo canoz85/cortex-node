@@ -82,7 +82,7 @@ Runtime Writer:
 - Controller logic only.
 
 Runtime Readers:
-- Planner Runtime Role, Brain Runtime Role, Tool Runtime Role, Summary Runtime Role, runtime runner.
+- Planner Runtime Role, Brain Runtime Role, Tool Runtime Role, Finalizer Runtime Role, runtime runner.
 
 CEP mapping:
 - CEP-003 ExecutionState and protocol invariants.
@@ -98,7 +98,7 @@ Runtime Writer:
 - Context Assembly Service under controller authority.
 
 Runtime Readers:
-- Planner Runtime Role, Brain Runtime Role, Summary Runtime Role.
+- Planner Runtime Role, Brain Runtime Role, Finalizer Runtime Role.
 
 CEP mapping:
 - CEP-003 context and cursor-aligned state reconstruction requirements.
@@ -150,7 +150,7 @@ Runtime Writer:
 - Controller progression logic.
 
 Runtime Readers:
-- Brain Runtime Role, Summary Runtime Role, replay and compliance validation paths.
+- Brain Runtime Role, Finalizer Runtime Role, future replay and compliance validation paths.
 
 CEP mapping:
 - CEP-003 completed-work immutability constraints.
@@ -166,7 +166,7 @@ Runtime Writer:
 - Planner proposes revisions; Controller accepts active revision.
 
 Runtime Readers:
-- Brain Runtime Role, Summary Runtime Role, runtime runner.
+- Brain Runtime Role, Finalizer Runtime Role, runtime runner.
 
 CEP mapping:
 - CEP-003 plan revision continuity and checkpoint contents.

@@ -11,6 +11,12 @@
 ### 1.1 Purpose
 CEP-001 defines the runtime message protocol used to coordinate execution across existing CortexNode workers. It specifies command and event semantics so independent implementations produce identical behavior.
 
+Worker outputs are typed proposals or results. They do not become accepted protocol
+facts merely because a worker returned them. Controller validates each result and is
+the only authority that accepts its lifecycle meaning. A runtime driver may perform
+the mechanical invocation of an authorized worker without acquiring Controller
+authority.
+
 ### 1.2 Why CortexNode Uses a Protocol
 A protocol is required to make runtime behavior deterministic, replayable, and checkpoint-friendly. The protocol provides:
 - explicit coordination boundaries
@@ -47,10 +53,10 @@ Commands request work. Commands are intent messages and are not historical facts
 
 For each command, the issuer requests the command and the executor performs the work.
 
-- CreatePlan: Issuer Controller; Executor Planner. Request Planner to produce an execution plan for a new or resumed execution.
-- ExecuteStep: Issuer Controller; Executor Brain. Request Brain to execute exactly one selected step.
-- RunTool: Issuer Controller; Executor Tool. Request Tool worker to perform one deterministic operation.
-- GenerateSummary: Issuer Controller; Executor Summary. Request Summary worker to generate final execution summary from execution facts.
+- CreatePlan: Authorizer Controller; Executor Planner through the runtime driver. Request Planner to produce a request-bound plan proposal for a new or resumed execution. Controller alone accepts or rejects the proposal.
+- ExecuteStep: Authorizer Controller; Executor Brain through the runtime driver. Request Brain to produce one typed outcome for exactly one selected step.
+- RunTool: Authorizer Controller; Executor Tool Runtime through the runtime driver. Request execution of one authorized `ToolRequest`; the result is a portable `ToolResult`.
+- GenerateFinalization: Authorizer Controller; Executor Finalizer through the runtime driver. Request a terminal `FinalizationResult`, containing the authoritative `ExecutionSummary` and final user-facing answer, from a `FinalizationRequest`.
 - PauseExecution: Issuer Controller; Executor Controller. Request Controller to pause active execution at a protocol-safe boundary.
 - ResumeExecution: Issuer Controller; Executor Controller. Request Controller to continue an execution from checkpointed position.
 - CancelExecution: Issuer Controller; Executor Controller. Request Controller to terminate execution.
@@ -71,29 +77,31 @@ Runtime Events describe execution lifecycle facts.
 
 #### Domain Events
 
-Domain Events describe plan, step, tool, and summary facts.
+Domain Events describe plan, step, tool, and finalization facts.
 
 #### ExecutionStarted
 - Purpose: Marks the beginning of an execution instance.
 - Category: Runtime Event.
 - Producer: Controller.
-- Consumer: Planner, Brain, Summary, observers.
+- Consumer: Planner, Brain, Finalizer, observers.
 - When it occurs: After execution request accepted and runtime initialized.
 - Expected outcome: Execution has a valid runtime identity and can accept CreatePlan.
 
 #### PlanCreated
 - Purpose: Confirms initial plan creation.
 - Category: Domain Event.
-- Producer: Planner.
-- Consumer: Controller, Brain, Summary, observers.
+- Proposed By: Planner as a request-bound `PlannerResult`.
+- Accepted By: Controller.
+- Consumer: Controller, Brain, Finalizer, observers.
 - When it occurs: After CreatePlan succeeds for first plan revision.
 - Expected outcome: Controller can begin step scheduling.
 
 #### PlanRevised
 - Purpose: Confirms plan revision after replanning.
 - Category: Domain Event.
-- Producer: Planner.
-- Consumer: Controller, Brain, Summary, observers.
+- Proposed By: Planner as a request-bound revision proposal.
+- Accepted By: Controller after deterministic revision reconciliation.
+- Consumer: Controller, Brain, Finalizer, observers.
 - When it occurs: After replanning request accepted and revised plan produced.
 - Expected outcome: Controller resumes with new active plan revision while preserving completed work.
 
@@ -101,15 +109,16 @@ Domain Events describe plan, step, tool, and summary facts.
 - Purpose: Records start of a specific step attempt.
 - Category: Domain Event.
 - Producer: Controller.
-- Consumer: Brain, Summary, observers.
+- Consumer: Brain, Finalizer, observers.
 - When it occurs: Immediately before ExecuteStep dispatch.
 - Expected outcome: One step attempt is active.
 
 #### ToolRequested
 - Purpose: Records that Brain requires tool execution for current step.
 - Category: Domain Event.
-- Producer: Brain.
-- Consumer: Controller, Tool, Summary, observers.
+- Proposed By: Brain as a typed tool-request outcome.
+- Accepted By: Controller, which constructs/accepts the current `ToolRequest`.
+- Consumer: Controller, Tool Runtime, Finalizer, observers.
 - When it occurs: During ExecuteStep when tool call is required.
 - Expected outcome: Controller may dispatch RunTool.
 
@@ -117,39 +126,43 @@ Domain Events describe plan, step, tool, and summary facts.
 - Purpose: Records start of tool operation.
 - Category: Domain Event.
 - Producer: Controller.
-- Consumer: Tool, Summary, observers.
+- Consumer: Tool Runtime, Finalizer, observers.
 - When it occurs: Immediately before RunTool dispatch.
 - Expected outcome: One deterministic tool operation is active.
 
 #### ToolCompleted
 - Purpose: Records successful tool completion.
 - Category: Domain Event.
-- Producer: Tool.
-- Consumer: Brain, Controller, Summary, observers.
+- Observed By: Tool Runtime as a portable `ToolResult`.
+- Accepted By: Controller.
+- Consumer: Brain, Controller, Finalizer, observers.
 - When it occurs: Tool operation returns success.
 - Expected outcome: Brain can continue step validation.
 
 #### ToolFailed
 - Purpose: Records tool failure fact.
 - Category: Domain Event.
-- Producer: Tool.
-- Consumer: Brain, Controller, Summary, observers.
+- Observed By: Tool Runtime as a portable `ToolResult`.
+- Accepted By: Controller.
+- Consumer: Brain, Controller, Finalizer, observers.
 - When it occurs: Tool operation returns failure.
 - Expected outcome: Controller evaluates retry, step failure, or replanning path.
 
 #### StepCompleted
 - Purpose: Records successful completion of one step.
 - Category: Domain Event.
-- Producer: Brain.
-- Consumer: Controller, Summary, observers.
-- When it occurs: Brain validates step success.
+- Proposed By: Brain as a typed step-completed outcome.
+- Accepted By: Controller after active-step, completion-coverage, and provenance validation.
+- Consumer: Controller, Finalizer, observers.
+- When it occurs: Controller accepts Brain's step-scoped completion judgment and binds completion provenance.
 - Expected outcome: Controller advances to next step or completes execution.
 
 #### StepFailed
 - Purpose: Records step failure after evaluation.
 - Category: Domain Event.
-- Producer: Brain.
-- Consumer: Controller, Summary, observers.
+- Proposed By: Brain as a typed step-failed outcome.
+- Accepted By: Controller.
+- Consumer: Controller, Finalizer, observers.
 - When it occurs: Brain determines current step cannot be completed in current attempt.
 - Expected outcome: Controller decides retry, replan, or fail execution.
 
@@ -157,7 +170,7 @@ Domain Events describe plan, step, tool, and summary facts.
 - Purpose: Records execution pause.
 - Category: Runtime Event.
 - Producer: Controller.
-- Consumer: Planner, Brain, Summary, observers.
+- Consumer: Planner, Brain, Finalizer, observers.
 - When it occurs: Pause requested or policy-triggered pause accepted.
 - Expected outcome: No new ExecuteStep or RunTool commands until resume.
 
@@ -165,15 +178,16 @@ Domain Events describe plan, step, tool, and summary facts.
 - Purpose: Records resumed execution after pause.
 - Category: Runtime Event.
 - Producer: Controller.
-- Consumer: Planner, Brain, Summary, observers.
+- Consumer: Planner, Brain, Finalizer, observers.
 - When it occurs: ResumeExecution accepted and checkpoint restored.
 - Expected outcome: Controller may continue dispatch from resume cursor.
 
 #### ReplanRequested
 - Purpose: Records need for plan revision.
 - Category: Runtime Event.
-- Producer: Brain.
-- Consumer: Controller, Planner, Summary, observers.
+- Proposed By: Brain as a typed replan-requested outcome.
+- Accepted By: Controller.
+- Consumer: Controller, Planner, Finalizer, observers.
 - When it occurs: Brain determines current plan cannot safely complete remaining intent.
 - Expected outcome: Controller evaluates and may issue CreatePlan in replan mode.
 
@@ -181,7 +195,7 @@ Domain Events describe plan, step, tool, and summary facts.
 - Purpose: Records checkpoint commit.
 - Category: Runtime Event.
 - Producer: Controller.
-- Consumer: Controller, Summary, observers.
+- Consumer: Controller, Finalizer, observers.
 - When it occurs: After each meaningful transition commit.
 - Expected outcome: Execution can be resumed without rerunning completed work.
 
@@ -189,25 +203,37 @@ Domain Events describe plan, step, tool, and summary facts.
 - Purpose: Records successful terminal completion.
 - Category: Runtime Event.
 - Producer: Controller.
-- Consumer: Summary, observers.
+- Consumer: Finalizer, observers.
 - When it occurs: All required steps completed successfully.
-- Expected outcome: GenerateSummary may be issued.
+- Expected outcome: GenerateFinalization may be issued.
 
 #### ExecutionCancelled
 - Purpose: Records terminal cancellation.
 - Category: Runtime Event.
 - Producer: Controller.
-- Consumer: Summary, observers.
+- Consumer: Finalizer, observers.
 - When it occurs: CancelExecution accepted.
 - Expected outcome: No further execution commands allowed.
 
-#### SummaryGenerated
-- Purpose: Records completion of final summary generation.
+#### FinalizationGenerated
+- Purpose: Records completion of terminal summary and final-answer generation.
 - Category: Domain Event.
-- Producer: Summary.
+- Producer: Finalizer after Controller authorization.
 - Consumer: Controller, observers.
-- When it occurs: GenerateSummary succeeds.
-- Expected outcome: Execution report is finalized.
+- When it occurs: `GenerateFinalization` succeeds.
+- Expected outcome: `ExecutionSummary` and the final user-facing answer are finalized without changing the terminal execution outcome.
+
+### 2.3 Asynchronous Tool Semantics
+
+Asynchronous wake is correlation, not authorization. A scheduler or runtime adapter
+may submit a semantic poll-due wake containing execution and asynchronous-job
+identity. Controller validates the wake against accepted wait state, constructs and
+authorizes the status `ToolRequest`, and may reject stale or terminal wakes.
+
+ExecutionDriver executes an authorized poll through `ToolRuntimePort`. The returned
+portable `ToolResult` is integrated against the exact pending request before another
+Controller turn. Wake contracts, requests, results, and continuation state never
+contain graph node names or successor instructions.
 
 ## 3. Global Protocol Rules
 
@@ -217,6 +243,9 @@ Domain Events describe plan, step, tool, and summary facts.
 - Workers never coordinate directly.
 - Workers produce requests and facts.
 - Controller produces execution decisions.
+- PortableExecutionRuntime prepares and reconciles portable turns.
+- ExecutionDriver applies authorized transitions and mechanically dispatches workers.
+- Planner, Brain, Tool Runtime, and Finalizer return typed results; none accepts its own lifecycle meaning.
 
 ### 3.2 Execution Invariants
 

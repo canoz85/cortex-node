@@ -17,6 +17,10 @@ Protocol conformance is evaluated solely through observable protocol behavior.
 
 Internal implementation details are intentionally outside the scope of protocol conformance.
 
+These requirements are normative. They do not imply that the current CortexNode
+production implementation is fully conformant; its current status is recorded in
+Section 10.1.
+
 ## 2. Compliance Scope
 Protocol compliance validates the following:
 - command semantics
@@ -129,7 +133,10 @@ An implementation MUST satisfy all rules below to claim protocol conformance.
 - Brain MUST NOT own execution.
 - Planner MUST NOT execute work.
 - Tool MUST NOT retry itself.
-- Summary MUST NOT modify execution history.
+- Finalizer MUST NOT modify execution history or terminal outcome.
+- A worker result MUST NOT advance lifecycle state until Controller accepts it.
+- Mechanical dispatch by ExecutionDriver MUST be traceable to the corresponding
+  Controller authorization.
 
 ### 4.3 History and Immutability Rules
 - Accepted protocol facts MUST be immutable.
@@ -210,23 +217,56 @@ Each worker MUST satisfy CEP-004 permissions and restrictions.
 - MUST perform deterministic operation responses only.
 - MUST NOT alter protocol policy or coordination.
 
-### 9.5 Summary
-- MUST generate summary from protocol-visible facts.
+### 9.5 Finalizer
+The implemented terminal reporting role is Finalizer.
+
+- MUST consume a Controller-authorized `FinalizationRequest`.
+- MUST generate `ExecutionSummary` and the final user-facing answer from accepted
+  terminal facts.
 - MUST NOT alter execution history or execution outcome.
+
+### 9.6 Asynchronous Tool Polling
+
+- A semantic wake MUST be treated as correlation, not authorization.
+- Controller MUST validate the wake and construct/authorize the poll request.
+- ExecutionDriver MUST execute the authorized request through `ToolRuntimePort`.
+- Poll results MUST cross the Controller boundary as portable `ToolResult` values.
+- Protocol state MUST NOT depend on graph node or successor identities.
 
 ## 10. Protocol Conformance Checklist
 An implementation is conformant when all items are satisfied.
 
-✓ CEP-001 command semantics satisfied
-✓ CEP-001 event semantics satisfied
-✓ CEP-002 lifecycle semantics satisfied
-✓ CEP-003 state semantics satisfied
-✓ CEP-004 worker authority satisfied
-✓ CEP-005 data contracts satisfied
-✓ replay determinism verified
-✓ resume legality verified
-✓ illegal transitions rejected
-✓ Controller authority preserved
+- CEP-001 command semantics satisfied
+- CEP-001 event semantics satisfied
+- CEP-002 lifecycle semantics satisfied
+- CEP-003 state semantics satisfied
+- CEP-004 worker authority satisfied
+- CEP-005 data contracts satisfied
+- replay determinism verified
+- resume legality verified
+- illegal transitions rejected
+- Controller authority preserved
+
+This is a requirements checklist, not a declaration that every item currently passes.
+
+## 10.1 Current CortexNode Conformance Status
+
+The production runtime currently implements the Controller-authority, typed worker
+boundary, accepted-state ownership, plan/revision acceptance, Finalizer ownership,
+portable tool-result, and asynchronous poll-authorization behaviors described by
+CEP-001, CEP-002, CEP-004, and CEP-005. This is not a claim of full conformance with
+those documents' journal-dependent requirements.
+
+It does **not** claim full CEP-003 or CEP-006 conformance. The following normative
+requirements are not currently implemented end to end:
+
+- an append-only journal containing every accepted protocol event;
+- deterministic framework-neutral replay from that journal;
+- protocol-level atomic checkpoint commits tied to an ordered event position.
+
+LangGraph checkpoints and graph traversal state do not satisfy these requirements by
+themselves. The gaps remain explicit non-conformance items whose disposition is
+reserved for Stage 8; this document does not weaken or redefine them.
 
 ## 11. Non-Conformance
 An implementation is non-conformant if it violates any mandatory protocol requirement in this RFC or in CEP-001 through CEP-005.

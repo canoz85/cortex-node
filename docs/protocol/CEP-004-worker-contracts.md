@@ -7,13 +7,14 @@
 - Layer: Layer 2 (Execution Protocol)
 
 ## 1. Purpose
-This RFC defines protocol-facing contracts for Planner, Controller, Brain, Tool, and Summary workers. It does not redefine architecture responsibilities.
+This RFC defines protocol-facing contracts for Planner, Controller, Brain, Tool Runtime, and Finalizer workers. It does not redefine architecture responsibilities.
 
 ## 2. Cross-Worker Rules
 
 - Workers never communicate directly.
 - Controller is the only coordinator.
-- Workers consume commands and emit events only.
+- Workers consume typed requests and return typed proposals/results.
+- Controller alone accepts the protocol and lifecycle meaning of worker results.
 - Workers do not mutate protocol history.
 - Emitted events are immutable facts.
 
@@ -35,8 +36,8 @@ Planner produces exactly one structured result for a Controller-authorized reque
 Planner never produces runtime decisions.
 
 ### Owns
-- plan generation
-- plan revision
+- plan proposal generation
+- revision proposal generation
 
 ### Does Not Own
 - execution state
@@ -56,6 +57,7 @@ Planner never produces runtime decisions.
 
 ### Postconditions
 - a proposal/result is emitted without changing accepted state
+- Controller alone accepts or rejects the proposal and determines revision identity
 - planner does not dispatch step or tool work
 
 ### Failure Behavior
@@ -78,13 +80,14 @@ No other worker may create, modify, or transition ExecutionState.
 - ExecutionState
 - protocol transitions
 - checkpoint decisions
-- command dispatch
+- worker authorization and request construction
 
 ### Does Not Own
 - planning
 - reasoning
 - tool execution
 - summary generation
+- mechanical worker execution
 
 ### Inputs
 - external execution intents
@@ -92,7 +95,7 @@ No other worker may create, modify, or transition ExecutionState.
 - ResumeExecution, CancelExecution, RetryStep intents
 
 ### Outputs
-- commands: CreatePlan, ExecuteStep, RunTool, RetryStep, PauseExecution, ResumeExecution, CancelExecution, GenerateSummary
+- commands: CreatePlan, ExecuteStep, RunTool, RetryStep, PauseExecution, ResumeExecution, CancelExecution, GenerateFinalization
 - events: ExecutionStarted, StepStarted, ToolStarted, ExecutionPaused, ExecutionResumed, ExecutionCheckpointed, ExecutionCompleted, ExecutionCancelled
 
 ### Preconditions
@@ -101,6 +104,10 @@ No other worker may create, modify, or transition ExecutionState.
 ### Postconditions
 - each transition is validated and checkpointed
 - deterministic next action chosen according to CEP-002 tables
+
+ExecutionDriver applies the authorized transition and mechanically invokes the
+selected worker. PortableExecutionRuntime owns turn preparation and reconciliation.
+Neither component independently chooses lifecycle meaning.
 
 ### Failure Behavior
 - on invalid transition, enforce protocol violation handling path
@@ -118,8 +125,8 @@ Brain never advances execution.
 
 ### Owns
 - step reasoning
-- step validation
-- tool requests
+- typed step-scoped judgments
+- tool-request proposals
 
 ### Does Not Own
 - execution lifecycle
@@ -132,17 +139,16 @@ Brain never advances execution.
 - relevant tool outcomes routed through Controller
 
 ### Outputs
-- ToolRequested event
-- StepCompleted event
-- StepFailed event
-- ReplanRequested event
+- typed `BrainResult`: tool requested, step completed, step failed, replan requested,
+  direct final-answer readiness, continuation, invalid output, or provider failure
 
 ### Preconditions
 - an active step attempt exists
 - Brain receives step-scoped context only
 
 ### Postconditions
-- exactly one deterministic step outcome path is emitted per attempt
+- exactly one typed outcome is returned per Brain invocation
+- Controller validates the active step and binds accepted completion provenance
 
 ### Failure Behavior
 - if step cannot proceed safely, emit StepFailed or ReplanRequested
@@ -155,7 +161,7 @@ Brain never advances execution.
 
 ## 6. Tool Contract
 
-Tool performs deterministic operations.
+Tool Runtime performs authorized operations and returns portable results.
 
 Tool never coordinates execution.
 
@@ -171,14 +177,15 @@ Tool never coordinates execution.
 - RunTool command
 
 ### Outputs
-- ToolCompleted event
-- ToolFailed event
+- portable `ToolResult`, including asynchronous non-terminal or terminal state where
+  the authorized tool supports asynchronous execution
 
 ### Preconditions
 - ToolStarted already recorded for this operation
 
 ### Postconditions
 - one tool outcome event emitted for requested operation
+- result identity matches the exact authorized `ToolRequest`
 
 ### Failure Behavior
 - failures are returned as ToolFailed facts
@@ -189,14 +196,15 @@ Tool never coordinates execution.
 - Tool must not coordinate lifecycle
 - Tool must not trigger replanning directly
 
-## 7. Summary Contract
+## 7. Finalizer Contract
 
-Summary interprets execution history.
+Finalizer constructs terminal reporting from accepted execution facts.
 
-Summary never changes execution history.
+Finalizer never changes execution history or lifecycle outcome.
 
 ### Owns
 - execution summary generation
+- final user-facing answer generation
 
 ### Does Not Own
 - execution history
@@ -204,24 +212,33 @@ Summary never changes execution history.
 - runtime decisions
 
 ### Inputs
-- GenerateSummary command
-- execution facts from protocol history
+- Controller-authorized `FinalizationRequest`
+- accepted terminal execution facts and tool execution history
 
 ### Outputs
-- SummaryGenerated event
+- `FinalizationResult` containing `ExecutionSummary`, final answer, and optional
+  rendering error
 
 ### Preconditions
 - execution has entered terminal state
 
 ### Postconditions
-- summary reflects protocol facts only
+- execution summary reflects accepted protocol facts only
+- answer-rendering failure does not alter terminal execution state
 
 ### Failure Behavior
-- summary generation failure is returned to Controller for terminal handling policy
+- finalization failure is reported without reopening execution
 
 ### Non-Permissions
-- Summary must not inspect hidden reasoning traces
-- Summary must not alter historical events
+- Finalizer must not inspect hidden reasoning traces
+- Finalizer must not alter historical events
+
+## 7.1 Asynchronous Poll Boundary
+
+A scheduler or adapter may emit a correlated poll-due wake, but it cannot construct a
+Controller decision or authorize tool execution. Controller validates the wake and
+constructs the status `ToolRequest`; ExecutionDriver invokes `ToolRuntimePort`; the
+portable result is integrated before another Controller turn.
 
 ## 8. Contract Compliance Checklist
 

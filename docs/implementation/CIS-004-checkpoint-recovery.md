@@ -8,7 +8,9 @@
 - Series Index: docs/implementation/README.md
 
 ## 1. Purpose
-CIS-004 describes how the current CortexNode runtime realizes checkpointing, recovery, resume, and replay behavior defined by CEP-003 and validated by CEP-006.
+CIS-004 maps current LangGraph snapshot persistence and portable resume behavior, and
+records the CEP-003/CEP-006 checkpoint and replay requirements that remain
+unimplemented.
 
 This document is implementation-oriented.
 
@@ -17,6 +19,15 @@ This document does not redefine protocol semantics.
 CEP remains normative for checkpoint semantics, replay semantics, resume legality, execution cursor semantics, and completed-work preservation.
 
 If implementation wording diverges from CEP wording, CEP is authoritative.
+
+### Current conformance boundary
+
+Current production uses LangGraph snapshot persistence for runtime continuity. It
+does not implement the CEP-required append-only accepted-event journal,
+framework-neutral deterministic replay, or protocol-level atomic checkpoint commit
+tied to an ordered event position. Statements below describe normative target
+responsibilities unless explicitly identified as current adapter behavior. Full
+CEP-003/CEP-006 conformance is not claimed; disposition remains Stage 8 work.
 
 ## 2. Scope
 Included:
@@ -83,7 +94,7 @@ Runtime Writer:
 - history append path under Controller Authority.
 
 Runtime Readers:
-- Controller Runtime Role, Replay/Validation services, Summary Runtime Role.
+- Controller Runtime Role, future Replay/Validation services, Finalizer Runtime Role.
 
 CEP mapping:
 - CEP-003 immutable history and replay behavior.
@@ -115,7 +126,7 @@ Runtime Writer:
 - Planner proposes revisions; Controller accepts active revision.
 
 Runtime Readers:
-- Brain Runtime Role, Summary Runtime Role, Runtime Runner Service.
+- Brain Runtime Role, Finalizer Runtime Role, Runtime Runner Service.
 
 CEP mapping:
 - CEP-003 plan revision continuity across resume and replay validation.
@@ -259,8 +270,9 @@ No-rerun guarantee:
 Authority guarantee:
 - resume continuation is initiated and governed only by Controller Authority.
 
-## 8. Replay Realization
-Replay is realized as a deterministic reconstruction and validation path.
+## 8. Replay Requirement (Not Currently Realized)
+CEP replay requires a deterministic reconstruction and validation path. The following
+is normative target behavior, not a current production capability.
 
 Replay source of truth:
 - replay consumes Accepted Event History.
@@ -278,8 +290,9 @@ Replay and recovery separation:
 - replay is independent from checkpoint recovery optimization.
 - checkpoints may accelerate runtime restore, but replay correctness is defined by Accepted Event History.
 
-## 9. Recovery Validation
-Recovery validation is realized through controller-governed consistency checks before continuation.
+## 9. Recovery Validation Requirements
+The following are normative validation responsibilities. Current snapshot resume does
+not constitute event-history alignment or full CEP recovery conformance.
 
 Validation categories:
 - checkpoint consistency validation
@@ -309,7 +322,7 @@ Runtime Services:
 - provide state, history, context, and checkpoint support capabilities.
 - do not own protocol authority.
 
-Worker Runtime Roles (Planner, Brain, Tool Runtime, Summary):
+Worker Runtime Roles (Planner, Brain, Tool Runtime, Finalizer):
 - consume restored state in role scope.
 - produce role-scoped outputs only.
 - never perform recovery authority decisions.
@@ -318,8 +331,9 @@ Ownership guarantees:
 - workers never restore execution.
 - Controller remains sole recovery authority.
 
-## 11. Runtime Invariants
-The following invariants apply to current runtime realization.
+## 11. Normative Runtime Invariants
+The following are CEP/CIS requirements; the accepted-event-history and replay items
+remain current non-conformance gaps.
 
 - Accepted Event History remains authoritative.
 - Checkpoints never rewrite accepted history.
@@ -364,7 +378,8 @@ Failure-handling boundary:
 This section maps logical responsibilities to current Runtime Modules without making module names normative.
 
 Checkpoint/session persistence surface:
-- main.py
+- LangGraph checkpointer configured in core/graph.py
+- core/graph_async_resume.py for async snapshot load/update
 
 Runtime state model surface:
 - core/state.py
@@ -377,8 +392,8 @@ Controller decision and legality helper surface:
 
 Additional cooperating runtime realization surfaces:
 - core/graph.py
-- core/graph_capture.py
-- core/graph_summarize.py
+- core/runtime/portable_orchestration.py
+- core/runtime/execution_driver.py
 - core/graph_context.py
 
 Mapping principles:

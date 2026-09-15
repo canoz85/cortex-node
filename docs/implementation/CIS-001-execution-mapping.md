@@ -42,25 +42,27 @@ Excluded:
 - LLM prompt design
 
 ## 3. Runtime Architecture Overview
-CortexNode runtime is organized around the protocol roles defined by CEP and implemented through coordinated graph nodes and runtime helpers.
+CortexNode production is organized around portable Controller turns hosted by one
+LangGraph Controller adapter. `PortableExecutionRuntime` prepares and reconciles
+turns; `ExecutionDriver` applies Controller transitions and dispatches authorized
+workers.
 
 Logical Runtime Roles:
 - Controller: runtime orchestration authority for transition selection, legality checks, and progression decisions
 - Planner: plan generation and plan revision producer
 - Brain: step-level decision producer (step completion, failure, tool request, replan request)
 - Tool Runtime: deterministic tool execution surface
-- Summary: terminal reporting from protocol-visible execution facts
+- Finalizer: `ExecutionSummary` and final-answer generation from accepted terminal facts
 
 Supporting Runtime Services:
 - Execution State Service: shared runtime state representation aligned with CEP state semantics
-- Event History Service: ordered protocol-visible history used for progression, replay reasoning, and summary inputs
-- Checkpoint Manager Service: restore and checkpoint commit responsibility for resumable execution
+- LangGraph persistence adapter: snapshot restore/update for current runtime continuity
 - Context Assembly Service: protocol-visible context preparation for Planner and Brain
 
 Cooperation model:
 - Controller remains the sole execution coordinator.
-- Planner, Brain, Tool Runtime, and Summary operate as Runtime Roles.
-- Supporting Runtime Services provide state, history, checkpoint, and context capabilities.
+- Planner, Brain, Tool Runtime, and Finalizer operate as Runtime Roles.
+- Current snapshot persistence is not a CEP append-only journal or replay service.
 - Runtime orchestration preserves CEP authority boundaries and transition legality.
 
 ## 4. Protocol to Runtime Mapping
@@ -76,10 +78,10 @@ Cooperation model:
 | Planner | Planner Runtime Role | core/graph_planner.py | Produce plan and routing outputs |
 | Brain | Brain Runtime Role | core/graph_brain.py | Produce step outcomes and tool requests |
 | Tool | Tool Runtime Role | tools/*.py + core/graph_capture.py | Execute deterministic operations and normalize tool outcomes |
-| Summary | Summary Runtime Role | core/graph_summarize.py | Generate terminal summary from accepted execution facts |
+| Finalizer | Finalizer service | core/finalizer.py | Generate ExecutionSummary and final answer after terminal authorization |
 | ExecutionCursor | Resume position representation | core/state.py + core/graph_runner.py | Resume execution from legal continuation point |
 | Checkpoint | Checkpoint Manager Service | main.py (load_session/save_session) | Persist and restore resumable runtime state |
-| Replay | Deterministic reconstruction path | core/graph_runner.py + core/graph_state_machine.py | Reconstruct and validate execution progression from recorded history |
+| Replay | Normative CEP requirement | Not currently implemented | Reserved for Stage 8 disposition |
 
 Mapping note:
 - Each CEP concept above maps to one primary runtime realization for ownership clarity.
@@ -87,19 +89,24 @@ Mapping note:
 - Implementation modules MAY change without affecting this conceptual mapping.
 
 ## 5. LangGraph Mapping
-CortexNode maps CEP workers to LangGraph nodes and edges while keeping Controller authority in decision helpers and routing logic.
+Production registers only the `controller` node and conditionally self-loops or ends.
+Worker adapters execute inside portable turns, and normal tools use direct
+`ToolRuntimePort` execution.
 
 LangGraph runtime nodes are execution containers for Runtime Roles and Runtime Services. They are not protocol actors by themselves.
 
 Controller protocol authority is independent of graph topology. Graph shape can evolve without changing protocol ownership.
 
-Node mapping:
+Compatibility-only node mapping:
 - Controller Runtime Node (logical): realized by routing and state-machine decision functions
 - Planner Runtime Node: `planner`
 - Brain Runtime Node: `brain`
 - Tool Runtime Node: `tools`
 - Summary Runtime Node: `summarize_memory`
 - Tool Capture Runtime Node: `capture_tool_output` (runtime normalization helper)
+
+This multi-node mapping exists for injected test/integration compatibility and must
+not be interpreted as production architecture.
 
 Node-level mapping details:
 - Controller Runtime Node
@@ -192,9 +199,11 @@ Logical mapping aliases used in this document:
 - protocol/: normative behavior definitions
 - runtime/: execution orchestration and state progression (implemented primarily in `core/`)
 - graph/: graph composition and node routing (implemented in `core/graph*.py`)
-- workers/: planner/brain/summary/tool role realizations (implemented in `core/graph_*.py` and `tools/*.py`)
+- workers/: planner/brain/finalizer/tool role realizations (implemented in portable
+  services, graph transport adapters, and `tools/*.py`)
 - state/: state representation and transition decisions (implemented in `core/state.py` and `core/graph_state_machine.py`)
-- memory/: summary/session context and resume persistence (implemented in `core/graph_summarize.py` and `main.py`)
+- persistence/: LangGraph snapshot/checkpoint adapter integration in `core/graph.py`
+  and `core/graph_async_resume.py`
 
 Maintainability note:
 - The current repository layout is sufficient for protocol-preserving evolution.
@@ -210,7 +219,8 @@ Logical Runtime Roles and current Runtime Module realizations:
 - Planner Runtime Role: currently realized by `core/graph_planner.py`.
 - Brain Runtime Role: currently realized by `core/graph_brain.py`.
 - Tool Runtime Role: logical tool boundary currently realized by `tools/*.py` with normalization integration in `core/graph_capture.py`.
-- Summary Runtime Role: logical summary boundary currently realized by `core/graph_summarize.py`.
+- Finalizer Runtime Role: currently realized by `core/finalizer.py`; the legacy
+  `core/graph_summarize.py` node is compatibility-only.
 
 Supporting Runtime Services and current Runtime Module realizations:
 - Execution State Service: currently realized by `core/state.py`.

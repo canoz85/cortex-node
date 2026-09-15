@@ -170,16 +170,15 @@ LangGraph checkpointing or graph traversal history must not be treated as automa
 | --- | --- | --- | --- |
 | 1 | Runtime correctness | `COMPLETED` | Yes |
 | 2 | Typed Brain outcomes | `COMPLETED` | Yes, after Stage 1 |
-| 3 | Finalization separation | `NOT_STARTED` | Yes, as 3A, 3B, and 3C |
-| 4 | Remove legacy completion code | `IN_PROGRESS` | Yes |
-| 5 | Controller authority cleanup | `IN_PROGRESS` | Yes, as 5A and 5B |
-| 6 | Async ownership | `IN_PROGRESS` | Yes, after Stage 5 |
-| 7 | Documentation reconciliation | `NOT_STARTED` | Yes, documentation-only |
+| 3 | Finalization separation | `COMPLETED` | Yes, as 3A, 3B, and 3C |
+| 4 | Remove legacy completion code | `COMPLETED` | Yes |
+| 5 | Controller authority cleanup | `COMPLETED` | Yes, as 5A and 5B |
+| 6 | Async ownership | `COMPLETED` | Yes, after Stage 5 |
+| 7 | Documentation reconciliation | `COMPLETED` | Yes, documentation-only |
 | 8 | Compliance hardening decision | `NOT_STARTED` | Decision only; implementation requires a separate roadmap |
 
-Stages 1 and 2 are completed. Stage 3A is the next ordered migration stage.
-Later stages contain accepted implementation progress but remain subject to
-their original acceptance criteria and dependency order.
+Stages 1 through 6 are complete and live-tested. Stage 7 is the current
+documentation-only reconciliation. Stage 8 remains a separate unresolved decision.
 
 ## 7. Stage 1 - Runtime Correctness
 
@@ -373,7 +372,7 @@ Stage 2 can be committed independently after Stage 1.
 
 ## 9. Stage 3 - Finalization Separation
 
-- Status: `NOT_STARTED`
+- Status: `COMPLETED`
 - Portability assessment: Preserves the portability constraint when Finalizer is an application service rather than a graph-defined terminal behavior.
 
 ### Goal
@@ -491,7 +490,7 @@ Stages 3A, 3B, and 3C should be separate commits.
 
 ## 10. Stage 4 - Remove Legacy Completion Code
 
-- Status: `IN_PROGRESS`
+- Status: `COMPLETED`
 - Portability assessment: Fully preserves the portability constraint.
 
 ### Goal
@@ -575,12 +574,12 @@ Stage 4 is an independent deletion commit after its dependencies are satisfied.
 
 ## 11. Stage 5 - Controller Authority Cleanup
 
-- Status: `IN_PROGRESS`
+- Status: `COMPLETED`
 - Portability assessment: Preserves the portability constraint only with Controller defined as semantic authority rather than a graph node or graph entrypoint.
 
 ### Goal
 
-Make Controller the semantic execution-transition authority for every dispatch migrated in this stage, remove protocol-visible state mutation from workers, and place invocation/dispatch responsibility in a replaceable runtime driver. The existing scheduler-initiated async status-poll path remains an isolated compatibility boundary until Stage 6.
+Make Controller the semantic execution-transition authority for every dispatch migrated in this stage, remove protocol-visible state mutation from workers, and place invocation/dispatch responsibility in a replaceable runtime driver. During Stage 5, the then-existing scheduler-initiated async status-poll path remained an isolated compatibility boundary pending Stage 6.
 
 ### LangGraph Coupling Risk
 
@@ -592,7 +591,7 @@ The governing rule is:
 
 > Every worker operation must be authorized by a framework-neutral Controller decision. The runtime execution driver invokes Controller and dispatches authorized work.
 
-Stage 5 establishes this rule for normal worker dispatch and the driver boundary that Stage 6 requires. Because Stage 6 depends on Stage 5B, the existing scheduler-initiated status observation in `LocalAsyncPollingRuntime` is the sole temporary exception: it must remain isolated, behavior-pinned by parity tests, and must not gain additional semantic authority. Stage 6 removes this exception.
+Stage 5 established this rule for normal worker dispatch and the driver boundary that Stage 6 required. The scheduler-initiated status observation was the temporary Stage 5 exception; Stage 6 removed its authorization and execution debt.
 
 Introduce or clarify semantic Controller commands such as:
 
@@ -605,7 +604,8 @@ Introduce or clarify semantic Controller commands such as:
 
 These are application actions, not graph destinations.
 
-A LangGraph adapter may map them to its current implementation:
+A LangGraph adapter could map these actions to nodes. The following was the
+pre-Stage-5B multi-node mapping and remains compatibility-only:
 
 ```text
 REQUEST_PLAN       -> planner node
@@ -615,7 +615,9 @@ FINALIZE_EXECUTION -> finalizer adapter
 TERMINATE          -> END
 ```
 
-This mapping exists only in the LangGraph adapter and must never be persisted as protocol state.
+Production instead registers one Controller adapter with an effective
+`START -> controller -> controller -> ... -> END` topology. Worker adapters execute
+inside portable turns. Neither mapping may be persisted as protocol state.
 
 Migration slices:
 
@@ -690,7 +692,7 @@ Stages 5A and 5B should be separate commits.
 
 ## 12. Stage 6 - Async Ownership
 
-- Status: `IN_PROGRESS`
+- Status: `COMPLETED`
 - Portability assessment: Preserves the portability constraint when the scheduler targets a framework-neutral runtime port rather than a graph node.
 
 ### Goal
@@ -722,10 +724,15 @@ Scheduler
   -> normalized ToolResult returns to Controller
 ```
 
-Current-baseline reconciliation:
+Completed baseline reconciliation:
 
 - Controller already owns `AsyncJobPolicy`, stable provider-ID allocation, wait deadlines, bounded backoff, poll-failure budgets, submission reconciliation, timeout reconciliation, and local/provider cancellation decisions. These are established inputs to Stage 6, not replacement targets.
-- `LocalAsyncPollingRuntime` currently validates the checkpointed wait decision and stale/terminal evidence, but it also constructs a poll `ToolRequest`, fabricates a `DISPATCH_TOOL_RUNTIME` `ControllerDecision`, executes the provider status tool directly, and resumes LangGraph through named nodes. This is the ownership and portability debt Stage 6 must remove.
+- `LocalAsyncPollingRuntime` validates checkpointed wait and stale/terminal evidence,
+  but Controller now constructs and authorizes the poll `ToolRequest`,
+  ExecutionDriver executes it, and portable `ToolResult` integration precedes
+  continuation. `LangGraphAsyncResumeAdapter` continues through portable Controller
+  turns without node or successor semantics, then persists and presents their
+  updates.
 - The current ComfyUI path includes fail-closed Ollama/ComfyUI GPU handoff. Submission is blocked until Ollama release is verified; provider-terminal evidence does not permit LLM resumption until ComfyUI release is verified; checkpoint recovery of already-terminal evidence applies the same release gate without re-polling. This resource policy remains a runtime/provider-adapter concern and must not become protocol state or Controller policy.
 
 The scheduler must not:
@@ -815,7 +822,7 @@ Stage 6 can be committed independently after Stage 5.
 
 ## 13. Stage 7 - Documentation Reconciliation
 
-- Status: `NOT_STARTED`
+- Status: `COMPLETED`
 - Portability assessment: Preserves the portability constraint when CEP is framework-neutral and CIS clearly labels LangGraph as one implementation mapping.
 
 ### Goal
@@ -988,7 +995,7 @@ No commit may encode graph node names in protocol enums or persistent protocol s
 
 ## 16. Target Architecture at Roadmap Completion
 
-At completion of Stages 1 through 7:
+The following is current after Stages 1 through 6 and is being documented by Stage 7:
 
 - Controller is the single semantic transition authority.
 - A replaceable runtime driver invokes Controller and dispatches authorized semantic commands.
@@ -999,7 +1006,9 @@ At completion of Stages 1 through 7:
 - Final-answer rendering and `ExecutionSummary` generation belong to Finalizer.
 - Rolling memory is a separate post-execution concern that cannot change execution outcome.
 - Async scheduling emits semantic wake events and never fabricates Controller decisions.
-- LangGraph nodes remain thin adapters that translate `GraphState` and semantic commands.
+- The production LangGraph graph is effectively a Controller-adapter self-loop to
+  `END`; callable worker adapters execute inside portable turns. The older multi-node
+  graph remains compatibility-only.
 - LangGraph topology is replaceable and does not define protocol semantics.
 - CEP documents normative protocol behavior; CIS documents the current LangGraph/runtime realization.
 - Durable history, deterministic replay, and commit guarantees remain explicitly FUTURE unless Stage 8 separately authorizes them.

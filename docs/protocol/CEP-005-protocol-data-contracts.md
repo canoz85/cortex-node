@@ -56,7 +56,8 @@ This section defines the protocol identity concepts used across all contracts.
 - Step Attempt Identity: Identifies one attempt to complete a step.
 - Operation Identity: Identifies a logical tool operation requested by protocol flow.
 - Operation Attempt Identity: Identifies one attempt of an operation when retries occur.
-- Summary Identity: Identifies one execution summary artifact for a terminal execution outcome.
+- Finalization identity is the terminal Execution Identity; the current contract does
+  not introduce a separate Summary Identity.
 
 Identity rules:
 Identities are protocol concepts rather than storage identifiers, database keys, memory addresses, or implementation-specific object references.
@@ -80,7 +81,7 @@ Produced By:
 - Controller at execution start.
 
 Consumer:
-- Planner, Brain, Tool, Summary, and protocol observers.
+- Planner, Brain, Tool Runtime, Finalizer, and protocol observers.
 
 Required Contract Elements:
 - execution identity
@@ -116,7 +117,7 @@ Produced By:
 - Controller accepts the plan revision used by protocol flow.
 
 Consumer:
-- Controller, Brain, Summary.
+- Controller, Brain, Finalizer.
 
 Required Contract Elements:
 - plan identity
@@ -154,7 +155,7 @@ Produced By:
 - Controller records step progression facts for accepted steps.
 
 Consumer:
-- Controller, Brain, Summary.
+- Controller, Brain, Finalizer.
 
 Required Contract Elements:
 - step identity
@@ -191,7 +192,7 @@ Produced By:
 - Controller.
 
 Consumer:
-- Planner, Brain, Summary, and Tool when required by command scope.
+- Planner, Brain, Finalizer, and Tool Runtime when required by command scope.
 
 Required Contract Elements:
 - execution identity
@@ -276,13 +277,20 @@ Optional Contract Elements:
 - protocol-visible rationale for outcome
 
 Invariants:
-- Outcome is mutually exclusive and exactly one of:
-  - StepCompleted
-  - StepFailed
-  - ToolRequested
-  - ReplanRequested
-- exactly one Outcome exists for each Step Attempt Identity
-- one BrainResult corresponds to one Step Attempt Identity
+- Outcome is mutually exclusive and exactly one of the implemented typed outcomes:
+  - `TOOL_REQUEST`
+  - `STEP_COMPLETED`
+  - `STEP_FAILED`
+  - `REPLAN_REQUEST`
+  - `FINAL_ANSWER`
+  - `CONTINUE`
+  - `INVALID_OUTPUT`
+  - `PROVIDER_FAILURE`
+- exactly one Outcome exists for each Brain invocation
+- a step attempt may require multiple Brain invocations around tool observations
+- Brain supplies only semantic completion evidence; Controller binds execution,
+  accepted plan revision, active step, and eligible tool-result provenance before
+  accepting completion
 - BrainResult never transitions execution directly
 
 Related CEP references:
@@ -308,8 +316,7 @@ Consumer:
 - Tool.
 
 Required Contract Elements:
-- operation identity
-- operation attempt identity
+- request identity
 - tool identity
 - operation parameters
 - correlation identity
@@ -318,9 +325,8 @@ Optional Contract Elements:
 - execution constraints relevant to tool operation
 
 Invariants:
-- Operation Identity identifies logical work
-- Operation Attempt Identity identifies retry attempts
-- one ToolRequest identifies one deterministic operation intent
+- Request Identity identifies the exact authorized operation
+- one ToolRequest identifies one operation intent, including an authorized async poll
 - ToolRequest does not encode execution policy decisions
 
 Related CEP references:
@@ -345,20 +351,20 @@ Consumer:
 - Controller and Brain.
 
 Required Contract Elements:
-- operation identity
-- operation attempt identity
+- matching request identity
 - success or failure outcome
 - returned observations
 - execution metadata
 
 Optional Contract Elements:
 - failure detail visible at protocol level
+- asynchronous job identity and non-terminal/terminal status
 
 Invariants:
-- ToolResult corresponds to one ToolRequest Operation Attempt Identity
-- Operation Identity remains stable across attempts for the same logical work
+- ToolResult corresponds to the exact current authorized ToolRequest identity
 - ToolResult records observations, not policy
 - ToolResult never determines execution policy
+- asynchronous wake correlation is not poll authorization
 
 Related CEP references:
 - CEP-001 (ToolCompleted, ToolFailed)
@@ -433,18 +439,22 @@ Invariants:
 - completed history remains immutable
 - one PlannerResult corresponds to one PlanningRequest identity
 - only Controller may accept a proposed plan or choose lifecycle state
+- proposal revision/status values do not acquire lifecycle authority; accepted
+  revision identity and preserved completed work are determined by Controller-owned
+  reconciliation
 
 Related CEP references:
 - CEP-001 (PlanCreated, PlanRevised)
 - CEP-002 (controller decisions)
 - CEP-004 (Planner non-permissions)
 
-### 6.11 SummaryInput
+### 6.11 FinalizationRequest
 Purpose:
-- Represents immutable execution information available to Summary.
+- Represents accepted terminal execution information supplied to Finalizer.
 
 Definition:
-- Represents the canonical protocol contract for summary generation using terminal execution facts.
+- Represents the canonical request for summary and final-answer generation using
+  terminal execution facts.
 
 Canonical Owner:
 - Controller.
@@ -453,65 +463,62 @@ Produced By:
 - Controller.
 
 Consumer:
-- Summary.
+- Finalizer.
 
 Required Contract Elements:
-- execution history
-- terminal outcome
-- completed plan
-- execution metrics
+- execution identity and terminal status
+- terminal execution context and accepted plan, when any
+- accepted tool execution history and completed-step identities
+- terminal reason, direct-response classification, and cancellation source
 
 Optional Contract Elements:
-- summary constraints visible at protocol level
+- final-answer rendering constraints visible at the application boundary
 
 Invariants:
-- summary input is derived from recorded protocol facts
-- summary input excludes hidden reasoning
-- summary input does not alter execution outcome
+- finalization input is derived from accepted terminal facts
+- finalization input excludes hidden reasoning
+- finalization input does not alter execution outcome
 - references a terminal execution identity and corresponding immutable history
 
 Related CEP references:
-- CEP-001 (GenerateSummary, SummaryGenerated)
+- CEP-001 (GenerateFinalization, FinalizationGenerated)
 - CEP-002 (completion semantics)
-- CEP-004 (Summary contract)
+- CEP-004 (Finalizer contract)
 
-### 6.12 ExecutionSummary
+### 6.12 FinalizationResult and ExecutionSummary
 Purpose:
-- Represents the protocol-visible execution report.
+- Represents terminal reporting returned by Finalizer.
 
 Definition:
-- Represents the canonical protocol contract for terminal execution reporting.
+- `FinalizationResult` contains the authoritative `ExecutionSummary`, final
+  user-facing answer, and optional rendering error.
 
 Canonical Owner:
 - Controller.
 
 Produced By:
-- Summary.
+- Finalizer.
 
 Consumer:
 - Controller and observers.
 
 Required Contract Elements:
-- summary identity
-- execution outcome
-- completed work
-- failures
-- retries
-- summary metadata
+- `ExecutionSummary` with execution outcome, completed work, failures, and summary text
+- non-empty final user-facing answer
 
 Optional Contract Elements:
 - protocol-visible explanatory narrative
 
 Invariants:
-- summary reflects recorded protocol facts only
+- summary reflects accepted protocol facts only
 - summary never modifies protocol history
 - summary does not alter terminal execution outcome
-- Summary Identity uniquely identifies one summary for one terminal execution outcome
+- final-answer rendering failure is represented without changing terminal outcome
 
 Related CEP references:
-- CEP-001 (SummaryGenerated)
-- CEP-002 (post-execution summary activity)
-- CEP-004 (Summary non-permissions)
+- CEP-001 (FinalizationGenerated)
+- CEP-002 (terminal finalization activity)
+- CEP-004 (Finalizer non-permissions)
 
 ## 7. Protocol Data Model
 
@@ -531,10 +538,13 @@ flowchart TD
     EI --> PI[PlannerInput]
     EP --> PI
     PI --> PR[PlannerResult]
-    EI --> SI[SummaryInput]
-    EP --> SI
-    TRS --> SI
-    SI --> ESUM[ExecutionSummary]
+    EI --> FI[FinalizationRequest]
+    EP --> FI
+    TRS --> FI
+    FI --> F[Finalizer]
+    F --> FR[FinalizationResult]
+    FR --> ESUM[ExecutionSummary]
+    FR --> FA[Final Answer]
 ```
 
 ## 8. Out of Scope

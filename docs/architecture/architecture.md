@@ -1,63 +1,97 @@
 ## CortexNode Architecture
 
-### Planner lifecycle
+### Production ownership
+
+CortexController is the sole lifecycle and authorization authority. It accepts
+protocol-visible facts, owns accepted execution state, selects legal transitions,
+and authorizes every worker dispatch. Mechanical invocation does not transfer that
+authority:
+
+- `PortableExecutionRuntime` prepares each portable turn, evaluates completion
+  coverage, reconciles revision proposals, and coordinates application-level turn
+  sequencing.
+- `ExecutionDriver` applies the Controller transition and dispatches exactly the
+  worker authorized by that decision.
+- Planner produces request-bound plan or revision proposals. Controller alone accepts
+  a plan and its revision.
+- Brain executes one active step and returns one typed outcome per invocation.
+  Controller accepts its lifecycle meaning and binds accepted completion provenance.
+- Tool Runtime executes an authorized `ToolRequest` and returns a portable
+  `ToolResult`.
+- Finalizer exclusively produces both `ExecutionSummary` and the final user-facing
+  answer from a Controller-authorized `FinalizationRequest`.
+
+### Planner lifecycle and revision handling
 
 The canonical planning flow is:
 
-`Controller -> PlanningRequest -> PlannerService -> PlannerProvider -> PlannerResult -> Controller`
+`Controller -> ExecutionDriver -> PlanningRequest -> Planner -> PlannerResult -> Controller`
 
-The graph enters through Controller. Planner runs only while the durable cursor and
-pending `PlanningRequest` authorize it, and Controller consumes each bound result once.
 Planner proposes; it never mutates protocol state, executes tools, renders a user
-answer, retries itself, or selects the next graph transition.
+answer, retries itself, or chooses a lifecycle transition. `PlanningRequest.operation`
+is `CREATE` or `REVISE`, and every result is bound to the pending request identity.
 
-`PlanningRequest.operation` is either `CREATE` or `REVISE`. Provider output is the
-strict structured P3 contract with exactly one result:
+For a revision, portable reconciliation validates the accepted execution, plan ID,
+and base revision; preserves completed work and provenance; and rejects stale,
+mismatched, or ineffective proposals. Controller alone commits the reconciled plan.
+Deferred semantic novelty and Finalizer evidence-handoff debts are unchanged.
 
-- `PLAN_PROPOSED`: a structured candidate plan. Controller accepts CREATE candidates
-  and sends REVISE candidates through P4 reconciliation.
-- `NO_PLAN_REQUIRED`: Controller skips Brain/tools and routes to Finalizer; Planner
-  supplies context, not the user-facing answer.
-- `NEEDS_INPUT`: Controller consumes the request/result and checkpoints an explicit
-  clarification pause. A later user clarification starts a new Controller-authorized
-  planning episode with a new request identity.
-- `PLANNING_FAILED`: typed `INVALID_OUTPUT`, `PROVIDER_FAILURE`, or `UNPLANNABLE`.
-  Controller owns the bounded retry/terminal policy.
+### Brain completion boundary
 
-Every `PlannerResult` is bound to the exact pending request ID. Numbered or free-form
-prose plans are unsupported and normalize to `INVALID_OUTPUT`.
+Brain returns typed tool-request, completion, failure, replan, direct-response,
+continuation, invalid-output, or provider-failure outcomes. It does not run a separate
+lifecycle-owning completion checker. For completion, Brain supplies a semantic
+step-scoped judgment; Controller validates completion coverage and binds execution,
+plan revision, step, and eligible tool-result provenance before accepting it.
 
-### Revision handling
+The retained completion service is deterministic completion-requirement and coverage
+validation. It is not the removed legacy Brain checker.
 
-REVISE requests are bound to the accepted execution, plan ID, and base revision. P4
-deterministically preserves completed work and its provenance, permits replacement of
-failed/interrupted work, rejects stale/mismatched or structurally ineffective
-proposals, and commits an accepted revision only after reconciliation succeeds.
+### Production topology
 
-P4.1A supplies Planner with a bounded deterministic projection of observable tool
-actions. Raw tool history remains durable audit/provenance data and is not converted
-into semantic facts. Semantic revision novelty and cross-tool strategy equivalence are
-not implemented.
+The Stage 5B production LangGraph topology is effectively:
 
-### Conversation and checkpoint semantics
+```text
+START -> controller -> controller -> ... -> END
+```
+
+The Controller node is a thin presentation adapter around portable runtime turns.
+Planner and Brain graph functions are callable worker transports invoked by
+ExecutionDriver within those turns; they are not production graph successors.
+Normal executable tools use direct `ToolRuntimePort` execution through
+`SerializedToolRuntimePort`, not LangGraph `ToolNode`.
+
+An injected multi-node topology containing Planner, Brain, ToolNode, Capture, and
+Summary nodes remains for test/integration compatibility. It is compatibility-only
+and is not the production architecture.
+
+### Async wake and continuation
+
+Async wake is correlation, not authorization:
+
+```text
+poll-due wake
+  -> PortableExecutionRuntime
+  -> CortexController validates wait and constructs/authorizes poll ToolRequest
+  -> ExecutionDriver invokes ToolRuntimePort
+  -> portable ToolResult integration
+  -> portable Controller turns until next wait or terminal decision
+```
+
+The continuation has no LangGraph node or successor semantics. The LangGraph async
+adapter loads a snapshot, presents accumulated turn updates, and persists the result.
+Provider-local telemetry and resource handoff remain adapter concerns and do not gain
+protocol authority.
+
+### Conversation and persistence boundary
 
 `context.user_request` is the current objective. `recent_history` contains prior user
-messages and accepted Finalizer answers only; Brain, tool, and Controller transport are
-excluded. A clarification is a typed current input, not tool evidence.
+messages and accepted Finalizer answers; Brain, tool, and Controller transport are
+excluded. Clarification is typed current input, not tool evidence.
 
-Pending requests, Planner results awaiting Controller consumption, planning attempt
-budgets, and clarification pauses are durable. Resume re-enters the same Controller-
-owned state transition and cannot authorize Planner or consume a result twice.
-
-### Execution ownership
-
-- Controller owns plans once accepted, lifecycle transitions, retries, checkpointing,
-  reconciliation, and finalization dispatch.
-- Planner owns only proposal generation.
-- Brain executes one active step and emits typed step/tool/replan outcomes.
-- Tool Runtime executes authorized `ToolRequest` values and returns `ToolResult`.
-- Finalizer owns the final user-facing answer.
-
-The runtime graph remains Controller-first:
-
-`START -> Controller -> Planner (when authorized) -> Controller -> Brain / Planner / Finalizer / pause / terminal`
+LangGraph supplies current production snapshot persistence and presentation. It is
+not lifecycle or worker-routing authority, and its checkpoints or traversal history
+are not a CEP accepted-event journal. Production does not currently claim the
+append-only event-journal, framework-neutral replay, or protocol-level atomic
+checkpoint/event-position guarantees required by CEP-003 and CEP-006. Those gaps are
+reserved for the separate Stage 8 decision.

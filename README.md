@@ -4,22 +4,24 @@ Local-first AI agent built with LangGraph + Ollama. The current implementation i
 
 ## Current execution model
 
-The live graph is centered on the protocol and controller, not a loose brain-led loop.
+The production graph is a thin persistence/presentation adapter around portable
+Controller turns:
 
-- `planner`: creates an `ExecutionPlan` and concrete `ExecutionStep` objects.
-- `controller`: evaluates the latest protocol state and decides the next legal action: dispatch planner, dispatch brain, run tools, summarize, or terminate.
-- `brain`: executes the single currently active step. It does not own planning, ordering, retries, or final user response.
-- `tools`: invokes the actual tool calls requested by the brain.
-- `capture_tool_output`: normalizes the tool result into structured protocol payloads.
-- `summarize_memory`: terminal summary path after execution ends.
+- `controller`: the sole registered production lifecycle node and semantic authority.
+- `PortableExecutionRuntime`: prepares and reconciles portable turns.
+- `ExecutionDriver`: applies Controller transitions and invokes the authorized worker.
+- Planner and Brain: callable typed worker adapters inside the portable turn.
+- Tool Runtime: direct `ToolRuntimePort` execution returning portable `ToolResult`.
+- Finalizer: exclusive producer of `ExecutionSummary` and the final answer.
 
 The effective loop is:
 
 ```text
-planner -> controller -> brain -> tools -> capture_tool_output -> controller -> ...
+START -> controller -> controller -> ... -> END
 ```
 
-`controller` decides when to continue, retry, advance to the next step, or stop. The controller is the authority for execution decisions, step transitions, and termination conditions.
+The older Planner/Brain/ToolNode/Capture/Summary node graph remains only as an
+injected test/integration compatibility path; it is not production topology.
 
 ## What the current code does
 
@@ -27,9 +29,11 @@ planner -> controller -> brain -> tools -> capture_tool_output -> controller -> 
 
 The ownership boundaries are explicit in the active prompts and protocol contracts:
 
-- Planner owns the execution plan and step definitions.
-- Controller owns execution order, iterations, retries, stopping conditions, and final user-visible completion logic.
-- Brain owns only the current active step and returns structured outcomes for the controller to consume.
+- Planner owns proposal generation; Controller owns the accepted plan and revision.
+- Controller owns execution order, authorization, retries, and termination.
+- Brain returns typed outcomes for one active step; Controller accepts their lifecycle
+  meaning and binds completion provenance.
+- Finalizer owns terminal summary and final-answer generation.
 
 This is enforced in the runtime prompts and in `core/protocol/controller.py`, which validates exactly one worker result at a time and chooses the next legal transition.
 
@@ -43,20 +47,12 @@ The brain operates in a strict active-step mode:
 
 The execution brief passed to the brain includes the full plan and highlights the active step. This keeps the model focused on the current objective instead of broad plan improvisation.
 
-### Step Completion Checker
+### Step completion
 
-The project includes a dedicated completion check path driven by `STEP_COMPLETED_SYSTEM_PROMPT` in `core/graph_constants.py`.
-
-Its job is to answer one question only: is the current active step complete or unreachable?
-
-The checker is instructed to:
-
-- evaluate the accumulated evidence across the active step, not only the newest result;
-- treat prior successful tool results as valid unless later evidence directly contradicts them;
-- return `YES` if the intent is satisfied or if it is demonstrably unreachable;
-- return `NO` if the step is still incomplete or requires additional verification.
-
-The check is intentionally narrow: it does not decide plan strategy or final messaging. The controller interprets that answer and advances or terminates execution.
+There is no separate YES/NO Brain completion checker in the production lifecycle.
+Brain returns a typed completion, failure, replan, tool-request, or other supported
+outcome. Controller validates completion coverage and binds accepted evidence
+provenance before changing step state.
 
 ### Evidence semantics
 
@@ -67,16 +63,12 @@ The brain assembles cumulative execution evidence from `tool_execution_history`,
 - successful prior execution remains relevant unless newer evidence explicitly disproves it;
 - a step is not considered complete simply because the last tool call failed or because only the latest output is examined.
 
-This is reflected in the `Execution evidence v1` block built in `core/graph_brain.py` and in the completion-checker prompt text.
+This evidence is projected into Brain input and is bound to accepted completion
+provenance by Controller.
 
-### Completion vs. unreachability
-
-The completion checker distinguishes two ways a step can be treated as terminal:
-
-- `completed`: the original step intent has been satisfied;
-- `unreachable`: the intent cannot be achieved under the current constraints and no meaningful allowed action remains.
-
-Both are considered terminal states for the active step, but they are not the same outcome. A failed tool alone is not enough to mark a step as satisfied or unreachable.
+The retained `CompletionService` performs deterministic completion-requirement and
+coverage validation; it is not the removed checker. A failed tool alone does not mark
+a step complete.
 
 ## Controller ownership
 

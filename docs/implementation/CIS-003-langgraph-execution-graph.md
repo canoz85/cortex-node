@@ -86,7 +86,17 @@ Termination
 Cleanup
 
 ## 4. Graph Topology Overview
-Current runtime graph topology is a directed execution flow with conditional routing and an action loop.
+Current production topology is effectively
+`START -> controller -> controller -> ... -> END`. The Controller adapter invokes
+`PortableExecutionRuntime`; `ExecutionDriver` dispatches authorized Planner, Brain,
+direct Tool Runtime, or Finalizer work inside each turn. LangGraph supplies
+checkpoint-backed persistence and presentation, not lifecycle or worker-routing
+authority.
+
+The following multi-node conceptual topology and the later node catalog describe the
+injected test/integration compatibility path only. They are not production topology.
+Normal executable tools use direct `ToolRuntimePort`, and terminal reporting uses
+Finalizer rather than the Summary node.
 
 Conceptual topology:
 Entry
@@ -374,7 +384,10 @@ Planner role realization:
 Tool capture helper realization:
 - core/graph_capture.py
 
-Summary role realization:
+Finalizer role realization:
+- core/finalizer.py
+
+Compatibility-only summary node:
 - core/graph_summarize.py
 
 Context assembly helper realization:

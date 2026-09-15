@@ -20,6 +20,11 @@ Runtime implementation may evolve while preserving CEP-conformant observable beh
 
 If CIS wording and CEP wording diverge, CEP is authoritative.
 
+Current production dispatches workers through `ExecutionDriver` after Controller
+authorization. Planner and Brain graph functions are callable adapters inside the
+portable turn, normal tools use direct `ToolRuntimePort`, and Finalizer replaces the
+legacy Summary node for both `ExecutionSummary` and final-answer generation.
+
 ## 2. Scope
 Included:
 - runtime worker realization
@@ -209,26 +214,26 @@ Authority Limitations:
 - does not own transition legality
 - does not own lifecycle continuation
 
-### 5.5 Summary Runtime Role
+### 5.5 Finalizer Runtime Role
 Purpose:
-- produce terminal reporting output from accepted protocol-visible runtime facts.
+- produce `ExecutionSummary` and the final user-facing answer from accepted terminal facts.
 
 Responsibilities:
-- generate summary/terminal reporting artifacts
+- generate summary and final-answer artifacts
 - reflect accepted execution progression state for terminal output
 
 Canonical Owner:
-- Summary Runtime Role.
+- Finalizer Runtime Role.
 
 Runtime Inputs:
 - accepted protocol-visible history/context
 - controller-governed terminal context
 
 Runtime Outputs:
-- terminal summary output
+- `FinalizationResult`
 
 Current Runtime Module Mapping:
-- core/graph_summarize.py
+- core/finalizer.py
 
 Interaction Boundaries:
 - executes on controller-governed terminal path
@@ -331,8 +336,8 @@ Tool Runtime Role:
 - tools/*.py
 - core/graph_capture.py
 
-Summary Runtime Role:
-- core/graph_summarize.py
+Finalizer Runtime Role:
+- core/finalizer.py
 
 Context Assembly Service:
 - core/graph_context.py

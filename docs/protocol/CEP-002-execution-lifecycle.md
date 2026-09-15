@@ -18,25 +18,34 @@ sequenceDiagram
     participant P as Planner
     participant B as Brain
     participant T as Tool
-    participant S as Summary
+    participant D as ExecutionDriver
+    participant F as Finalizer
 
     U->>C: Execution request
     C->>C: ExecutionStarted
-    C->>P: CreatePlan
-    P->>C: PlanCreated
+    C->>D: authorize CreatePlan
+    D->>P: PlanningRequest
+    P->>D: PlannerResult proposal
+    D->>C: proposal for acceptance
     C->>C: StepStarted
-    C->>B: ExecuteStep
-    B->>B: Execute step
-    B->>C: ToolRequested
-    C->>T: RunTool
+    C->>D: authorize ExecuteStep
+    D->>B: BrainInput
+    B->>D: typed BrainResult
+    D->>C: tool-request outcome
+    C->>D: authorize RunTool
     C->>C: ToolStarted
-    T->>C: ToolCompleted
-    C->>B: ExecuteStep (continue)
-    B->>C: StepCompleted
+    D->>T: ToolRequest
+    T->>D: portable ToolResult
+    D->>C: result for acceptance
+    C->>D: authorize ExecuteStep (continue)
+    D->>B: BrainInput with accepted tool evidence
+    B->>D: typed completion outcome
+    D->>C: outcome for validation and provenance binding
     C->>C: ExecutionCheckpointed
     C->>C: ExecutionCompleted
-    C->>S: GenerateSummary
-    S->>C: SummaryGenerated
+    C->>D: authorize finalization
+    D->>F: FinalizationRequest
+    F->>D: FinalizationResult
 ```
 
 StepStarted is the Controller's commitment to execute the step. It does not confirm that Brain has already begun processing. The Controller records the step as active before dispatching ExecuteStep so the execution history reflects the committed order.
@@ -52,7 +61,14 @@ Lifecycle phases:
 
 Controller is the only actor that may move execution across phases.
 
-ExecutionCompleted marks the end of execution. GenerateSummary is a post-execution activity. Summary generation never changes execution outcome, and execution is terminal before summary generation begins.
+`PortableExecutionRuntime` owns portable turn preparation, completion assessment,
+and revision reconciliation around each Controller transition. `ExecutionDriver`
+applies that transition and invokes only the worker it authorizes. These runtime
+responsibilities do not transfer lifecycle authority away from Controller.
+
+ExecutionCompleted marks the end of execution. Finalization is terminal reporting,
+not another lifecycle transition. Finalizer produces both `ExecutionSummary` and the
+final user-facing answer, and never changes the terminal execution outcome.
 
 ## 4 Controller Decision Cycle
 
@@ -73,7 +89,7 @@ For every accepted protocol event, the Controller performs the following sequenc
    Determine the next legal command based on the current execution state, protocol rules, and execution policy.
 
 5. **Dispatch**  
-   Issue the selected command to the appropriate worker.
+   ExecutionDriver invokes the worker selected by the Controller authorization.
 
 This decision cycle is executed for every protocol event until execution reaches a terminal state.
 
@@ -85,7 +101,7 @@ This decision cycle is executed for every protocol event until execution reaches
 | PlanCreated | Dispatch ExecuteStep | ExecuteStep | StepStarted |
 | StepStarted | Dispatch ExecuteStep | ExecuteStep | ToolRequested or StepCompleted or StepFailed or ReplanRequested |
 | StepCompleted | Dispatch ExecuteStep | ExecuteStep | StepStarted |
-| StepCompleted | Commit Completion | GenerateSummary | ExecutionCompleted then SummaryGenerated |
+| Accepted final StepCompleted | Commit Completion | GenerateFinalization | ExecutionCompleted then FinalizationGenerated |
 
 ### 5.2 Tool Execution
 | Current Event | Controller Decision | Next Command | Expected Event |
@@ -99,7 +115,7 @@ This decision cycle is executed for every protocol event until execution reaches
 | ToolFailed | Dispatch ExecuteStep | ExecuteStep | StepFailed |
 | StepFailed | Schedule Retry | RetryStep | StepStarted |
 | StepFailed | Accept Replan | CreatePlan | PlanRevised |
-| StepFailed | Terminate Execution | GenerateSummary | ExecutionCompleted or ExecutionCancelled then SummaryGenerated |
+| StepFailed | Terminate Execution | GenerateFinalization | ExecutionCompleted or ExecutionCancelled then FinalizationGenerated |
 
 ### 5.4 Replanning
 | Current Event | Controller Decision | Next Command | Expected Event |
@@ -115,7 +131,7 @@ This decision cycle is executed for every protocol event until execution reaches
 ### 5.6 Cancellation
 | Current Event | Controller Decision | Next Command | Expected Event |
 | Any non-terminal event | Terminate Execution | CancelExecution | ExecutionCancelled |
-| ExecutionCancelled | Commit Completion | GenerateSummary | SummaryGenerated |
+| ExecutionCancelled | Commit Completion | GenerateFinalization | FinalizationGenerated |
 
 ## 6. Illegal Transitions
 
@@ -149,9 +165,10 @@ Retry is a controller decision, not a worker side effect.
 ## 8. Replanning Semantics
 
 - Brain cannot alter active plan directly.
-- Brain can only record ReplanRequested.
+- Brain can only propose a typed replan-requested outcome.
 - Controller decides to accept or reject replan request.
-- Planner records PlanRevised when accepted.
+- Planner returns a request-bound proposal. Controller reconciles it against the
+  accepted base revision and alone accepts the resulting revision.
 - Completed steps remain immutable across revisions.
 
 ## 9. Completion Semantics
@@ -160,7 +177,20 @@ Execution is complete only when:
 - all required steps are completed, or
 - controller reaches terminal cancellation/failure decision.
 
-Summary generation is a separate terminal activity triggered by Controller using GenerateSummary.
+Finalization is a separate terminal activity authorized by Controller. It consumes a
+`FinalizationRequest` and returns a `FinalizationResult` containing the summary and
+final answer.
+
+## 9.1 Asynchronous Tool Continuation
+
+When an accepted tool result represents a non-terminal asynchronous job, Controller
+may issue an asynchronous-wait decision. A later poll-due wake only correlates the
+execution and job; it does not authorize a poll. Controller validates the current
+wait, constructs and authorizes the poll `ToolRequest`, ExecutionDriver executes it,
+and the portable `ToolResult` is integrated before continuation.
+
+Continuation consists of ordinary portable Controller turns until the next wait or a
+terminal decision. It has no protocol node, successor, or graph-resume semantics.
 
 ## 10. Failure Protocol
 
@@ -187,14 +217,23 @@ Summary generation is a separate terminal activity triggered by Controller using
 ### 10.5 Cancelled Execution
 - Trigger: CancelExecution accepted.
 - Controller behavior: emit ExecutionCancelled and stop dispatching ExecuteStep or RunTool.
-- Deterministic outcome: optional GenerateSummary then SummaryGenerated.
+- Deterministic outcome: optional finalization then FinalizationGenerated.
 
 ### 10.6 Unexpected Exception
 - Trigger: unrecoverable protocol-processing error.
 - Controller behavior: record terminal cancellation/failure path and prevent further non-terminal commands.
-- Deterministic outcome: ExecutionCancelled and optional SummaryGenerated.
+- Deterministic outcome: ExecutionCancelled and optional FinalizationGenerated.
 
 ### 10.7 Checkpoint Recovery
 - Trigger: recovery from interruption or restart condition.
 - Controller behavior: restore from latest valid checkpoint, validate cursor alignment, record ExecutionResumed on success.
 - Deterministic outcome: continue at resume cursor; if validation fails, follow terminal cancellation/failure path.
+
+## 11. Current Implementation Conformance Boundary
+
+The lifecycle authority and typed worker-result flow above describe the current
+production runtime. The record/checkpoint portions of the Validate-Record-Checkpoint-
+Decide-Dispatch cycle remain normative CEP requirements, but current production does
+not implement a complete append-only accepted-event journal, deterministic
+framework-neutral replay, or protocol-level atomic checkpoint/event-position commit.
+Those are explicit non-conformance items reserved for the separate Stage 8 decision.
