@@ -4,7 +4,18 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from core.graph_runner import run_prompt
 from core.models import ToolResult
-from core.protocol.models import ExecutionState
+from core.protocol.enums import BrainOutcomeKind
+from core.protocol.models import (
+    BrainOutcome,
+    ExecutionCursor,
+    ExecutionIdentity,
+    ExecutionState,
+    ProtocolVisibleState,
+    ToolExecutionRecord,
+    ToolRequest,
+    ToolResult as ProtocolToolResult,
+    WorkingState,
+)
 
 
 class FakeApp:
@@ -16,6 +27,74 @@ class FakeApp:
         self.initial_state = initial_state
         for event in self._events:
             yield event
+
+
+def test_run_prompt_renders_portable_controller_tool_result_concisely(capsys):
+    request = ToolRequest(
+        request_id="call-1",
+        tool_name="list_files",
+        arguments={"path": "."},
+    )
+    brain_result = BrainOutcome(
+        outcome=BrainOutcomeKind.TOOL_REQUESTED,
+        tool_request=request,
+    )
+    request_message = AIMessage(
+        content="",
+        tool_calls=[{
+            "name": "list_files", "args": {"path": "."},
+            "id": "call-1", "type": "tool_call",
+        }],
+    )
+    evidence = {"entries": [f"large-entry-{index}" for index in range(100)]}
+    result = ProtocolToolResult(
+        request_id="call-1",
+        success=True,
+        message="Listing for .",
+        rendered_output="stdout that must stay private",
+        data=evidence,
+    )
+    record = ToolExecutionRecord(
+        step_id="step-1",
+        tool_name="list_files",
+        arguments={"path": "."},
+        result=result,
+    )
+    execution_state = ExecutionState(
+        protocol_visible=ProtocolVisibleState(
+            identity=ExecutionIdentity(execution_id="live-path", protocol_version="1"),
+            cursor=ExecutionCursor(),
+        ),
+        working=WorkingState(
+            last_tool_result=result,
+            tool_execution_history=(record,),
+        ),
+    )
+    raw_payload = "<tool_result_json>" + result.model_dump_json()
+    app = FakeApp([
+        {"controller": {
+            "brain_result": brain_result,
+            "messages": [request_message],
+        }},
+        {"controller": {
+            "execution_state": execution_state,
+            "messages": [ToolMessage(content=raw_payload, tool_call_id="call-1")],
+        }},
+    ])
+
+    run_prompt(app, "list files")
+
+    output = capsys.readouterr().out
+    assert output.count("[brain]") == 1
+    assert "Calling list_files" in output
+    assert "Calling list_files with" not in output
+    assert output.count("[tool:list_files]") == 1
+    assert "Listing for ." in output
+    assert "<tool_result_json>" not in output
+    assert "large-entry-99" not in output
+    assert "stdout that must stay private" not in output
+    assert execution_state.working.last_tool_result is result
+    assert execution_state.working.tool_execution_history[-1].result is result
 
 
 def test_run_prompt_handles_tool_flow(capsys):

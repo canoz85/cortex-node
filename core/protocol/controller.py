@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta, timezone
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from .enums import (
     AsyncJobStatus,
@@ -93,6 +93,9 @@ class CortexController:
                 clear_pending_tool_request=True,
             )
 
+        if controller_input.async_wake_job_id is not None:
+            return self._decide_from_async_wake(controller_input)
+
         # print("=== CONTROLLER INPUT ===")
         # print("planner_result:", controller_input.planner_result)
         # print("brain_result:", controller_input.brain_result)
@@ -126,6 +129,74 @@ class CortexController:
             return self._decide_from_tool(controller_input)
 
         return self._decide_initial(controller_input)
+
+    def _decide_from_async_wake(
+        self,
+        controller_input: ControllerInput,
+    ) -> ControllerDecision:
+        """Authorize one due status observation from current async evidence."""
+        wake_job_id = controller_input.async_wake_job_id
+        latest = controller_input.get_latest_async_result()
+        if (
+            controller_input.cursor.phase != ExecutionPhase.WAITING
+            or latest is None
+            or latest.async_job_id != wake_job_id
+        ):
+            return self._pause(
+                controller_input.cursor,
+                reason="async_wake_not_actionable",
+                reconciliation_required=False,
+            )
+
+        policy_input = controller_input.model_copy(
+            update={
+                "async_wake_job_id": None,
+                "async_poll_tool_name": None,
+                "async_poll_argument_key": None,
+                "tool_result": latest,
+            }
+        )
+        policy_decision = self._decide_from_tool(policy_input)
+        if (
+            policy_decision.decision_type
+            != ControllerDecisionType.AWAIT_ASYNC_JOB
+            or policy_decision.async_job_id != wake_job_id
+        ):
+            return policy_decision
+
+        tool_name = controller_input.async_poll_tool_name
+        argument_key = controller_input.async_poll_argument_key
+        if not tool_name or not argument_key:
+            return self._pause(
+                controller_input.cursor,
+                reason="async_poll_capability_missing",
+                reconciliation_required=True,
+                async_job_id=wake_job_id,
+            )
+
+        request = ToolRequest(
+            request_id=(
+                f"{controller_input.identity.execution_id}:poll:{uuid4().hex}"
+            ),
+            tool_name=tool_name,
+            arguments={argument_key: wake_job_id},
+            requested_by=WorkerRole.CONTROLLER,
+        )
+        cursor = controller_input.cursor.model_copy(
+            update={
+                "phase": ExecutionPhase.EXECUTING,
+                "current_worker": WorkerRole.TOOL_RUNTIME,
+            }
+        )
+        return ControllerDecision(
+            decision_type=ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
+            reason=f"Observe async job {wake_job_id}.",
+            next_worker=WorkerRole.TOOL_RUNTIME,
+            cursor=cursor,
+            next_step_id=controller_input.cursor.step_id,
+            pending_tool_request=request,
+            requires_checkpoint=True,
+        )
 
     def _validate(self, controller_input: ControllerInput) -> None:
         """Validate protocol invariants."""

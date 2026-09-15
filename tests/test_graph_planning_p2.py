@@ -40,7 +40,7 @@ def test_production_graph_starts_at_controller_and_authorizes_create(tmp_path):
     app = app_for(tmp_path)
     edges = {(edge.source, edge.target) for edge in app.get_graph().edges}
     assert set(app.get_graph().nodes) == {
-        "__start__", "controller", "tools", "capture_tool_output", "__end__",
+        "__start__", "controller", "__end__",
     }
     assert ("__start__", "controller") in edges
     assert ("__start__", "planner") not in edges

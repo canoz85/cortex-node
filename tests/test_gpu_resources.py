@@ -99,6 +99,53 @@ def test_coordinator_unloads_every_ollama_model_and_verifies_empty_ps():
     assert calls[-1][0].endswith("/api/ps")
 
 
+def test_prepare_for_comfy_logs_endpoint_models_unloads_and_final_ps(caplog):
+    ps_responses = iter((
+        {"models": [{"name": "brain:latest"}, {"name": "planner:latest"}]},
+        {"models": []},
+    ))
+
+    def request_json(url, _method, payload, _timeout):
+        if url.endswith("/api/ps"):
+            return next(ps_responses)
+        return {
+            "done": True,
+            "done_reason": "unload",
+            "model": payload["model"],
+        }
+
+    coordinator = GpuResourceCoordinator(
+        policy=GpuResourcePolicy(handoff_enabled=True),
+        request_json=request_json,
+    )
+
+    with caplog.at_level(logging.INFO, logger="core.runtime.gpu_resources"):
+        coordinator.prepare_for_comfy()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "stage=started" in message
+        and "base_url=http://127.0.0.1:11434" in message
+        and "model_count=2" in message
+        and "brain:latest" in message
+        and "planner:latest" in message
+        for message in messages
+    )
+    unload_messages = [
+        message for message in messages if "stage=unload_request" in message
+    ]
+    assert len(unload_messages) == 2
+    assert all("outcome=success" in message for message in unload_messages)
+    assert any("model_name=brain:latest" in message for message in unload_messages)
+    assert any("model_name=planner:latest" in message for message in unload_messages)
+    assert any(
+        "stage=completed" in message
+        and "model_count=0" in message
+        and "model_names=[]" in message
+        for message in messages
+    )
+
+
 def test_coordinator_blocks_comfy_when_ollama_does_not_unload():
     clock = FakeClock()
 
@@ -153,6 +200,47 @@ def test_coordinator_frees_comfy_and_verifies_active_torch_vram():
     assert [call[0] for call in calls].count(
         "http://127.0.0.1:8188/system_stats"
     ) == 2
+
+
+def test_prepare_for_llm_logs_endpoint_free_outcome_and_final_vram(caplog):
+    stats = iter((_comfy_stats(2048), _comfy_stats(64)))
+    clock = FakeClock()
+
+    def request_json(url, _method, _payload, _timeout):
+        if url.endswith("/system_stats"):
+            return next(stats)
+        return {}
+
+    coordinator = GpuResourceCoordinator(
+        policy=GpuResourcePolicy(
+            handoff_enabled=True,
+            comfy_max_active_vram_mib=512,
+        ),
+        request_json=request_json,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+
+    with caplog.at_level(logging.INFO, logger="core.runtime.gpu_resources"):
+        coordinator.prepare_for_llm()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "stage=started" in message
+        and "base_url=http://127.0.0.1:8188" in message
+        for message in messages
+    )
+    assert any(
+        "stage=free_request" in message
+        and "outcome=success" in message
+        and "response_empty=True" in message
+        for message in messages
+    )
+    assert any(
+        "stage=completed" in message
+        and "active_torch_vram_mib=64.0" in message
+        for message in messages
+    )
 
 
 def test_coordinator_blocks_llm_when_comfy_vram_does_not_release():

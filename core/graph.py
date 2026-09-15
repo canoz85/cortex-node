@@ -17,6 +17,7 @@ from core.brain_provider import native_brain_tools, text_tool_definitions
 from core.graph_routing import  route_after_controller
 from core.graph_worker_runtime import GraphWorkerRuntimePorts
 from core.graph_runner import run_prompt
+from core.graph_async_resume import LangGraphAsyncResumeAdapter
 from core.rag import WorkspaceRAG
 from core.runtime.async_poller import CheckpointedGraphApp, LocalAsyncPollingRuntime
 from core.runtime.gpu_resources import (
@@ -26,6 +27,7 @@ from core.runtime.gpu_resources import (
 )
 from core.runtime.state_propagation import propagate_execution_state
 from core.runtime.execution_driver import WorkerDispatchError
+from core.runtime.tool_result_integration import SerializedToolRuntimePort
 from core.state import AgentState
 from tools.comfy_ops import get_comfy_tools
 from tools.exec_ops import get_exec_tools
@@ -307,7 +309,12 @@ def build_app(
     if supports_native_tool_calls:
         tool_brain_llm = tool_brain_llm.bind_tools(native_brain_tools(tools))
 
-    worker_ports = GraphWorkerRuntimePorts()
+    direct_tool_runtime = (
+        SerializedToolRuntimePort(tools, require_structured=False)
+        if tool_node_factory is ToolNode
+        else None
+    )
+    worker_ports = GraphWorkerRuntimePorts(tool_runtime=direct_tool_runtime)
     controller_node, planner_node, brain_node, capture_tool_output_node, summarize_memory_node = graph_nodes_factory(
         brain_llm=brain_llm,
         tool_brain_llm=tool_brain_llm,
@@ -346,29 +353,11 @@ def build_app(
         )
         workflow.set_entry_point("controller")
 
-        # Stage 6 exception: LocalAsyncPollingRuntime resumes by writing a
-        # polled ToolMessage as_node="tools", then reuses capture normalization.
-        # No normal synchronous edge targets this guarded ToolNode adapter.
-        _register_state_node(
-            workflow,
-            "tools",
-            wrapped_tool_node,
-            resource_observer=resource_observer,
-        )
-        _register_state_node(
-            workflow,
-            "capture_tool_output",
-            capture_tool_output_node,
-            resource_observer=resource_observer,
-        )
-
         def route_portable_turn(state):
             destination = route_after_controller(state)
             return END if destination == END else "controller"
 
         workflow.add_conditional_edges("controller", route_portable_turn)
-        workflow.add_edge("tools", "capture_tool_output")
-        workflow.add_edge("capture_tool_output", "controller")
     else:
         # Injected topology factories remain a test/integration compatibility
         # surface. Production normal execution uses the thinned branch above.
@@ -420,11 +409,14 @@ def build_app(
     compiled_graph = workflow.compile(
         checkpointer=checkpointer_factory(),
     )
+    resume_adapter = LangGraphAsyncResumeAdapter(compiled_graph, controller_node)
     async_runtime = LocalAsyncPollingRuntime(
         compiled_graph=compiled_graph,
         tools=tools,
         resource_observer=resource_observer,
         resource_coordinator=resource_coordinator,
+        portable_runtime=getattr(controller_node, "_portable_runtime", None),
+        resume_adapter=resume_adapter,
     )
     return CheckpointedGraphApp(
         compiled_graph=compiled_graph,

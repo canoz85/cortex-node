@@ -163,4 +163,5 @@ def create_controller_node(
         return update
 
     controller_node._portable_dispatch = worker_ports is not None
+    controller_node._portable_runtime = runtime
     return controller_node

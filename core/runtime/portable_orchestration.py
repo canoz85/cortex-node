@@ -10,6 +10,8 @@ from core.protocol.completion_identity import accepted_step
 from core.protocol.enums import ControllerDecisionType, PlanningOperation
 from core.protocol.models import ControllerInput, ExecutionState, FinalizationResult
 from core.runtime.execution_driver import ExecutionDriver, ExecutionDriverTurn
+from core.runtime.async_wake import AsyncExecutionWake, AsyncWakeIntent
+from core.runtime.worker_ports import ToolRuntimePort
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +29,65 @@ class PortableExecutionRuntime:
     def __init__(self, *, driver: ExecutionDriver, completion_service: CompletionService):
         self._driver = driver
         self._completion_service = completion_service
+
+    @staticmethod
+    def begin_async_wake(
+        execution_state: ExecutionState,
+        wake: AsyncExecutionWake,
+    ) -> AsyncExecutionWake:
+        """Accept semantic wake correlation without treating it as authorization.
+
+        Stage 6A establishes this framework-neutral entrypoint only. The legacy
+        polling adapter still recovers the checkpointed wait decision and owns
+        poll construction, execution, and graph resume until later Stage 6 slices.
+        """
+
+        if not isinstance(execution_state, ExecutionState):
+            raise TypeError("execution_state must be an ExecutionState")
+        if not isinstance(wake, AsyncExecutionWake):
+            raise TypeError("wake must be an AsyncExecutionWake")
+        if wake.intent != AsyncWakeIntent.POLL_DUE:
+            raise ValueError(f"Unsupported async wake intent: {wake.intent!r}")
+        if wake.execution_id != execution_state.protocol_visible.identity.execution_id:
+            raise ValueError("Async wake execution identity mismatch")
+        return wake
+
+    def authorize_async_wake(
+        self,
+        execution_state: ExecutionState,
+        controller_input: ControllerInput,
+        wake: AsyncExecutionWake,
+        *,
+        status_tool_name: str,
+        status_argument_key: str,
+    ) -> PortableRuntimeTurn:
+        """Ask Controller to authorize a correlated async status observation."""
+        self.begin_async_wake(execution_state, wake)
+        wake_input = controller_input.model_copy(
+            update={
+                "planner_result": None,
+                "brain_result": None,
+                "tool_result": None,
+                "async_wake_job_id": wake.async_job_id,
+                "async_poll_tool_name": status_tool_name,
+                "async_poll_argument_key": status_argument_key,
+            }
+        )
+        return self.turn(execution_state, wake_input, dispatch_worker=False)
+
+    def dispatch_authorized_async_poll(
+        self,
+        authorized_turn: PortableRuntimeTurn,
+        tool_runtime: ToolRuntimePort,
+    ):
+        """Execute one Controller-authorized poll through ExecutionDriver."""
+        turn = authorized_turn.driver_turn
+        return self._driver.dispatch_authorized(
+            turn.execution_state,
+            turn.decision,
+            authorized_turn.controller_input,
+            tool_runtime=tool_runtime,
+        )
 
     def turn(
         self,

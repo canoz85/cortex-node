@@ -19,6 +19,7 @@ from core.protocol.bridge import legacy_state_to_execution_state
 from core.protocol.enums import ControllerDecisionType
 from core.protocol.models import AsyncJobPolicy, ControllerDecision, FinalizationResult
 from core.runtime.accessors import get_execution_state
+from core.runtime.async_wake import AsyncExecutionWake
 from core.state import AgentState
 
 logger = get_logger(__name__)
@@ -195,9 +196,12 @@ def run_prompt(
         ):
             break
 
-        events = async_runtime.poll_and_resume(
+        events = async_runtime.wake_and_resume(
             config=graph_config,
-            decision=latest_controller_decision,
+            wake=AsyncExecutionWake(
+                execution_id=execution_state.protocol_visible.identity.execution_id,
+                async_job_id=latest_controller_decision.async_job_id,
+            ),
         )
 
     # if metrics.latest_step_count >= MAX_REASONING_STEPS:

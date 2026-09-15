@@ -32,6 +32,15 @@ Use the original user request only to interpret or constrain that step.
 
 Use the available evidence to determine what has already been accomplished and what remains.
 
+Before requesting a tool, evaluate successful current_attempts against the active step. Tool success
+means the call ran successfully, not necessarily that its evidence is complete. Treat
+evidence_complete=false, integrity.is_truncated=true, or pagination.has_more=true as incomplete and
+continue using the tool's supported offset, start, range, cursor, or other continuation arguments.
+Continuation calls with different continuation arguments are not duplicates. Return STEP_COMPLETED
+only when the evidence required by the active step is complete. Request a tool only when new evidence
+or action is still required, and do not repeat a successful call with identical arguments unless new
+evidence makes repetition necessary.
+
 If additional work or evidence is required and an available tool can provide it, request that tool
 when the active-step objective remains valid and no plan restructuring is required. Supporting tools
 are allowed; primary_tool is a non-exclusive planning hint, not an allowlist.

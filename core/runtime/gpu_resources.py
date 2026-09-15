@@ -170,29 +170,60 @@ class GpuResourceCoordinator:
             self._log_handoff(
                 direction="ollama_to_comfy",
                 stage="started",
+                base_url=self.policy.ollama_base_url,
                 model_count=len(model_names),
+                model_names=model_names,
             )
             for model_name in model_names:
-                self._request(
-                    self.policy.ollama_base_url,
-                    "/api/generate",
-                    method="POST",
-                    payload={
-                        "model": model_name,
-                        "prompt": "",
-                        "stream": False,
-                        "keep_alive": 0,
-                    },
+                try:
+                    response = self._request(
+                        self.policy.ollama_base_url,
+                        "/api/generate",
+                        method="POST",
+                        payload={
+                            "model": model_name,
+                            "prompt": "",
+                            "stream": False,
+                            "keep_alive": 0,
+                        },
+                    )
+                except Exception as exc:
+                    self._log_handoff(
+                        direction="ollama_to_comfy",
+                        stage="unload_request",
+                        base_url=self.policy.ollama_base_url,
+                        model_name=model_name,
+                        outcome="error",
+                        error_type=type(exc).__name__,
+                    )
+                    raise
+                self._log_handoff(
+                    direction="ollama_to_comfy",
+                    stage="unload_request",
+                    base_url=self.policy.ollama_base_url,
+                    model_name=model_name,
+                    outcome="success",
+                    response_done=response.get("done"),
+                    response_done_reason=response.get("done_reason"),
                 )
 
+            final_model_names = model_names
+
+            def ollama_is_empty() -> bool:
+                nonlocal final_model_names
+                final_model_names = self._list_ollama_models()
+                return not final_model_names
+
             self._wait_until(
-                self._ollama_is_empty,
+                ollama_is_empty,
                 description="Ollama /api/ps to become empty",
             )
             self._log_handoff(
                 direction="ollama_to_comfy",
                 stage="completed",
-                model_count=len(model_names),
+                base_url=self.policy.ollama_base_url,
+                model_count=len(final_model_names),
+                model_names=final_model_names,
             )
 
     def prepare_for_llm(self) -> None:
@@ -204,15 +235,44 @@ class GpuResourceCoordinator:
             self._log_handoff(
                 direction="comfy_to_ollama",
                 stage="started",
+                base_url=self.policy.comfy_base_url,
             )
-            self._request(
-                self.policy.comfy_base_url,
-                "/free",
-                method="POST",
-                payload={"unload_models": True, "free_memory": True},
+            try:
+                free_response = self._request(
+                    self.policy.comfy_base_url,
+                    "/free",
+                    method="POST",
+                    payload={"unload_models": True, "free_memory": True},
+                )
+            except Exception as exc:
+                self._log_handoff(
+                    direction="comfy_to_ollama",
+                    stage="free_request",
+                    base_url=self.policy.comfy_base_url,
+                    outcome="error",
+                    error_type=type(exc).__name__,
+                )
+                raise
+            self._log_handoff(
+                direction="comfy_to_ollama",
+                stage="free_request",
+                base_url=self.policy.comfy_base_url,
+                outcome="success",
+                response_empty=not bool(free_response),
             )
+
+            final_active_torch_vram_mib: float | None = None
+
+            def comfy_is_released() -> bool:
+                nonlocal final_active_torch_vram_mib
+                final_active_torch_vram_mib = self._comfy_active_torch_vram_mib()
+                return (
+                    final_active_torch_vram_mib
+                    <= self.policy.comfy_max_active_vram_mib
+                )
+
             self._wait_until(
-                self._comfy_is_released,
+                comfy_is_released,
                 description=(
                     "ComfyUI active torch VRAM to fall to at most "
                     f"{self.policy.comfy_max_active_vram_mib} MiB"
@@ -221,6 +281,8 @@ class GpuResourceCoordinator:
             self._log_handoff(
                 direction="comfy_to_ollama",
                 stage="completed",
+                base_url=self.policy.comfy_base_url,
+                active_torch_vram_mib=final_active_torch_vram_mib,
             )
 
     def _request(
@@ -278,6 +340,12 @@ class GpuResourceCoordinator:
         return not self._list_ollama_models()
 
     def _comfy_is_released(self) -> bool:
+        return (
+            self._comfy_active_torch_vram_mib()
+            <= self.policy.comfy_max_active_vram_mib
+        )
+
+    def _comfy_active_torch_vram_mib(self) -> float:
         payload = self._request(
             self.policy.comfy_base_url,
             "/system_stats",
@@ -315,7 +383,7 @@ class GpuResourceCoordinator:
                 "ComfyUI /system_stats reports torch_vram_free above torch_vram_total."
             )
         active_mib = (torch_total - torch_free) / self._MIB
-        return active_mib <= self.policy.comfy_max_active_vram_mib
+        return active_mib
 
     @staticmethod
     def _nonnegative_number(value: object, field_name: str) -> float:
@@ -354,16 +422,56 @@ class GpuResourceCoordinator:
         *,
         direction: str,
         stage: str,
+        base_url: str | None = None,
         model_count: int | None = None,
+        model_names: Sequence[str] | None = None,
+        model_name: str | None = None,
+        outcome: str | None = None,
+        error_type: str | None = None,
+        response_done: object | None = None,
+        response_done_reason: object | None = None,
+        response_empty: bool | None = None,
+        active_torch_vram_mib: float | None = None,
     ) -> None:
+        details = []
+        if base_url is not None:
+            details.append(f"base_url={base_url}")
+        if model_count is not None:
+            details.append(f"model_count={model_count}")
+        if model_names is not None:
+            details.append(f"model_names={list(model_names)}")
+        if model_name is not None:
+            details.append(f"model_name={model_name}")
+        if outcome is not None:
+            details.append(f"outcome={outcome}")
+        if error_type is not None:
+            details.append(f"error_type={error_type}")
+        if response_done is not None:
+            details.append(f"response_done={response_done}")
+        if response_done_reason is not None:
+            details.append(f"response_done_reason={response_done_reason}")
+        if response_empty is not None:
+            details.append(f"response_empty={response_empty}")
+        if active_torch_vram_mib is not None:
+            details.append(f"active_torch_vram_mib={active_torch_vram_mib}")
+        suffix = f" | {' '.join(details)}" if details else ""
         log_event(
             self._logger,
             logging.INFO,
-            f"GPU resource handoff | direction={direction} stage={stage}",
+            f"GPU resource handoff | direction={direction} stage={stage}{suffix}",
             event_name="gpu_resource_handoff",
             direction=direction,
             stage=stage,
+            base_url=base_url,
             model_count=model_count,
+            model_names=list(model_names) if model_names is not None else None,
+            model_name=model_name,
+            outcome=outcome,
+            error_type=error_type,
+            response_done=response_done,
+            response_done_reason=response_done_reason,
+            response_empty=response_empty,
+            active_torch_vram_mib=active_torch_vram_mib,
         )
 
 

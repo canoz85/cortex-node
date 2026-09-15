@@ -250,12 +250,8 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
         assert protocol.completed_step_ids == ("s1",)
         assert protocol.retry.retry_count == 0
         assert protocol.active_plan.steps[0].status == StepStatus.COMPLETED
-        assert app.builder.edges == {
-            ("__start__", "controller"),
-            ("tools", "capture_tool_output"),
-            ("capture_tool_output", "controller"),
-        }
+        assert app.builder.edges == {("__start__", "controller")}
         assert set(app.get_graph().nodes) == {
-            "__start__", "controller", "tools", "capture_tool_output", "__end__",
+            "__start__", "controller", "__end__",
         }
     assert set(app.builder.branches) == {"controller"}

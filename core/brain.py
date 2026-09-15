@@ -26,6 +26,14 @@ def build_brain_output_protocol(*, supports_native_tool_calls: bool, tools_enabl
             "BRAIN OUTCOME CONTRACT:\n"
             "Return exactly one native call: either an executable tool or one of "
             "brain_step_completed, brain_step_failed, brain_replan_requested.\n"
+            "Before choosing a call, evaluate successful current_attempts against the active step. "
+            "Success means the tool ran successfully, not necessarily that its evidence is complete. "
+            "Treat evidence_complete=false, integrity.is_truncated=true, or pagination.has_more=true "
+            "as incomplete and continue with the tool's supported offset, start, range, cursor, or "
+            "other continuation arguments. If complete evidence satisfies the step, call brain_step_completed. "
+            "Call an executable tool only when new evidence or action is still required. "
+            "A continuation call with different continuation arguments is not a duplicate. Do not repeat "
+            "a successful tool call with identical arguments unless new evidence makes repetition necessary.\n"
             "These lifecycle actions are provided native tools, just like the executable tools. "
             "Invoke brain_step_completed for STEP_COMPLETED, brain_step_failed for STEP_FAILED, "
             "or brain_replan_requested for REPLAN_REQUESTED.\n"
@@ -40,6 +48,14 @@ def build_brain_output_protocol(*, supports_native_tool_calls: bool, tools_enabl
             "Controller may retry the same step and ultimately terminate the execution.\n"
         )
     return BRAIN_OUTPUT_PROTOCOL + (
+        "Before choosing an outcome, evaluate successful current_attempts against the active step.\n"
+        "Success means the tool ran successfully, not necessarily that its evidence is complete.\n"
+        "Treat evidence_complete=false, integrity.is_truncated=true, or pagination.has_more=true as incomplete; "
+        "continue with supported offset, start, range, cursor, or other continuation arguments.\n"
+        "If complete evidence satisfies the step, return STEP_COMPLETED.\n"
+        "Request an executable tool only when new evidence or action is still required.\n"
+        "Continuation calls with different continuation arguments are not duplicates. Do not repeat a successful "
+        "tool call with identical arguments unless new evidence makes repetition necessary.\n"
         "Outcome formats:\n"
         '{"kind":"STEP_COMPLETED","step_id":"active-id","message":"completion summary"}\n'
         '{"kind":"STEP_FAILED","step_id":"active-id","message":"failure reason"}\n'
@@ -240,14 +256,20 @@ def _build_step_progress_messages(
         return None
 
     def success_record(record: Any) -> dict[str, Any]:
+        result = record.result
+        evidence_complete = not (
+            result.integrity.is_truncated
+            or (result.pagination is not None and result.pagination.has_more)
+        )
         payload: dict[str, Any] = {
-            "request_id": record.result.request_id,
+            "request_id": result.request_id,
             "tool": record.tool_name,
             "args": bounded_value(record.arguments),
+            "success": True,
+            "evidence_complete": evidence_complete,
         }
 
         if record.tool_name == "read_file":
-            result = record.result
             rendered = (result.rendered_output or "").strip()
 
             if rendered:
@@ -259,7 +281,6 @@ def _build_step_progress_messages(
             if evidence is not None:
                 payload["evidence"] = evidence
 
-        result = record.result
         if getattr(result, "integrity", None) and result.integrity.is_truncated:
             payload["integrity"] = {
                 "is_truncated": True,
@@ -267,9 +288,9 @@ def _build_step_progress_messages(
                 "captured_bytes": result.integrity.captured_bytes,
             }
 
-        if getattr(result, "pagination", None) and result.pagination and result.pagination.has_more:
+        if getattr(result, "pagination", None) and result.pagination:
             payload["pagination"] = {
-                "has_more": True,
+                "has_more": result.pagination.has_more,
                 "offset": result.pagination.offset,
                 "limit": result.pagination.limit,
                 "total_items": result.pagination.total_items,

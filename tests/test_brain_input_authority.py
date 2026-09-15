@@ -9,8 +9,8 @@ from core.brain import BrainService
 from core.brain_provider import LangChainBrainProvider
 from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import (
-    BrainInput, ExecutionContext, ExecutionCursor, ExecutionIdentity,
-    ExecutionPlan, ExecutionStep, ToolExecutionRecord, ToolResult,
+    BrainInput, ContentIntegrity, ExecutionContext, ExecutionCursor, ExecutionIdentity,
+    ExecutionPlan, ExecutionStep, PaginationMetadata, ToolExecutionRecord, ToolResult,
 )
 
 
@@ -159,6 +159,149 @@ def test_satisfied_step_completes_with_current_evidence_and_later_tools_still_av
     assert outcome.completion_evidence.tool_request_ids == ()
     assert outcome.tool_request is None
     assert service.provider.tools_set == {"list_files", "read_file"}
+
+
+def test_successful_read_is_grounded_before_brain_can_repeat_the_same_call():
+    service, model, context = setup()
+    step = context.active_plan.steps[1]
+    record = ToolExecutionRecord(
+        step_id=step.step_id,
+        tool_name="read_file",
+        arguments={"path": ".cortex_session.json"},
+        result=ToolResult(
+            request_id="read-session",
+            success=True,
+            message="Read file: .cortex_session.json (1234 total characters)",
+            data={"path": ".cortex_session.json", "content": "session evidence"},
+        ),
+    )
+    context = context.model_copy(update={
+        "active_step": step,
+        "cursor": context.cursor.model_copy(update={"step_id": step.step_id}),
+        "last_tool_result": record.result,
+        "tool_execution_history": (record,),
+    })
+
+    def complete_from_existing_evidence(messages):
+        rendered = "\n".join(message.content for message in messages)
+        evidence_message = next(
+            message.content for message in messages
+            if message.content.startswith("Execution evidence v1:")
+        )
+        attempt = json.loads(evidence_message.split("\n", 1)[1])["current_attempts"][0]
+        assert attempt == {
+            "tool": "read_file",
+            "args": {"path": ".cortex_session.json"},
+            "success": True,
+            "evidence_complete": True,
+            "evidence": {"path": ".cortex_session.json", "content": "session evidence"},
+        }
+        assert "If complete evidence satisfies the step, call brain_step_completed." in rendered
+        assert "Do not repeat a successful tool call with identical arguments" in rendered
+        return AIMessage(content="", tool_calls=[{
+            "name": "brain_step_completed",
+            "id": "complete-from-read",
+            "args": {"message": "Session file inspected"},
+        }])
+
+    model.reply = complete_from_existing_evidence
+    outcome = service.run(context)
+
+    assert len(model.calls) == 1
+    assert outcome.kind == BrainOutcomeKind.STEP_COMPLETED
+    assert outcome.tool_request is None
+    assert outcome.completion_evidence.tool_request_ids == ()
+
+
+def test_truncated_read_continues_with_new_offset_before_completion():
+    service, model, context = setup()
+    step = context.active_plan.steps[1]
+    partial = ToolExecutionRecord(
+        step_id=step.step_id,
+        tool_name="read_file",
+        arguments={"path": "large.txt", "offset": 0, "limit": 10000},
+        result=ToolResult(
+            request_id="read-first",
+            success=True,
+            message="Read file large.txt (characters 0-10000 of 15000). File is truncated.",
+            data={"path": "large.txt", "content": "first chunk", "offset": 0},
+            integrity=ContentIntegrity(is_truncated=True),
+            pagination=PaginationMetadata(
+                has_more=True, total_items=15000, returned_items=10000,
+                offset=0, limit=10000,
+            ),
+        ),
+    )
+    context = context.model_copy(update={
+        "active_step": step,
+        "cursor": context.cursor.model_copy(update={"step_id": step.step_id}),
+        "last_tool_result": partial.result,
+        "tool_execution_history": (partial,),
+    })
+
+    def continue_partial(messages):
+        rendered = "\n".join(message.content for message in messages)
+        evidence_message = next(
+            message.content for message in messages
+            if message.content.startswith("Execution evidence v1:")
+        )
+        attempt = json.loads(evidence_message.split("\n", 1)[1])["current_attempts"][-1]
+        assert attempt["success"] is True
+        assert attempt["evidence_complete"] is False
+        assert attempt["integrity"]["is_truncated"] is True
+        assert attempt["pagination"]["has_more"] is True
+        assert "continuation call with different continuation arguments is not a duplicate" in rendered
+        return AIMessage(content="", tool_calls=[{
+            "name": "read_file", "id": "read-rest",
+            "args": {"path": "large.txt", "offset": 10000, "limit": 10000},
+        }])
+
+    model.reply = continue_partial
+    continuation = service.run(context)
+    assert continuation.kind == BrainOutcomeKind.TOOL_REQUESTED
+    assert continuation.tool_request.arguments == {
+        "path": "large.txt", "offset": 10000, "limit": 10000,
+    }
+    assert continuation.tool_request.arguments != partial.arguments
+
+    final_chunk = ToolExecutionRecord(
+        step_id=step.step_id,
+        tool_name="read_file",
+        arguments=continuation.tool_request.arguments,
+        result=ToolResult(
+            request_id=continuation.tool_request.request_id,
+            success=True,
+            message="Read file: large.txt (15000 total characters)",
+            data={"path": "large.txt", "content": "final chunk", "offset": 10000},
+            pagination=PaginationMetadata(
+                has_more=False, total_items=15000, returned_items=5000,
+                offset=10000, limit=10000,
+            ),
+        ),
+    )
+    context = context.model_copy(update={
+        "last_tool_result": final_chunk.result,
+        "tool_execution_history": (partial, final_chunk),
+    })
+
+    def complete_after_final_chunk(messages):
+        evidence_message = next(
+            message.content for message in messages
+            if message.content.startswith("Execution evidence v1:")
+        )
+        attempts = json.loads(evidence_message.split("\n", 1)[1])["current_attempts"]
+        assert [attempt["evidence_complete"] for attempt in attempts] == [False, True]
+        assert attempts[-1]["pagination"]["has_more"] is False
+        return AIMessage(content="", tool_calls=[{
+            "name": "brain_step_completed", "id": "complete-large-read",
+            "args": {"message": "Entire file read"},
+        }])
+
+    model.reply = complete_after_final_chunk
+    completed = service.run(context)
+    assert len(model.calls) == 2
+    assert completed.kind == BrainOutcomeKind.STEP_COMPLETED
+    assert completed.tool_request is None
 
 
 def test_prior_facts_inform_new_task_without_model_selected_evidence_ids():

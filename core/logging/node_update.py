@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, ToolMessage
 
 from core.protocol.enums import BrainOutcome
 from core.protocol.models import (
@@ -73,6 +73,7 @@ class NodeUpdate:
     planner_result: PlannerResult | None = None
     brain_result: BrainResult | None = None
     tool_result: ToolResult | None = None
+    tool_name: str | None = None
     finalization_result: FinalizationResult | None = None
 
     ai_message: BaseMessage | None = None
@@ -103,14 +104,7 @@ def extract_node_update(
 
     planner_result = value.get("planner_result")
     brain_result = value.get("brain_result")
-    tool_result=None
     finalization_result = value.get("finalization_result")
-    
-    # ToolResult is produced by capture_tool_output only.
-    if to_node == "capture_tool_output" and execution_state is not None:
-        tool_result = execution_state.working.last_tool_result
-    else:
-        tool_result = None
 
     ai_message = None
 
@@ -120,6 +114,18 @@ def extract_node_update(
         if isinstance(last, BaseMessage):
             ai_message = last
 
+    tool_result = None
+    tool_name = None
+    is_tool_result_update = (
+        to_node == "capture_tool_output"
+        or isinstance(ai_message, ToolMessage)
+    )
+    if is_tool_result_update and execution_state is not None:
+        tool_result = execution_state.working.last_tool_result
+        history = execution_state.working.tool_execution_history
+        if history and history[-1].result == tool_result:
+            tool_name = history[-1].tool_name
+
     has_summary_update = "rolling_summary" in value
 
     return NodeUpdate(
@@ -128,6 +134,7 @@ def extract_node_update(
         planner_result=planner_result,
         brain_result=brain_result,
         tool_result=tool_result,
+        tool_name=tool_name,
         finalization_result=(
             finalization_result
             if isinstance(finalization_result, FinalizationResult)

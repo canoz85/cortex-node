@@ -6,25 +6,29 @@ provider workflow. It ensures state isolation by bypassing LLM inference
 during wait cycles and interacting strictly via execution evidence capture.
 """
 
-import json
 import threading
 import time
-import uuid
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from langchain_core.messages import ToolMessage
-
-from core.protocol.enums import ControllerDecisionType, WorkerRole
+from core.protocol.enums import ControllerDecisionType
 from core.protocol.models import (
     ControllerDecision,
     ExecutionState,
     ToolRequest,
 )
+from core.protocol.bridge import build_controller_input
+from core.graph_async_resume import LangGraphAsyncResumeAdapter
 from core.runtime.gpu_resources import GpuResourceCoordinator, RuntimeGpuObserver
-from core.runtime.controller_transition import apply_controller_decision_to_state
+from core.runtime.async_wake import AsyncExecutionWake
+from core.runtime.portable_orchestration import PortableExecutionRuntime
+from core.runtime.tool_result_integration import (
+    SerializedToolRuntimePort,
+    integrate_tool_result,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,18 +123,22 @@ class LocalAsyncPollingRuntime:
         now_utc: Callable[[], datetime] | None = None,
         resource_observer: RuntimeGpuObserver | None = None,
         resource_coordinator: GpuResourceCoordinator | None = None,
+        portable_runtime: PortableExecutionRuntime | None = None,
+        resume_adapter: LangGraphAsyncResumeAdapter | None = None,
     ):
         self._compiled_graph = compiled_graph
-        self._tools_by_name = {
-            str(getattr(tool, "name", "")): tool
-            for tool in tools
-            if str(getattr(tool, "name", ""))
-        }
+        self._tools = tuple(tools)
         self._routes = tuple(routes)
         self._sleep = sleep
         self._now_utc = now_utc or (lambda: datetime.now(timezone.utc))
         self._resource_observer = resource_observer
         self._resource_coordinator = resource_coordinator
+        self._portable_runtime = portable_runtime or getattr(
+            compiled_graph, "_cortex_portable_runtime", None
+        )
+        self._resume_adapter = resume_adapter or getattr(
+            compiled_graph, "_cortex_async_resume_adapter", None
+        )
         self._cancel_events: dict[str, threading.Event] = {}
         self._cancel_events_lock = threading.Lock()
 
@@ -140,32 +148,53 @@ class LocalAsyncPollingRuntime:
             raise ValueError("Cancellation requires a checkpoint thread_id.")
         self._get_cancel_event(thread_id).set()
 
-    def poll_and_resume(
+    def wake_and_resume(
         self,
         *,
         config: dict[str, Any],
-        decision: ControllerDecision,
+        wake: AsyncExecutionWake,
     ):
-        """Wait until the Controller deadline, observe status, and resume capture."""
-        if decision.decision_type != ControllerDecisionType.AWAIT_ASYNC_JOB:
-            raise ValueError("poll_and_resume requires AWAIT_ASYNC_JOB.")
-        if decision.async_job_id is None:
-            raise ValueError("AWAIT_ASYNC_JOB requires async_job_id.")
-
+        """Enter through a semantic wake, then bridge to legacy graph polling."""
         thread_id = self._get_thread_id(config)
-
-        snapshot = self._compiled_graph.get_state(config)
-        state = getattr(snapshot, "values", None)
-        if not isinstance(state, Mapping):
-            raise RuntimeError("Checkpoint does not contain graph state.")
-
-        checkpoint_decision = state.get("controller_decision")
-        if checkpoint_decision != decision:
-            return iter(())
+        if self._resume_adapter is None:
+            raise RuntimeError("Async wake requires a graph resume adapter.")
+        state = self._resume_adapter.load(config)
 
         execution_state = state.get("execution_state")
         if not isinstance(execution_state, ExecutionState):
             raise RuntimeError("Checkpoint does not contain ExecutionState.")
+        PortableExecutionRuntime.begin_async_wake(execution_state, wake)
+
+        decision = state.get("controller_decision")
+        if not isinstance(decision, ControllerDecision):
+            return iter(())
+        if decision.decision_type != ControllerDecisionType.AWAIT_ASYNC_JOB:
+            return iter(())
+
+        return self._poll_and_resume_legacy(
+            config=config,
+            decision=decision,
+            state=state,
+            wake=wake,
+            thread_id=thread_id,
+            execution_state=execution_state,
+        )
+
+    def _poll_and_resume_legacy(
+        self,
+        *,
+        config: dict[str, Any],
+        decision: ControllerDecision,
+        state: Mapping[str, Any],
+        wake: AsyncExecutionWake,
+        thread_id: str,
+        execution_state: ExecutionState,
+    ):
+        """Stage 6A bridge preserving the existing poll and graph-resume path."""
+        if decision.decision_type != ControllerDecisionType.AWAIT_ASYNC_JOB:
+            raise ValueError("async wake bridge requires AWAIT_ASYNC_JOB.")
+        if decision.async_job_id is None:
+            raise ValueError("AWAIT_ASYNC_JOB requires async_job_id.")
 
         if self._get_cancel_event(thread_id).is_set():
             return self._resume_local_cancellation(
@@ -183,11 +212,34 @@ class LocalAsyncPollingRuntime:
             ),
             None,
         )
-        if terminal_result is not None:
-            route = self._resolve_route(
+        route = self._resolve_route(
+            execution_state=execution_state,
+            async_job_id=decision.async_job_id,
+        )
+
+        if terminal_result is None and self._wait_until(
+            decision.resume_after_utc, thread_id=thread_id
+        ):
+            return self._resume_local_cancellation(
+                config=config,
                 execution_state=execution_state,
-                async_job_id=decision.async_job_id,
             )
+
+        if self._portable_runtime is None:
+            raise RuntimeError("Async wake requires PortableExecutionRuntime.")
+        authorized_turn = self._portable_runtime.authorize_async_wake(
+            execution_state,
+            build_controller_input(state),
+            wake,
+            status_tool_name=route.status_tool_name,
+            status_argument_key=route.status_tool_arg_key,
+        )
+        poll_decision = authorized_turn.driver_turn.decision
+        updated_execution_state = authorized_turn.driver_turn.execution_state
+
+        if poll_decision.decision_type != ControllerDecisionType.DISPATCH_TOOL_RUNTIME:
+            if terminal_result is None:
+                return iter(())
             if (
                 self._resource_coordinator is not None
                 and route.provider == "comfyui"
@@ -200,77 +252,48 @@ class LocalAsyncPollingRuntime:
                     )
                 }
             )
-            resumed_config = self._compiled_graph.update_state(
-                config,
-                {"execution_state": restored_execution_state},
-                as_node="capture_tool_output",
-            )
-            return self._compiled_graph.stream(None, config=resumed_config)
-
-        if self._wait_until(decision.resume_after_utc, thread_id=thread_id):
-            return self._resume_local_cancellation(
+            return self._resume_adapter.resume(
                 config=config,
-                execution_state=execution_state,
+                state=state,
+                update={"execution_state": restored_execution_state},
             )
 
-        route = self._resolve_route(
-            execution_state=execution_state,
-            async_job_id=decision.async_job_id,
-        )
-        request = ToolRequest(
-            request_id=(
-                f"{execution_state.protocol_visible.identity.execution_id}:"
-                f"poll:{uuid.uuid4().hex}"
-            ),
-            tool_name=route.status_tool_name,
-            arguments={route.status_tool_arg_key: decision.async_job_id},
-            requested_by=WorkerRole.CONTROLLER,
-        )
-        if self._resource_observer is None:
-            raw_output = self._invoke_status_tool(request)
-        else:
-            with self._resource_observer.observe_operation(
+        request = poll_decision.pending_tool_request
+        if request is None:
+            raise RuntimeError("Controller poll authorization omitted ToolRequest.")
+
+        def observe(_request: ToolRequest):
+            if self._resource_observer is None:
+                return nullcontext()
+            return self._resource_observer.observe_operation(
                 component="async_provider",
-                operation=request.tool_name,
+                operation=_request.tool_name,
                 fields={
                     "provider": route.provider,
                     "async_job_id": decision.async_job_id,
                     "thread_id": thread_id,
                 },
-            ):
-                raw_output = self._invoke_status_tool(request)
+            )
 
-        cursor = execution_state.protocol_visible.cursor.model_copy(
-            update={"current_worker": WorkerRole.TOOL_RUNTIME}
+        result = self._portable_runtime.dispatch_authorized_async_poll(
+            authorized_turn,
+            SerializedToolRuntimePort(self._tools, observe=observe),
         )
-        poll_decision = ControllerDecision(
-            decision_type=ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
-            reason=f"Observe async job {decision.async_job_id}.",
-            next_worker=WorkerRole.TOOL_RUNTIME,
-            cursor=cursor,
-            next_step_id=execution_state.protocol_visible.cursor.step_id,
-            pending_tool_request=request,
-            requires_checkpoint=True,
-        )
-        updated_execution_state = apply_controller_decision_to_state(
-            execution_state,
+        if result is None:
+            raise RuntimeError("Authorized async poll returned no ToolResult.")
+        integrated_execution_state = integrate_tool_result(
+            updated_execution_state,
             poll_decision,
+            result,
         )
-        tool_message = ToolMessage(
-            content=raw_output,
-            tool_call_id=request.request_id,
-            name=request.tool_name,
-        )
-        resumed_config = self._compiled_graph.update_state(
-            config,
-            {
-                "messages": [tool_message],
+        return self._resume_adapter.resume(
+            config=config,
+            state=state,
+            update={
                 "controller_decision": poll_decision,
-                "execution_state": updated_execution_state,
+                "execution_state": integrated_execution_state,
             },
-            as_node="tools",
         )
-        return self._compiled_graph.stream(None, config=resumed_config)
 
     def _wait_until(
         self,
@@ -309,12 +332,12 @@ class LocalAsyncPollingRuntime:
                 )
             }
         )
-        resumed_config = self._compiled_graph.update_state(
-            config,
-            {"execution_state": cancelled_state},
-            as_node="capture_tool_output",
+        state = self._resume_adapter.load(config)
+        return self._resume_adapter.resume(
+            config=config,
+            state=state,
+            update={"execution_state": cancelled_state},
         )
-        return self._compiled_graph.stream(None, config=resumed_config)
 
     def _get_cancel_event(self, thread_id: str) -> threading.Event:
         with self._cancel_events_lock:
@@ -352,22 +375,3 @@ class LocalAsyncPollingRuntime:
         raise RuntimeError(
             f"No async status route is registered for job {async_job_id}."
         )
-
-    def _invoke_status_tool(self, request: ToolRequest) -> str:
-        tool = self._tools_by_name.get(request.tool_name)
-        if tool is None:
-            raise RuntimeError(
-                f"Async status tool is not available: {request.tool_name}."
-            )
-
-        invoke = getattr(tool, "invoke", None)
-        if callable(invoke):
-            output = invoke(request.arguments)
-        elif callable(tool):
-            output = tool(**request.arguments)
-        else:
-            raise TypeError(f"Async status tool is not executable: {request.tool_name}.")
-
-        if isinstance(output, str):
-            return output
-        return json.dumps(output, ensure_ascii=True, default=str)

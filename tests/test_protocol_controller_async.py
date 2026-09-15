@@ -83,6 +83,42 @@ def test_controller_awaits_nonterminal_async_job(status):
     assert map_controller_decision(decision) == END
 
 
+def test_controller_authorizes_status_poll_for_actionable_async_wake():
+    observed = _controller_input(AsyncJobStatus.RUNNING)
+    record = ToolExecutionRecord(
+        step_id="step-1",
+        tool_name="get_comfy_history",
+        arguments={"prompt_id": "prompt-1"},
+        result=observed.tool_result,
+    )
+    wake_input = observed.model_copy(
+        update={
+            "cursor": observed.cursor.model_copy(
+                update={
+                    "phase": ExecutionPhase.WAITING,
+                    "current_worker": WorkerRole.CONTROLLER,
+                }
+            ),
+            "pending_tool_request": None,
+            "tool_result": None,
+            "tool_execution_history": (record,),
+            "async_wake_job_id": "prompt-1",
+            "async_poll_tool_name": "get_comfy_history",
+            "async_poll_argument_key": "prompt_id",
+        }
+    )
+
+    decision = _controller().decide(wake_input)
+
+    assert decision.decision_type == ControllerDecisionType.DISPATCH_TOOL_RUNTIME
+    assert decision.next_worker == WorkerRole.TOOL_RUNTIME
+    assert decision.pending_tool_request is not None
+    assert decision.pending_tool_request.tool_name == "get_comfy_history"
+    assert decision.pending_tool_request.arguments == {"prompt_id": "prompt-1"}
+    assert decision.pending_tool_request.requested_by == WorkerRole.CONTROLLER
+    assert decision.pending_tool_request.request_id.startswith("run-1:poll:")
+
+
 def test_controller_resumes_brain_only_after_async_job_completion():
     decision = _controller().decide(
         _controller_input(AsyncJobStatus.COMPLETED)

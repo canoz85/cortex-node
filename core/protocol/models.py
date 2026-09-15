@@ -442,6 +442,9 @@ class ControllerInput(ImmutableProtocolModel):
     tool_result: ToolResult | None = None
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
     async_policy: AsyncJobPolicy = Field(default_factory=AsyncJobPolicy)
+    async_wake_job_id: str | None = None
+    async_poll_tool_name: str | None = None
+    async_poll_argument_key: str | None = None
     cancel_requested: bool = False
     coverage_assessment: CoverageAssessment | None = None
     accepted_requirements: tuple[AcceptedRequirement, ...] = ()

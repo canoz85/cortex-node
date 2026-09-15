@@ -105,16 +105,25 @@ class ExecutionDriver:
         execution_state: ExecutionState,
         decision: ControllerDecision,
         controller_input: ControllerInput,
+        *,
+        tool_runtime: ToolRuntimePort | None = None,
     ) -> WorkerResult | None:
         """Dispatch a previously applied authorization without recomputing it."""
 
-        return self._dispatch(execution_state, decision, controller_input)
+        return self._dispatch(
+            execution_state,
+            decision,
+            controller_input,
+            tool_runtime=tool_runtime,
+        )
 
     def _dispatch(
         self,
         execution_state: ExecutionState,
         decision: ControllerDecision,
         controller_input: ControllerInput,
+        *,
+        tool_runtime: ToolRuntimePort | None = None,
     ) -> WorkerResult | None:
         if decision.terminal:
             return self._dispatch_finalizer(
@@ -185,13 +194,14 @@ class ExecutionDriver:
                     raise WorkerDispatchError(
                         "Tool request does not match the authorized execution state"
                     )
+                selected_tool_runtime = tool_runtime or self._tool_runtime
                 execute_authorized = getattr(
-                    self._tool_runtime, "execute_authorized", None
+                    selected_tool_runtime, "execute_authorized", None
                 )
                 result = (
                     execute_authorized(request, execution_state, decision)
                     if callable(execute_authorized)
-                    else self._tool_runtime.execute(request)
+                    else selected_tool_runtime.execute(request)
                 )
                 if not isinstance(result, ToolResult):
                     raise WorkerDispatchError("Tool runtime returned an invalid result type")

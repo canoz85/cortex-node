@@ -253,6 +253,47 @@ def test_deadline_triggers_exactly_one_final_provider_reconciliation_boundary():
     assert timeout_decision.reconciliation_required is False
 
 
+def test_final_reconciliation_wake_authorizes_the_existing_intended_poll():
+    policy = AsyncJobPolicy(
+        visibility_grace_seconds=2,
+        poll_interval_seconds=2,
+        max_poll_interval_seconds=10,
+        execution_timeout_seconds=30,
+    )
+    submitted = _record(
+        "submit-1",
+        AsyncJobStatus.SUBMITTED,
+        tool_name="run_comfy_workflow",
+    )
+    before_deadline = _record(
+        "poll-before-deadline",
+        AsyncJobStatus.RUNNING,
+        observed_at=STARTED_AT + timedelta(seconds=29),
+    )
+    wake_input = _input(
+        history=(submitted, before_deadline),
+        policy=policy,
+    ).model_copy(
+        update={
+            "cursor": _input().cursor.model_copy(
+                update={
+                    "phase": ExecutionPhase.WAITING,
+                    "current_worker": WorkerRole.CONTROLLER,
+                }
+            ),
+            "async_wake_job_id": "prompt-1",
+            "async_poll_tool_name": "get_comfy_history",
+            "async_poll_argument_key": "prompt_id",
+        }
+    )
+
+    decision = _controller(STARTED_AT + timedelta(seconds=31)).decide(wake_input)
+
+    assert decision.decision_type == ControllerDecisionType.DISPATCH_TOOL_RUNTIME
+    assert decision.pending_tool_request is not None
+    assert decision.pending_tool_request.arguments == {"prompt_id": "prompt-1"}
+
+
 def test_two_nonterminal_jobs_for_same_step_are_paused_for_reconciliation():
     first = _record("submit-1", AsyncJobStatus.SUBMITTED, job_id="prompt-1")
     second = _record("submit-2", AsyncJobStatus.SUBMITTED, job_id="prompt-2")

@@ -253,6 +253,22 @@ def _build_tool_result(
     )
 
 
+def normalize_tool_output(*, raw_content: str, request: ToolRequest) -> ToolResult:
+    """Normalize an existing serialized tool envelope without graph semantics."""
+    return _build_tool_result(raw_content=raw_content, request=request)
+
+
+def extract_tool_artifacts(
+    *, request: ToolRequest, payload: object | None, step_id: str
+) -> tuple[ArtifactRecord, ...]:
+    """Extract the artifact records shared by graph and direct runtimes."""
+    return _extract_artifact_records(
+        request=request,
+        unwrapped=payload,
+        step_id=step_id,
+    )
+
+
 def _compute_repeat_fail_count(
     *,
     previous: ToolResult | None,

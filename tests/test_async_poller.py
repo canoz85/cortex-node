@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from dataclasses import fields
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -11,6 +12,7 @@ from core.graph_capture import create_capture_tool_output_node
 from core.graph_controller import create_controller_node
 from core.protocol.controller import CortexController
 from core.graph import build_app
+from core.graph_async_resume import LangGraphAsyncResumeAdapter
 from core.graph_routing import route_after_controller
 from core.graph_runner import run_prompt
 from core.models import ToolResult as TransportToolResult
@@ -42,6 +44,10 @@ from core.protocol.models import (
     WorkingState,
 )
 from core.runtime.async_poller import LocalAsyncPollingRuntime
+from core.runtime.async_wake import AsyncExecutionWake, AsyncWakeIntent
+from core.runtime.portable_orchestration import PortableExecutionRuntime
+from core.runtime.execution_driver import ExecutionDriver, WorkerDispatchError
+from core.graph_worker_runtime import GraphWorkerRuntimePorts
 from core.state import AgentState
 
 
@@ -124,6 +130,38 @@ def _await_decision() -> ControllerDecision:
     )
 
 
+def _wake() -> AsyncExecutionWake:
+    return AsyncExecutionWake(
+        execution_id="run-1",
+        async_job_id="prompt-1",
+    )
+
+
+def test_semantic_async_wake_contains_only_correlation_and_intent():
+    wake = _wake()
+
+    assert wake.intent == AsyncWakeIntent.POLL_DUE
+    assert {field.name for field in fields(wake)} == {
+        "execution_id",
+        "async_job_id",
+        "intent",
+    }
+
+
+def test_portable_runtime_async_wake_entrypoint_validates_execution_identity():
+    wake = PortableExecutionRuntime.begin_async_wake(_execution_state(), _wake())
+
+    assert wake == _wake()
+    with pytest.raises(ValueError, match="execution identity mismatch"):
+        PortableExecutionRuntime.begin_async_wake(
+            _execution_state(),
+            AsyncExecutionWake(
+                execution_id="different-run",
+                async_job_id="prompt-1",
+            ),
+        )
+
+
 def _status_output(status: AsyncJobStatus) -> str:
     return TransportToolResult(
         success=status not in {AsyncJobStatus.FAILED, AsyncJobStatus.CANCELLED},
@@ -142,17 +180,15 @@ def _status_output(status: AsyncJobStatus) -> str:
 
 def _compiled_resume_graph(brain_invocations: list[ExecutionState]):
     workflow = StateGraph(AgentState)
-    workflow.add_node("tools", lambda _state: {})
-    workflow.add_node("capture_tool_output", create_capture_tool_output_node())
-    workflow.add_node(
-        "controller",
-        create_controller_node(
-            CortexController(
-                max_reasoning_steps=10,
-                now_utc=lambda: OBSERVED_AT,
-            )
+    worker_ports = GraphWorkerRuntimePorts()
+    controller_node = create_controller_node(
+        CortexController(
+            max_reasoning_steps=10,
+            now_utc=lambda: OBSERVED_AT,
         ),
+        worker_ports=worker_ports,
     )
+    workflow.add_node("controller", controller_node)
 
     def brain_node(state: AgentState):
         execution_state = state["execution_state"]
@@ -172,13 +208,21 @@ def _compiled_resume_graph(brain_invocations: list[ExecutionState]):
             "execution_state": consumed_execution_state,
         }
 
-    workflow.add_node("brain", brain_node)
-    workflow.set_entry_point("tools")
-    workflow.add_edge("tools", "capture_tool_output")
-    workflow.add_edge("capture_tool_output", "controller")
+    worker_ports.bind_nodes(
+        planner=lambda _state: {},
+        brain=brain_node,
+        tool=lambda _state: {},
+        capture=lambda _state: {},
+    )
+    workflow.set_entry_point("controller")
     workflow.add_conditional_edges("controller", route_after_controller)
-    workflow.add_edge("brain", "controller")
-    return workflow.compile(checkpointer=InMemorySaver())
+    compiled = workflow.compile(checkpointer=InMemorySaver())
+    compiled._cortex_portable_runtime = controller_node._portable_runtime
+    compiled._cortex_async_resume_adapter = LangGraphAsyncResumeAdapter(
+        compiled,
+        controller_node,
+    )
+    return compiled
 
 
 @pytest.mark.parametrize(
@@ -211,15 +255,15 @@ def test_local_polling_resumes_from_capture_without_brain_hot_loop(
     )
 
     events = list(
-        runtime.poll_and_resume(
+        runtime.wake_and_resume(
             config=config,
-            decision=_await_decision(),
+            wake=_wake(),
         )
     )
 
     assert status_tool.invocations == [{"prompt_id": "prompt-1"}]
     assert len(brain_invocations) == expected_brain_invocations
-    assert events[0].keys() == {"capture_tool_output"}
+    assert events[0].keys() == {"async_runtime"}
 
     snapshot = compiled_graph.get_state(config)
     final_state = snapshot.values["execution_state"]
@@ -228,6 +272,15 @@ def test_local_polling_resumes_from_capture_without_brain_hot_loop(
         AsyncJobStatus.SUBMITTED,
         status,
     ]
+    poll_record = history[-1]
+    assert poll_record.execution_id == "run-1"
+    assert poll_record.plan_id == "plan-1"
+    assert poll_record.plan_revision == 1
+    assert poll_record.step_id == "step-1"
+    assert poll_record.tool_name == "get_comfy_history"
+    assert poll_record.arguments == {"prompt_id": "prompt-1"}
+    if status == AsyncJobStatus.COMPLETED:
+        assert brain_invocations[0].working.last_tool_result == poll_record.result
 
     final_decision = snapshot.values["controller_decision"]
     if status == AsyncJobStatus.RUNNING:
@@ -235,14 +288,21 @@ def test_local_polling_resumes_from_capture_without_brain_hot_loop(
     else:
         assert final_decision.decision_type == ControllerDecisionType.DISPATCH_SUMMARY
 
-    stale_events = list(
-        runtime.poll_and_resume(
+    followup_events = list(
+        runtime.wake_and_resume(
             config=config,
-            decision=_await_decision(),
+            wake=_wake(),
         )
     )
-    assert stale_events == []
-    assert status_tool.invocations == [{"prompt_id": "prompt-1"}]
+    if status == AsyncJobStatus.RUNNING:
+        assert followup_events
+        assert status_tool.invocations == [
+            {"prompt_id": "prompt-1"},
+            {"prompt_id": "prompt-1"},
+        ]
+    else:
+        assert followup_events == []
+        assert status_tool.invocations == [{"prompt_id": "prompt-1"}]
 
 
 def test_run_prompt_reenters_runtime_only_for_await_decision():
@@ -261,10 +321,10 @@ def test_run_prompt_reenters_runtime_only_for_await_decision():
 
     class FakeRuntime:
         def __init__(self):
-            self.calls: list[tuple[dict, ControllerDecision]] = []
+            self.calls: list[tuple[dict, AsyncExecutionWake]] = []
 
-        def poll_and_resume(self, *, config, decision):
-            self.calls.append((config, decision))
+        def wake_and_resume(self, *, config, wake):
+            self.calls.append((config, wake))
             return iter([
                 {"brain": {"messages": [AIMessage(content="Finished.")]}},
                 {"controller": {"controller_decision": summary_decision}},
@@ -294,9 +354,13 @@ def test_run_prompt_reenters_runtime_only_for_await_decision():
     )
 
     assert len(app.async_runtime.calls) == 1
-    poll_config, poll_decision = app.async_runtime.calls[0]
+    poll_config, wake = app.async_runtime.calls[0]
     assert poll_config == app.config
-    assert poll_decision == await_decision
+    assert wake == AsyncExecutionWake(
+        execution_id="known-run-id",
+        async_job_id="prompt-1",
+        intent=AsyncWakeIntent.POLL_DUE,
+    )
     assert app.config["configurable"]["thread_id"] == "known-run-id"
     assert (
         app.initial_state["execution_state"].protocol_visible.async_policy
@@ -366,7 +430,7 @@ def test_local_polling_resumes_existing_terminal_evidence_without_repolling():
         resource_coordinator=resource_coordinator,
     )
 
-    list(runtime.poll_and_resume(config=config, decision=_await_decision()))
+    list(runtime.wake_and_resume(config=config, wake=_wake()))
 
     assert status_tool.invocations == []
     assert resource_coordinator.prepare_for_llm_calls == 1
@@ -409,7 +473,7 @@ def test_local_polling_observes_only_the_provider_status_call():
         resource_observer=observer,
     )
 
-    list(runtime.poll_and_resume(config=config, decision=_await_decision()))
+    list(runtime.wake_and_resume(config=config, wake=_wake()))
 
     assert observer.calls == [
         (
@@ -446,7 +510,7 @@ def test_local_cancellation_interrupts_wait_without_polling_provider():
     )
     runtime.request_cancel("thread-local-cancel")
 
-    list(runtime.poll_and_resume(config=config, decision=_await_decision()))
+    list(runtime.wake_and_resume(config=config, wake=_wake()))
 
     assert status_tool.invocations == []
     assert brain_invocations == []
@@ -461,6 +525,162 @@ def test_local_cancellation_interrupts_wait_without_polling_provider():
         snapshot.values["controller_decision"].decision_type
         == ControllerDecisionType.CANCEL
     )
+
+
+@pytest.mark.parametrize(
+    "wake",
+    [
+        AsyncExecutionWake(execution_id="wrong-run", async_job_id="prompt-1"),
+        AsyncExecutionWake(execution_id="run-1", async_job_id="wrong-job"),
+    ],
+)
+def test_mismatched_async_wake_never_polls_provider(wake):
+    compiled_graph = _compiled_resume_graph([])
+    config = {"configurable": {"thread_id": f"mismatch-{wake.execution_id}"}}
+    compiled_graph.update_state(
+        config,
+        {
+            "messages": [],
+            "execution_state": _execution_state(),
+            "controller_decision": _await_decision(),
+        },
+        as_node="controller",
+    )
+    status_tool = FakeStatusTool(_status_output(AsyncJobStatus.RUNNING))
+    runtime = LocalAsyncPollingRuntime(
+        compiled_graph=compiled_graph,
+        tools=[status_tool],
+        sleep=lambda _seconds: None,
+        now_utc=lambda: OBSERVED_AT,
+    )
+
+    if wake.execution_id == "wrong-run":
+        with pytest.raises(ValueError, match="execution identity mismatch"):
+            list(runtime.wake_and_resume(config=config, wake=wake))
+    else:
+        assert list(runtime.wake_and_resume(config=config, wake=wake)) == []
+
+    assert status_tool.invocations == []
+
+
+@pytest.mark.parametrize(
+    ("output", "error"),
+    [
+        (
+            ToolResult(
+                request_id="wrong-request",
+                success=True,
+                message="Wrong identity.",
+            ),
+            "Tool result request identity mismatch",
+        ),
+        ("not a typed tool result", "no typed ToolResult"),
+    ],
+)
+def test_async_poll_driver_fails_closed_for_invalid_tool_result(output, error):
+    compiled_graph = _compiled_resume_graph([])
+    config = {"configurable": {"thread_id": f"invalid-{error}"}}
+    compiled_graph.update_state(
+        config,
+        {
+            "messages": [],
+            "execution_state": _execution_state(),
+            "controller_decision": _await_decision(),
+        },
+        as_node="controller",
+    )
+    status_tool = FakeStatusTool(output)
+    runtime = LocalAsyncPollingRuntime(
+        compiled_graph=compiled_graph,
+        tools=[status_tool],
+        sleep=lambda _seconds: None,
+        now_utc=lambda: OBSERVED_AT,
+    )
+
+    with pytest.raises((WorkerDispatchError, ValueError, TypeError), match=error):
+        list(runtime.wake_and_resume(config=config, wake=_wake()))
+
+
+def test_async_poll_executes_through_execution_driver(monkeypatch):
+    calls = []
+    original = ExecutionDriver.dispatch_authorized
+
+    def observe(self, execution_state, decision, controller_input, **kwargs):
+        calls.append((decision, kwargs.get("tool_runtime")))
+        return original(
+            self,
+            execution_state,
+            decision,
+            controller_input,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(ExecutionDriver, "dispatch_authorized", observe)
+    compiled_graph = _compiled_resume_graph([])
+    config = {"configurable": {"thread_id": "driver-dispatch"}}
+    compiled_graph.update_state(
+        config,
+        {
+            "messages": [],
+            "execution_state": _execution_state(),
+            "controller_decision": _await_decision(),
+        },
+        as_node="controller",
+    )
+    runtime = LocalAsyncPollingRuntime(
+        compiled_graph=compiled_graph,
+        tools=[FakeStatusTool(_status_output(AsyncJobStatus.RUNNING))],
+        sleep=lambda _seconds: None,
+        now_utc=lambda: OBSERVED_AT,
+    )
+
+    list(runtime.wake_and_resume(config=config, wake=_wake()))
+
+    assert len(calls) == 1
+    decision, tool_runtime = calls[0]
+    assert decision.decision_type == ControllerDecisionType.DISPATCH_TOOL_RUNTIME
+    assert tool_runtime is not None
+
+
+def test_integrated_poll_transport_failure_retains_controller_wait_policy():
+    compiled_graph = _compiled_resume_graph([])
+    config = {"configurable": {"thread_id": "poll-transport-failure"}}
+    compiled_graph.update_state(
+        config,
+        {
+            "messages": [],
+            "execution_state": _execution_state(),
+            "controller_decision": _await_decision(),
+        },
+        as_node="controller",
+    )
+    failed_observation = TransportToolResult(
+        success=False,
+        message="Polling connection failed.",
+        error_code="COMFY_CONNECTION_FAILED",
+        is_async_job=True,
+        async_job_id="prompt-1",
+        async_job_status=AsyncJobStatus.UNKNOWN,
+        async_terminal=False,
+        async_observed_at_utc=OBSERVED_AT,
+    ).to_tool_output()
+    runtime = LocalAsyncPollingRuntime(
+        compiled_graph=compiled_graph,
+        tools=[FakeStatusTool(failed_observation)],
+        sleep=lambda _seconds: None,
+        now_utc=lambda: OBSERVED_AT,
+    )
+
+    list(runtime.wake_and_resume(config=config, wake=_wake()))
+
+    snapshot = compiled_graph.get_state(config)
+    assert (
+        snapshot.values["controller_decision"].decision_type
+        == ControllerDecisionType.AWAIT_ASYNC_JOB
+    )
+    result = snapshot.values["execution_state"].working.tool_execution_history[-1].result
+    assert result.success is False
+    assert result.error_code == "COMFY_CONNECTION_FAILED"
 
 
 def test_build_app_runs_submission_await_poll_capture_and_resume_end_to_end():

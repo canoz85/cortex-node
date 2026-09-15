@@ -44,7 +44,9 @@ def format_tool_call_preview(message: BaseMessage | None) -> str:
         name = tool_call.get("name", "<unknown>")
         args = tool_call.get("args", {})
 
-        lines.append(f"Calling {name} with {args}")
+        #lines.append(f"Calling {name} with {args}")
+        lines.append(f"Calling {name}")
+
 
     return "\n".join(lines)
 

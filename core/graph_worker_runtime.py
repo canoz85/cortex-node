@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from core.protocol.models import BrainResult, PlannerResult, PlanningRequest, ToolResult
 from core.runtime.execution_driver import WorkerDispatchError
+from core.runtime.tool_result_integration import integrate_tool_result
 
 
 def _invoke(node, state):
@@ -18,12 +19,13 @@ def _invoke(node, state):
 class GraphWorkerRuntimePorts:
     """Execute legacy worker transports only from a driver authorization."""
 
-    def __init__(self):
+    def __init__(self, *, tool_runtime=None):
         self._state = None
         self._planner = self._brain = self._tool = self._capture = None
+        self._tool_runtime = tool_runtime
         self._update = {}
 
-    def bind_nodes(self, *, planner, brain, tool, capture):
+    def bind_nodes(self, *, planner, brain, tool=None, capture=None):
         self._planner, self._brain = planner, brain
         self._tool, self._capture = tool, capture
 
@@ -59,14 +61,24 @@ class GraphWorkerRuntimePorts:
     def execute(self, _value):
         raise WorkerDispatchError("Tool runtime requires driver authorization")
 
-    def execute_authorized(self, _value, execution_state, decision):
-        state = self._authorized_state(execution_state, decision)
-        tool_update = _invoke(self._tool, state)
-        transported = {**state, **tool_update}
-        capture_update = _invoke(self._capture, transported)
-        self._update = {**tool_update, **capture_update}
-        result_state = capture_update.get("execution_state")
-        result = getattr(getattr(result_state, "working", None), "last_tool_result", None)
+    def execute_authorized(self, value, execution_state, decision):
+        self._authorized_state(execution_state, decision)
+        if self._tool_runtime is None:
+            state = self._authorized_state(execution_state, decision)
+            tool_update = _invoke(self._tool, state)
+            transported = {**state, **tool_update}
+            capture_update = _invoke(self._capture, transported)
+            self._update = {**tool_update, **capture_update}
+            result_state = capture_update.get("execution_state")
+            result = getattr(
+                getattr(result_state, "working", None), "last_tool_result", None
+            )
+            if not isinstance(result, ToolResult):
+                raise WorkerDispatchError("tool transport returned no typed ToolResult")
+            return result
+        result = self._tool_runtime.execute(value)
         if not isinstance(result, ToolResult):
-            raise WorkerDispatchError("tool transport returned no typed ToolResult")
+            raise WorkerDispatchError("direct tool runtime returned no typed ToolResult")
+        integrated = integrate_tool_result(execution_state, decision, result)
+        self._update = {"execution_state": integrated}
         return result

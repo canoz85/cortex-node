@@ -25,15 +25,15 @@ def render_node_update(node_update: NodeUpdate) -> None:
         _render_planner(node_update)
         return
 
+    if node_update.tool_result is not None:
+        _render_tool_result(node_update)
+        return
+
     if (
         node_update.brain_result is not None
         and node_update.brain_result.outcome == BrainOutcome.TOOL_REQUEST
     ):
         _render_tool_request(node_update)
-        return
-
-    if node_update.tool_result is not None:
-        _render_tool_result(node_update)
         return
 
     if node_update.finalization_result is not None:
@@ -80,7 +80,8 @@ def _render_tool_request(node_update: NodeUpdate) -> None:
 
 def _render_tool_result(node_update: NodeUpdate) -> None:
 
-    print(f"\n{ANSI_CYAN}[tools]{ANSI_RESET}")
+    label = f"tool:{node_update.tool_name}" if node_update.tool_name else "tool"
+    print(f"\n{ANSI_CYAN}[{label}]{ANSI_RESET}")
     print(format_tool_result(node_update.tool_result))
     print()
 
