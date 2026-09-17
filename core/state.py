@@ -11,6 +11,7 @@ from core.protocol.models import (
     ExecutionState,
     FinalizationResult,
     PlannerResult,
+    PlannerMemoryContext,
     ToolResult,
 )
 
@@ -41,6 +42,7 @@ class AgentState(TypedDict, total=False):
     planner_domain_enforced: bool
     rolling_summary: str
     retrieval_messages: list[BaseMessage]
+    planner_memory_context: PlannerMemoryContext
     brain_result: BrainResult
     run_id: str
     async_job_policy: AsyncJobPolicy

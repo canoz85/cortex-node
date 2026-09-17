@@ -11,21 +11,6 @@ from core.graph_tool_events import current_turn_tool_events
 from core.state import AgentState
 
 
-def rolling_summary_message(summary: str) -> list[SystemMessage]:
-    compact = (summary or "").strip()
-    if not compact:
-        return []
-    return [
-        SystemMessage(
-            content=(
-                "Rolling memory from earlier turns (user profile and stable goals may be used directly; "
-                "workspace/system/runtime facts must still be verified with tools):\n"
-                f"{compact}"
-            )
-        )
-    ]
-
-
 def create_summarize_memory_node(*, summarize_llm: ChatOllama):
     USER_CATEGORIES = {"profile", "preferences", "constraints", "goals"}
     PROJECT_CATEGORIES = {"repo", "architecture", "environment", "tooling", "workflow", "domain"}

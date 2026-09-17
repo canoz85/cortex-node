@@ -56,8 +56,10 @@ def normalize_planner_proposal(
                                f"Planner output is invalid ({type(exc).__name__}).")
 
     if proposal.result == PlannerProposalResultType.NO_PLAN_REQUIRED:
+        semantic_content = proposal.message.strip() or None
         return PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=planner_input.request_id,
-                             message=proposal.message or "No execution plan required.",
+                             message=semantic_content or "No execution plan required.",
+                             direct_response_content=semantic_content,
                              planning_rationale=rationale)
     if proposal.result == PlannerProposalResultType.NEEDS_INPUT:
         return PlannerResult(outcome=PlannerOutcome.CLARIFICATION_REQUIRED, request_id=planner_input.request_id,

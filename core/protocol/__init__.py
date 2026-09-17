@@ -19,6 +19,8 @@ from .enums import (
 
 # Models
 from .models import (
+    AcceptedDirectResponse,
+    AcceptedStepResult,
     AsyncJobPolicy,
     BrainInput,
     BrainOutcome,
@@ -77,6 +79,8 @@ __all__ = [
     "WorkerRole",
 
     # Models
+    "AcceptedDirectResponse",
+    "AcceptedStepResult",
     "AsyncJobPolicy",
     "BrainInput",
     "BrainOutcome",

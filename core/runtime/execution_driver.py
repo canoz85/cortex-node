@@ -11,6 +11,7 @@ from core.protocol.enums import (
     WorkerRole,
 )
 from core.protocol.models import (
+    AcceptedStepResult,
     BrainInput,
     BrainResult,
     ControllerDecision,
@@ -241,10 +242,11 @@ class ExecutionDriver:
             raise WorkerDispatchError("Finalizer requires terminal ExecutionState")
 
         direct_response = bool(
-            protocol.status == ExecutionStatus.COMPLETED
+            protocol.accepted_direct_response is not None
+            or (protocol.status == ExecutionStatus.COMPLETED
             and protocol.active_plan is None
             and controller_input.brain_result is not None
-            and controller_input.brain_result.outcome == BrainOutcome.FINAL_ANSWER
+            and controller_input.brain_result.outcome == BrainOutcome.FINAL_ANSWER)
         )
         request = FinalizationRequest(
             identity=protocol.identity,
@@ -253,6 +255,11 @@ class ExecutionDriver:
             accepted_plan=protocol.active_plan,
             tool_execution_history=controller_input.tool_execution_history,
             completed_step_ids=protocol.completed_step_ids,
+            accepted_step_results=tuple(
+                AcceptedStepResult(completion_evidence=evidence)
+                for evidence in protocol.completion_provenance
+            ),
+            accepted_direct_response=protocol.accepted_direct_response,
             terminal_reason=decision.failure_reason or decision.reason,
             direct_response=direct_response,
             cancellation_source=protocol.cancellation_source,

@@ -6,6 +6,7 @@ from core.graph_authorization import require_planner_authorization
 from core.planner import PlannerService
 from core.planner_provider import LangChainPlannerProvider
 from core.protocol.bridge import build_planner_input
+from core.protocol.models import PlannerMemoryContext
 from core.state import AgentState
 from core.runtime.execution_driver import WorkerDispatchError
 
@@ -26,6 +27,15 @@ def create_planner_node(
         planning_request = build_planner_input(state)
         if planning_request != authorized_request:
             raise WorkerDispatchError("Planner input does not match Controller authorization")
+        # Add derived context only to the worker-facing copy after authorization.
+        # The stored PlanningRequest and ProtocolVisibleState remain unchanged.
+        memory_context = state.get("planner_memory_context")
+        if isinstance(memory_context, PlannerMemoryContext):
+            planning_request = planning_request.model_copy(update={
+                "context": planning_request.context.model_copy(update={
+                    "planner_memory_context": memory_context,
+                }),
+            })
         retrieval_messages = []
 
         def retrieve(user_request: str) -> tuple[str, ...]:

@@ -19,6 +19,7 @@ from .enums import (
     WorkerRole,
 )
 from .models import (
+    AcceptedDirectResponse,
     BrainResult,
     ControllerDecision,
     ControllerInput,
@@ -266,7 +267,19 @@ class CortexController:
             case PlannerOutcome.DIRECT_RESPONSE:
                 if controller_input.planning_request.operation == PlanningOperation.REVISE:
                     return self._terminate(controller_input.cursor, "invalid_no_plan_required_for_revise")
-                return self._dispatch_summary(controller_input.cursor, "no_plan_required")
+                content = planner_result.direct_response_content
+                accepted = (
+                    AcceptedDirectResponse(
+                        execution_id=controller_input.identity.execution_id,
+                        request_id=controller_input.planning_request.request_id,
+                        content=content.strip(),
+                    )
+                    if content and content.strip() else None
+                )
+                return self._dispatch_summary(
+                    controller_input.cursor, "no_plan_required",
+                    accepted_direct_response=accepted,
+                )
 
             case PlannerOutcome.EXECUTION_PLAN:
                 plan = planner_result.proposed_plan
@@ -1212,6 +1225,7 @@ class CortexController:
         reason: str,
         *,
         accepted_plan: ExecutionPlan | None = None,
+        accepted_direct_response: AcceptedDirectResponse | None = None,
         completed_step_id: str | None = None,
     ) -> ControllerDecision:
         completed_cursor = cursor.model_copy(
@@ -1224,6 +1238,7 @@ class CortexController:
         )
         return ControllerDecision(
             accepted_plan=accepted_plan,
+            accepted_direct_response=accepted_direct_response,
             decision_type=ControllerDecisionType.DISPATCH_SUMMARY,
             next_worker=WorkerRole.SUMMARY,
             reason=reason,

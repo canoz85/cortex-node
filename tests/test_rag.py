@@ -128,6 +128,22 @@ class _RefreshingRagService:
         return self._chunks_indexed
 
 
+class _SuccessfulRagService:
+    def __init__(self):
+        self.calls = []
+
+    def to_payload(self, query: str, top_k: int = 4):
+        self.calls.append((query, top_k))
+        return {
+            "query": query,
+            "top_k": top_k,
+            "results": [{"source": "workspace_index.md", "content": "snapshot"}],
+        }
+
+    def refresh(self):
+        return 1
+
+
 def test_rag_search_returns_structured_failure_when_no_results_found():
     tools = get_rag_tools(_NoResultsRagService())
     rag_search = get_tool(tools, "rag_search")
@@ -138,6 +154,17 @@ def test_rag_search_returns_structured_failure_when_no_results_found():
     assert result["message"] == "No relevant knowledge found."
     assert isinstance(result.get("data"), dict)
     assert result["data"]["results"] == []
+
+
+def test_executable_rag_search_remains_independent_of_planner_ambient_policy():
+    service = _SuccessfulRagService()
+    rag_search = get_tool(get_rag_tools(service), "rag_search")
+
+    result = parse_result(rag_search.invoke({"query": "list files", "top_k": 2}))
+
+    assert result["success"] is True
+    assert result["data"]["results"][0]["source"] == "workspace_index.md"
+    assert service.calls == [("list files", 2)]
 
 
 def test_rag_search_returns_structured_failure_when_backend_raises():

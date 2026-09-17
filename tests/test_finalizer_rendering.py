@@ -6,9 +6,20 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from core.finalizer import Finalizer
-from core.finalizer_provider import LangChainFinalAnswerRenderer, finalizer_facts, _bounded_value
+from core.finalizer_provider import (
+    FINALIZER_SYSTEM_PROMPT,
+    LangChainFinalAnswerRenderer,
+    _bounded_value,
+    finalizer_facts,
+)
 from core.protocol.enums import ExecutionStatus
-from core.protocol.models import FinalizationRequest, ToolExecutionRecord, ToolResult
+from core.protocol.models import (
+    AcceptedStepResult,
+    FinalizationRequest,
+    StepCompletionEvidence,
+    ToolExecutionRecord,
+    ToolResult,
+)
 from test_finalizer import IDENTITY, CONTEXT, _plan
 
 
@@ -23,16 +34,35 @@ class Model:
         return self.response
 
 
-def request(records=()):
+def request(records=(), accepted_results=()):
     return FinalizationRequest(identity=IDENTITY, status=ExecutionStatus.COMPLETED,
         context=CONTEXT, accepted_plan=_plan(), completed_step_ids=("step-1", "step-2"),
-        terminal_reason="final_answer", tool_execution_history=records)
+        terminal_reason="final_answer", tool_execution_history=records,
+        accepted_step_results=accepted_results)
 
 
 def record(step, data, rendered=""):
     return ToolExecutionRecord(step_id=step, tool_name="inspect", arguments={"target": step},
         result=ToolResult(request_id=step, success=True, message="Inspected", data=data,
                           rendered_output=rendered))
+
+
+def accepted_result(
+    step,
+    semantic_content,
+    *,
+    revision=2,
+    tool_request_ids=("request-1",),
+):
+    return AcceptedStepResult(completion_evidence=StepCompletionEvidence(
+        execution_id=IDENTITY.execution_id,
+        plan_id="plan-1",
+        plan_revision=revision,
+        step_id=step,
+        summary=semantic_content,
+        tool_request_ids=tool_request_ids,
+        evidence_id=f"evidence-{step}-{revision}",
+    ))
 
 
 def render(req, response, enabled=False):
@@ -53,6 +83,84 @@ def test_multi_step_success_renders_from_evidence_once_without_mutation():
     assert len(calls) == 1
     assert "modified" in calls[0][-1].content and "updated protocol" in calls[0][-1].content
     assert req.model_dump_json() == before
+
+
+def test_accepted_semantics_are_authoritative_over_misleading_raw_evidence():
+    semantic_x = "### Analysis of the Error\n\n### Summary of Findings"
+    misleading_z = "Imports\nThe main() function"
+    accepted = accepted_result("step-1", semantic_x)
+    req = request(
+        (record("step-1", {"content": misleading_z}),),
+        (accepted,),
+    )
+    summary = Finalizer().finalize(req).execution_summary
+
+    facts = finalizer_facts(req, summary)
+
+    assert facts["accepted_step_results"] == [{
+        "execution_id": IDENTITY.execution_id,
+        "plan_id": "plan-1",
+        "plan_revision": 2,
+        "step_id": "step-1",
+        "semantic_content": semantic_x,
+    }]
+    assert facts["tool_execution_history"][0]["evidence"]["content"] == misleading_z
+
+    result, calls = render(
+        req,
+        AIMessage(content="Analysis of the Error; Summary of Findings"),
+    )
+    model_facts = json.loads(calls[0][-1].content.split("\n", 1)[1])
+    assert model_facts["accepted_step_results"][0]["semantic_content"] == semantic_x
+    assert (
+        model_facts["tool_execution_history"][0]["evidence"]["content"]
+        == misleading_z
+    )
+    assert "authoritative conclusions" in calls[0][0].content
+    assert "supporting evidence and details only" in calls[0][0].content
+    assert result.final_answer == "Analysis of the Error; Summary of Findings"
+
+
+def test_multiple_accepted_results_preserve_order_identity_and_empty_provenance():
+    first = accepted_result("step-1", "First accepted conclusion")
+    second = accepted_result(
+        "step-2",
+        "Second reasoning-only conclusion",
+        revision=3,
+        tool_request_ids=(),
+    )
+    req = request(accepted_results=(first, second))
+    summary = Finalizer().finalize(req).execution_summary
+
+    facts = finalizer_facts(req, summary)
+
+    assert [item["semantic_content"] for item in facts["accepted_step_results"]] == [
+        "First accepted conclusion",
+        "Second reasoning-only conclusion",
+    ]
+    assert [
+        (item["step_id"], item["plan_revision"])
+        for item in facts["accepted_step_results"]
+    ] == [("step-1", 2), ("step-2", 3)]
+    assert second.completion_evidence.tool_request_ids == ()
+
+
+def test_no_accepted_results_preserves_existing_model_projection_and_rendering():
+    req = FinalizationRequest(
+        identity=IDENTITY,
+        status=ExecutionStatus.COMPLETED,
+        context=CONTEXT,
+        direct_response=True,
+        terminal_reason="direct_response",
+    )
+    result, calls = render(req, AIMessage(content="Existing fallback response"))
+    facts = json.loads(calls[0][-1].content.split("\n", 1)[1])
+
+    assert facts["accepted_step_results"] == []
+    assert facts["tool_execution_history"] == []
+    assert result.final_answer == "Existing fallback response"
+    assert result.execution_summary.completed_step_ids == ()
+    assert FINALIZER_SYSTEM_PROMPT == calls[0][0].content
 
 
 def test_oversized_duplicate_evidence_is_bounded_and_marked_before_model_invocation():

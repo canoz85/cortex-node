@@ -344,28 +344,3 @@ def test_controller_input_async_evidence_queries_respect_terminal_latest_result(
     assert latest is not None
     assert latest.async_terminal is True
     assert controller_input.get_nonterminal_async_job_id() is None
-
-
-def test_format_action_completion_and_brain_evidence_with_records():
-    from core.graph_response_formatters import format_action_completion_response
-    rec_write = ToolExecutionRecord(
-        step_id="step-1",
-        tool_name="write_file",
-        arguments={"path": "workspace/hello.py"},
-        result=ToolResult(
-            request_id="req-w",
-            success=True,
-            message="Wrote file",
-        ),
-        artifacts=(
-            ArtifactRecord(
-                artifact_id="art-1",
-                step_id="step-1",
-                path="workspace/hello.py",
-                action="created",
-            ),
-        ),
-    )
-    completion = format_action_completion_response((rec_write,))
-    assert completion is not None
-    assert "Implemented the requested changes in workspace/hello.py" in completion

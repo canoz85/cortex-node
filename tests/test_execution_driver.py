@@ -9,6 +9,7 @@ from core.protocol.enums import (
     BrainOutcome,
     ControllerDecisionType,
     ExecutionPhase,
+    ExecutionStatus,
     PlannerOutcome,
     StepStatus,
     WorkerRole,
@@ -25,6 +26,7 @@ from core.protocol.models import (
     ExecutionStep,
     PlannerResult,
     ProtocolVisibleState,
+    StepCompletionEvidence,
     ToolRequest,
     ToolResult,
 )
@@ -265,6 +267,131 @@ def fixed_driver(state, decision, *, results=()):
         planner=ports[0], brain=ports[1], tool_runtime=ports[2], finalizer=ports[3],
     )
     return driver, controller, ports
+
+
+class CapturingFinalizer:
+    def __init__(self):
+        self.requests = []
+
+    def finalize(self, request):
+        self.requests.append(request)
+        return FinalizerService().finalize(request)
+
+
+def accepted_evidence(
+    summary,
+    *,
+    step_id="s1",
+    revision=1,
+    tool_request_ids=("request-1",),
+):
+    return StepCompletionEvidence(
+        execution_id=IDENTITY.execution_id,
+        plan_id="accepted-plan",
+        plan_revision=revision,
+        step_id=step_id,
+        summary=summary,
+        tool_request_ids=tool_request_ids,
+        evidence_id=f"evidence-{step_id}-{revision}",
+    )
+
+
+def capture_terminal_request(completion_provenance=(), *, brain_result=None):
+    state = ExecutionState(
+        protocol_visible=ProtocolVisibleState(
+            identity=IDENTITY,
+            cursor=ExecutionCursor(phase=ExecutionPhase.EXECUTING),
+            completion_provenance=completion_provenance,
+        )
+    )
+    decision = ControllerDecision(
+        decision_type=ControllerDecisionType.DISPATCH_SUMMARY,
+        next_worker=WorkerRole.SUMMARY,
+        execution_status=ExecutionStatus.COMPLETED,
+        cursor=state.protocol_visible.cursor.model_copy(
+            update={
+                "phase": ExecutionPhase.COMPLETED,
+                "current_worker": WorkerRole.SUMMARY,
+            }
+        ),
+        terminal=True,
+    )
+    finalizer = CapturingFinalizer()
+    driver = ExecutionDriver(
+        coordinator=ControllerCoordinator(FixedController(decision)),
+        planner=RecordingPort(),
+        brain=RecordingPort(),
+        tool_runtime=RecordingPort(),
+        finalizer=finalizer,
+    )
+
+    driver.turn(state, controller_input(state, brain_result))
+
+    assert len(finalizer.requests) == 1
+    return finalizer.requests[0]
+
+
+def test_finalizer_request_projects_accepted_semantics_and_bound_evidence():
+    evidence = accepted_evidence("Semantic result X", revision=4)
+
+    request = capture_terminal_request((evidence,))
+
+    assert len(request.accepted_step_results) == 1
+    result = request.accepted_step_results[0]
+    assert result.semantic_content == "Semantic result X"
+    assert result.completion_evidence == evidence
+    assert result.completion_evidence.plan_revision == 4
+
+
+def test_finalizer_projection_excludes_rejected_attempt_and_uses_later_acceptance():
+    rejected = BrainResult(
+        outcome=BrainOutcome.STEP_COMPLETED,
+        step_id="s1",
+        message="Rejected X",
+        completion_evidence=StepCompletionEvidence(
+            step_id="s1",
+            summary="Rejected X",
+        ),
+    )
+
+    rejected_request = capture_terminal_request(brain_result=rejected)
+    assert rejected_request.accepted_step_results == ()
+
+    accepted = accepted_evidence("Accepted retry X2")
+    retry_request = capture_terminal_request((accepted,), brain_result=rejected)
+    assert tuple(
+        result.semantic_content for result in retry_request.accepted_step_results
+    ) == ("Accepted retry X2",)
+
+
+def test_finalizer_projection_preserves_acceptance_order_and_revision_identity():
+    first = accepted_evidence("First", step_id="s1", revision=2)
+    second = accepted_evidence("Second", step_id="s2", revision=5)
+
+    request = capture_terminal_request((first, second))
+
+    assert tuple(
+        result.semantic_content for result in request.accepted_step_results
+    ) == ("First", "Second")
+    assert tuple(
+        result.completion_evidence.plan_revision
+        for result in request.accepted_step_results
+    ) == (2, 5)
+
+
+def test_finalizer_projection_includes_valid_empty_tool_provenance():
+    evidence = accepted_evidence(
+        "Reasoning-only completion",
+        tool_request_ids=(),
+    )
+
+    request = capture_terminal_request((evidence,))
+
+    assert (
+        request.accepted_step_results[0].semantic_content
+        == "Reasoning-only completion"
+    )
+    assert request.accepted_step_results[0].completion_evidence.tool_request_ids == ()
 
 
 @pytest.mark.parametrize(

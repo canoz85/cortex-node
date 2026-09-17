@@ -112,6 +112,7 @@ _WORKING_STATE_CONSUMED_KEYS: Final[frozenset[str]] = frozenset({
     "planner_domain_enforced",
     "planner_route_source",
     "retrieval_messages",
+    "planner_memory_context",
     "run_id",
     "protocol_version",
     "correlation_id",

@@ -126,7 +126,6 @@ class LocalAsyncPollingRuntime:
         portable_runtime: PortableExecutionRuntime | None = None,
         resume_adapter: LangGraphAsyncResumeAdapter | None = None,
     ):
-        self._compiled_graph = compiled_graph
         self._tools = tuple(tools)
         self._routes = tuple(routes)
         self._sleep = sleep

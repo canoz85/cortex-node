@@ -7,7 +7,8 @@ from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from core.graph_constants import ANSI_BLUE, ANSI_CYAN, ANSI_GREEN, ANSI_ITALIC, ANSI_LIGHT_BLUE, ANSI_RED, ANSI_RESET, MAX_REASONING_STEPS
+from core.application_session import bounded_recent_conversation
+from core.graph_constants import ANSI_BLUE, ANSI_RESET, MAX_REASONING_STEPS
 from core.graph_messages import (
     ACCEPTED_FINALIZER_PROVENANCE, CONVERSATION_PROVENANCE_KEY,
     conversational_messages,
@@ -15,9 +16,14 @@ from core.graph_messages import (
 from core.logging.node_update import extract_node_update
 from core.logging.renderer import render_node_update
 from core.logging_utils import get_logger, log_event
+from core.memory.terminal import AcceptedCompletion, CompletedTurnEvidence
+from core.memory import TurnStatus
 from core.protocol.bridge import legacy_state_to_execution_state
-from core.protocol.enums import ControllerDecisionType
-from core.protocol.models import AsyncJobPolicy, ControllerDecision, FinalizationResult
+from core.protocol.enums import ControllerDecisionType, ExecutionStatus
+from core.protocol.models import (
+    AsyncJobPolicy, ControllerDecision, ExecutionState, FinalizationResult,
+    PlannerMemoryContext,
+)
 from core.runtime.accessors import get_execution_state
 from core.runtime.async_wake import AsyncExecutionWake
 from core.state import AgentState
@@ -97,8 +103,11 @@ def run_prompt(
     show_summary: bool = False,
     run_id: str | None = None,
     async_job_policy: AsyncJobPolicy | None = None,
+    completed_turn_evidence: list[CompletedTurnEvidence] | None = None,
+    turn_index: int = 1,
+    planner_memory_context: PlannerMemoryContext | None = None,
 ) -> tuple[list, str]:
-    prior_messages = conversational_messages(history or [])
+    prior_messages = list(bounded_recent_conversation(conversational_messages(history or [])))
     run_id = run_id or uuid.uuid4().hex[:12]
     started_at = perf_counter()
 
@@ -124,6 +133,8 @@ def run_prompt(
     }
     if async_job_policy is not None:
         initial_state["async_job_policy"] = async_job_policy
+    if planner_memory_context is not None:
+        initial_state["planner_memory_context"] = planner_memory_context
 
     # Migration boundary: legacy runtime state and protocol ExecutionState coexist here.
     # The protocol state is read-only and mirrors the same legacy inputs without
@@ -135,6 +146,9 @@ def run_prompt(
     conversation_history = list(initial_state["messages"])
     metrics = RunMetrics()
     from_node = ""
+    terminal_decision: ControllerDecision | None = None
+    terminal_state: ExecutionState | None = None
+    terminal_finalization: FinalizationResult | None = None
 
     async_runtime = getattr(app, "async_runtime", None)
     graph_config = {
@@ -159,10 +173,15 @@ def run_prompt(
                 decision = value.get("controller_decision")
                 if isinstance(decision, ControllerDecision):
                     latest_controller_decision = decision
+                    event_state = value.get("execution_state")
+                    if decision.terminal and isinstance(event_state, ExecutionState):
+                        terminal_decision = decision
+                        terminal_state = event_state
 
                 finalization_result = value.get("finalization_result")
                 if isinstance(finalization_result, FinalizationResult):
                     conversation_history.append(_accepted_finalizer_message(finalization_result))
+                    terminal_finalization = finalization_result
 
                 node_update = extract_node_update(
                     from_node=from_node,
@@ -237,4 +256,39 @@ def run_prompt(
         error_counts=metrics.error_counts or None,
     )
 
-    return conversation_history, metrics.latest_summary
+    if completed_turn_evidence is not None and terminal_decision is not None and terminal_state is not None:
+        try:
+            protocol = terminal_state.protocol_visible
+            completed_turn_evidence.append(CompletedTurnEvidence(
+                turn_id=run_id,
+                turn_index=turn_index,
+                user_request=prompt,
+                execution_id=protocol.identity.execution_id,
+                status=TurnStatus(protocol.status.value),
+                direct_response=(
+                    protocol.status == ExecutionStatus.COMPLETED
+                    and protocol.active_plan is None
+                    and not protocol.completion_provenance
+                ),
+                accepted_completions=tuple(
+                    AcceptedCompletion(
+                        step_id=item.step_id,
+                        summary=item.summary,
+                        evidence_id=item.evidence_id,
+                        plan_id=item.plan_id,
+                        plan_revision=item.plan_revision,
+                    )
+                    for item in protocol.completion_provenance
+                ),
+                terminal_reason=terminal_decision.failure_reason or terminal_decision.reason,
+                accepted_answer=(
+                    terminal_finalization.final_answer
+                    if terminal_finalization is not None
+                    and terminal_finalization.execution_summary.execution_id == protocol.identity.execution_id
+                    else None
+                ),
+            ))
+        except Exception as exc:
+            logger.warning("Terminal memory evidence unavailable: %s", exc)
+
+    return list(bounded_recent_conversation(conversation_history)), metrics.latest_summary

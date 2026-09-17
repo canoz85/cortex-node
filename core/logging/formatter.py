@@ -9,6 +9,16 @@ from core.protocol.models import ToolResult
 from core.tool_output import parse_tool_result
 
 
+MAX_DEFAULT_TOOL_RESULT_CHARS = 500
+
+
+def _compact_tool_message(message: str) -> str:
+    text = message.strip()
+    if len(text) <= MAX_DEFAULT_TOOL_RESULT_CHARS:
+        return text
+    return text[:MAX_DEFAULT_TOOL_RESULT_CHARS].rstrip() + "..."
+
+
 def format_ai_message(message: BaseMessage | None) -> str:
     """Return normalized AI message text."""
     if message is None:
@@ -26,6 +36,21 @@ def format_planner_plan(planner_result) -> str:
         return planner_result.proposed_plan.objective
 
     return planner_result.message
+
+
+def format_accepted_plan(plan) -> str:
+    """Return a compact Controller-accepted plan for default rendering."""
+    if plan is None:
+        return ""
+
+    lines: list[str] = []
+    for index, step in enumerate(plan.steps, start=1):
+        if lines:
+            lines.append("")
+        lines.append(f"{index}. {step.title}")
+        if step.primary_tool:
+            lines.append(f"   tool: {step.primary_tool}")
+    return "\n".join(lines)
 
 
 def format_tool_call_preview(message: BaseMessage | None) -> str:
@@ -58,11 +83,17 @@ def format_tool_result(tool_result: ToolResult | str | None) -> str:
         return ""
 
     if isinstance(tool_result, ToolResult):
-        return tool_result.message
+        message = _compact_tool_message(tool_result.message)
+        if message:
+            return message
+        return "Completed." if tool_result.success else "Failed."
 
     parsed = parse_tool_result(tool_result)
 
     if parsed is not None:
-        return parsed.message
+        message = _compact_tool_message(parsed.message)
+        if message:
+            return message
+        return "Completed." if parsed.success else "Failed."
 
-    return str(tool_result)
+    return "Completed."

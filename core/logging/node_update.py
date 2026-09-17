@@ -15,8 +15,10 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage, ToolMessage
 
-from core.protocol.enums import BrainOutcome
+from core.protocol.enums import BrainOutcome, ControllerDecisionType
 from core.protocol.models import (
+    ControllerDecision,
+    ExecutionPlan,
     PlannerResult,
     BrainResult,
     FinalizationResult,
@@ -71,7 +73,9 @@ class NodeUpdate:
         return base
     
     planner_result: PlannerResult | None = None
+    accepted_plan: ExecutionPlan | None = None
     brain_result: BrainResult | None = None
+    accepted_completion_message: str = ""
     tool_result: ToolResult | None = None
     tool_name: str | None = None
     finalization_result: FinalizationResult | None = None
@@ -101,6 +105,7 @@ def extract_node_update(
 
     
     execution_state = value.get("execution_state")
+    controller_decision = value.get("controller_decision")
 
     planner_result = value.get("planner_result")
     brain_result = value.get("brain_result")
@@ -126,13 +131,44 @@ def extract_node_update(
         if history and history[-1].result == tool_result:
             tool_name = history[-1].tool_name
 
+    if (
+        isinstance(controller_decision, ControllerDecision)
+        and controller_decision.decision_type
+        == ControllerDecisionType.DISPATCH_TOOL_RUNTIME
+        and controller_decision.pending_tool_request is not None
+        and execution_state is not None
+    ):
+        history = execution_state.working.tool_execution_history
+        if (
+            history
+            and history[-1].result.request_id
+            == controller_decision.pending_tool_request.request_id
+        ):
+            tool_result = history[-1].result
+            tool_name = history[-1].tool_name
+
+    accepted_plan = None
+    accepted_completion_message = ""
+    if isinstance(controller_decision, ControllerDecision):
+        if (
+            controller_decision.reason == "Plan accepted."
+            and controller_decision.accepted_plan is not None
+        ):
+            accepted_plan = controller_decision.accepted_plan
+        if controller_decision.completion_evidence is not None:
+            accepted_completion_message = (
+                controller_decision.completion_evidence.summary
+            )
+
     has_summary_update = "rolling_summary" in value
 
     return NodeUpdate(
         from_node=from_node,
         to_node=to_node,
         planner_result=planner_result,
+        accepted_plan=accepted_plan,
         brain_result=brain_result,
+        accepted_completion_message=accepted_completion_message,
         tool_result=tool_result,
         tool_name=tool_name,
         finalization_result=(

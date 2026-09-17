@@ -65,6 +65,17 @@ def apply_controller_decision_to_state(
         if decision.accepted_plan is not None
         else protocol_visible.active_plan
     )
+    accepted_direct_response = decision.accepted_direct_response
+    if accepted_direct_response is not None:
+        pending = protocol_visible.planning_request
+        if (
+            pending is None
+            or accepted_direct_response.execution_id != protocol_visible.identity.execution_id
+            or accepted_direct_response.request_id != pending.request_id
+            or active_plan is not None
+            or not decision.terminal
+        ):
+            raise ValueError("accepted direct response is not bound to this terminal planning request")
 
     completed_step_ids = protocol_visible.completed_step_ids
     completion_provenance = protocol_visible.completion_provenance
@@ -158,6 +169,7 @@ def apply_controller_decision_to_state(
                     ),
                     "cursor": synchronized_cursor,
                     "active_plan": active_plan,
+                    "accepted_direct_response": accepted_direct_response,
                     "planning_request": (
                         None
                         if decision.clear_planning_request or decision.terminal

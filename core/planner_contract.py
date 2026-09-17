@@ -20,8 +20,14 @@ class ProposalFailureCategory(str, Enum):
 class ProposedStep(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     step_id: str = Field(min_length=1)
-    title: str = Field(min_length=1)
-    description: str = Field(min_length=1)
+    title: str = Field(
+        min_length=1,
+        description="Controller-accepted executable step scope. Include a known resolved value here or in description when execution requires it; do not leave it only in the plan objective or Planner-only context.",
+    )
+    description: str = Field(
+        min_length=1,
+        description="What this step must accomplish, including any already-known resolved context required by the worker. This becomes Controller-accepted active-step semantics, not tool arguments or a prompt.",
+    )
     primary_tool: str = Field(min_length=1)
     dependencies: tuple[str, ...] = ()
 

@@ -10,7 +10,14 @@ from typing import Any, Literal
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue as DomainJsonValue, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue as DomainJsonValue,
+    computed_field,
+    model_validator,
+)
 
 from .enums import (
     AsyncJobStatus,
@@ -373,6 +380,34 @@ class StepCompletionEvidence(ImmutableProtocolModel):
     plan_id: str | None = None
     plan_revision: int | None = Field(default=None, ge=1)
     evidence_id: str | None = None
+
+
+class AcceptedStepResult(ImmutableProtocolModel):
+    """Controller-accepted step semantics supplied to the Finalizer."""
+
+    completion_evidence: StepCompletionEvidence
+
+    @computed_field
+    @property
+    def semantic_content(self) -> str:
+        return self.completion_evidence.summary
+
+    @model_validator(mode="after")
+    def validate_controller_binding(self) -> "AcceptedStepResult":
+        evidence = self.completion_evidence
+        if any(
+            value is None
+            for value in (
+                evidence.execution_id,
+                evidence.plan_id,
+                evidence.plan_revision,
+                evidence.evidence_id,
+            )
+        ):
+            raise ValueError(
+                "Accepted step result requires Controller-bound completion evidence"
+            )
+        return self
 
 
 class BrainUsage(ImmutableProtocolModel):
@@ -758,12 +793,15 @@ class PlannerResult(ImmutableProtocolModel):
     request_id: str = Field(min_length=1)
     proposed_plan: ExecutionPlan | None = None
     message: str = ""
+    direct_response_content: str | None = Field(default=None, min_length=1, max_length=4000)
     planning_rationale: str = ""
     change_summary: str = ""
     failure_category: PlanningFailureCategory | None = None
 
     @model_validator(mode="after")
     def validate_outcome_payload(self):
+        if self.direct_response_content is not None and self.outcome != PlannerOutcome.DIRECT_RESPONSE:
+            raise ValueError("direct response content requires direct response outcome")
         if self.outcome == PlannerOutcome.EXECUTION_PLAN:
             if self.proposed_plan is None or self.failure_category is not None:
                 raise ValueError("execution_plan requires a plan and no failure category")
@@ -774,6 +812,20 @@ class PlannerResult(ImmutableProtocolModel):
             raise ValueError("non-plan Planner outcomes cannot contain a plan or failure category")
         if self.outcome == PlannerOutcome.CLARIFICATION_REQUIRED and not self.message.strip():
             raise ValueError("clarification_required requires a clarification message")
+        return self
+
+
+class AcceptedDirectResponse(ImmutableProtocolModel):
+    """Controller-accepted Planner semantics for one plan-free request."""
+
+    execution_id: str = Field(min_length=1)
+    request_id: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=4000)
+
+    @model_validator(mode="after")
+    def validate_content(self) -> "AcceptedDirectResponse":
+        if not self.content.strip() or self.content != self.content.strip():
+            raise ValueError("accepted direct response content must be nonblank and trimmed")
         return self
 
 class ExecutionSummary(ImmutableProtocolModel):
@@ -801,6 +853,8 @@ class FinalizationRequest(ImmutableProtocolModel):
     accepted_plan: ExecutionPlan | None = None
     tool_execution_history: tuple[ToolExecutionRecord, ...] = Field(default_factory=tuple)
     completed_step_ids: StepIdList = Field(default_factory=tuple)
+    accepted_step_results: tuple[AcceptedStepResult, ...] = Field(default_factory=tuple)
+    accepted_direct_response: AcceptedDirectResponse | None = None
     terminal_reason: str = ""
     direct_response: bool = False
     cancellation_source: CancellationSource | None = None
@@ -811,6 +865,12 @@ class FinalizationRequest(ImmutableProtocolModel):
             raise ValueError("Finalization requires a terminal execution status")
         if self.direct_response and self.accepted_plan is not None:
             raise ValueError("Direct-response finalization cannot contain an accepted plan")
+        if self.accepted_direct_response is not None and (
+            self.accepted_direct_response.execution_id != self.identity.execution_id
+            or self.accepted_plan is not None
+            or self.status != ExecutionStatus.COMPLETED
+        ):
+            raise ValueError("accepted direct response must match a completed plan-free execution")
         return self
 
 
@@ -896,6 +956,7 @@ class ProtocolVisibleState(ImmutableProtocolModel):
     pending_tool_request: ToolRequest | None = None
     completed_step_ids: StepIdList = Field(default_factory=tuple)
     completion_provenance: tuple[StepCompletionEvidence, ...] = ()
+    accepted_direct_response: AcceptedDirectResponse | None = None
     accepted_event_history: EventHistory = Field(default_factory=tuple)
     retry: RetryMetadata = Field(default_factory=RetryMetadata)
     async_policy: AsyncJobPolicy = Field(default_factory=AsyncJobPolicy)
@@ -906,6 +967,17 @@ class ProtocolVisibleState(ImmutableProtocolModel):
     planning_request: PlanningRequest | None = None
     planning_sequence: int = Field(default=0, ge=0)
     planning_clarification: PlanningClarification | None = None
+
+    @model_validator(mode="after")
+    def validate_direct_response_scope(self) -> "ProtocolVisibleState":
+        direct = self.accepted_direct_response
+        if direct is not None and (
+            direct.execution_id != self.identity.execution_id
+            or self.status != ExecutionStatus.COMPLETED
+            or self.active_plan is not None
+        ):
+            raise ValueError("accepted direct response requires its completed plan-free execution")
+        return self
 
 
 class WorkingState(ImmutableProtocolModel):
@@ -946,6 +1018,38 @@ class ExecutionState(ImmutableProtocolModel):
     working: WorkingState = Field(default_factory=WorkingState)
 
 
+class PlannerMemoryFact(ImmutableProtocolModel):
+    """Bounded background fact for Planner context, not protocol truth."""
+
+    category: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    authority: Literal["explicit_user", "controller_accepted", "tool_supported", "inferred"]
+    source_turn_index: int = Field(ge=0)
+
+
+class PlannerMemoryContinuity(ImmutableProtocolModel):
+    """Previous conversational outcome, never active execution state."""
+
+    topic: str = ""
+    terminal_status: Literal["completed", "failed", "cancelled", "unknown"] = "unknown"
+    outcome_note: str = ""
+    pending_follow_up: str = ""
+
+
+class PlannerMemoryQuestion(ImmutableProtocolModel):
+    text: str = Field(min_length=1)
+    source_turn_index: int = Field(ge=0)
+
+
+class PlannerMemoryContext(ImmutableProtocolModel):
+    """Ephemeral Planner-only projection; never stored in ProtocolVisibleState."""
+
+    user_facts: tuple[PlannerMemoryFact, ...] = ()
+    project_facts: tuple[PlannerMemoryFact, ...] = ()
+    continuity: PlannerMemoryContinuity | None = None
+    open_questions: tuple[PlannerMemoryQuestion, ...] = ()
+
+
 class ExecutionContext(ImmutableProtocolModel):
     """Role-scoped context assembled for worker execution.
 
@@ -961,6 +1065,13 @@ class ExecutionContext(ImmutableProtocolModel):
     clarification: str | None = None
     user_message_count: int = Field(default=1, ge=1)
     role: WorkerRole = WorkerRole.BRAIN
+    planner_memory_context: PlannerMemoryContext | None = None
+
+    @model_validator(mode="after")
+    def validate_planner_memory_scope(self) -> "ExecutionContext":
+        if self.planner_memory_context is not None and self.role != WorkerRole.PLANNER:
+            raise ValueError("Planner memory context is Planner-only")
+        return self
 
 
 class ControllerDecision(ImmutableProtocolModel):
@@ -973,6 +1084,7 @@ class ControllerDecision(ImmutableProtocolModel):
     """
 
     accepted_plan: ExecutionPlan | None = None
+    accepted_direct_response: AcceptedDirectResponse | None = None
     planning_request: PlanningRequest | None = None
     clear_planning_request: bool = False
     planning_clarification: PlanningClarification | None = None
@@ -1011,6 +1123,14 @@ class ControllerDecision(ImmutableProtocolModel):
 
     @model_validator(mode="after")
     def validate_terminal_status_and_cursor(self) -> "ControllerDecision":
+        if self.accepted_direct_response is not None and (
+            self.decision_type != ControllerDecisionType.DISPATCH_SUMMARY
+            or self.execution_status != ExecutionStatus.COMPLETED
+            or self.accepted_plan is not None
+            or self.completed_step_id is not None
+            or self.next_step_id is not None
+        ):
+            raise ValueError("accepted direct response requires completed plan-free finalization")
         terminal_phases = {
             ExecutionPhase.COMPLETED,
             ExecutionPhase.FAILED,

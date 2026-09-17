@@ -6,6 +6,13 @@ import sys
 
 from langchain_core.messages import messages_from_dict, messages_to_dict
 
+from core.application_session import ApplicationSession, bounded_recent_conversation
+from core.conversation_compaction import CompactionLimits, compact_recent_conversation
+from core.conversation_memory_updater import LLMMemoryUpdater, build_memory_update_request
+from core.memory import ConversationMemory
+from core.memory.policy import merge_memory
+from core.memory.terminal import extract_memory_update
+from core.planner_memory import project_planner_memory
 from core.logging_utils import configure_logging, get_logger
 
 from core.graph import build_app, run_prompt
@@ -25,7 +32,10 @@ DEFAULT_SETTINGS = {
     "json_logs": False,
     "gpu_telemetry": True,
     "gpu_handoff": True,
-    "session_file": ".cortex_session.json"
+    "session_file": ".cortex_session.json",
+    "memory_llm_enabled": True,
+    "memory_compaction_target_turns": 12,
+    "memory_minimum_verbatim_turns": 8,
 }
 
 def _load_config_file(path: str) -> dict:
@@ -69,6 +79,7 @@ def _build_settings(args: argparse.Namespace) -> dict:
         "json_logs": _env_bool("CORTEX_JSON_LOGS"),
         "gpu_telemetry": _env_bool("CORTEX_GPU_TELEMETRY"),
         "gpu_handoff": _env_bool("CORTEX_GPU_HANDOFF"),
+        "memory_llm_enabled": _env_bool("CORTEX_MEMORY_LLM_ENABLED"),
     }
     for key, value in env_overrides.items():
         if value is not None:
@@ -93,6 +104,7 @@ def _build_settings(args: argparse.Namespace) -> dict:
         "json_logs": args.json_logs,
         "gpu_telemetry": args.gpu_telemetry,
         "gpu_handoff": args.gpu_handoff,
+        "memory_llm_enabled": args.memory_llm_enabled,
     }
     for key, value in cli_overrides.items():
         if value is not None:
@@ -232,34 +244,103 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable resuming from the session file.",
     )
+    output_group.add_argument(
+        "--memory-llm",
+        dest="memory_llm_enabled",
+        action="store_true",
+        default=None,
+        help="Enable optional structured durable-memory extraction after completed turns.",
+    )
+    output_group.add_argument(
+        "--no-memory-llm",
+        dest="memory_llm_enabled",
+        action="store_false",
+        help="Disable optional durable-memory LLM extraction.",
+    )
 
 
     return parser.parse_args()
 
 
-def load_session(session_path: str) -> tuple[str, list]:
-    """Loads rolling_summary and message history from the session file."""
+def create_optional_memory_updater(settings: dict) -> LLMMemoryUpdater | None:
+    if not settings["memory_llm_enabled"]:
+        return None
+    from langchain_ollama import ChatOllama
+    from core.memory_provider import LangChainMemoryProposalProvider
+
+    llm = ChatOllama(
+        model=str(settings["model_planner"]), temperature=0,
+        num_predict=512, client_kwargs={"timeout": 30},
+    )
+    return LLMMemoryUpdater(LangChainMemoryProposalProvider(llm))
+
+
+def load_session(session_path: str) -> ApplicationSession:
+    """Load application context; reject invalid memory independently of history."""
     session_path = Path(session_path)
     if session_path.exists():
         try:
             with open(session_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                rolling_summary = data.get("rolling_summary", "")
-
-                # Convert JSON dicts back into HumanMessage/AIMessage objects
-                serialized_history = data.get("history", [])
-                history = messages_from_dict(serialized_history)
-
-                print(f"[Info] Resumed previous session from {session_path}")
-                return rolling_summary, history
+            if not isinstance(data, dict):
+                raise ValueError("session root must be an object")
+            version = data.get("session_schema_version", 1)
+            if version not in (1, 2):
+                raise ValueError(f"unsupported session schema version: {version}")
+            try:
+                if version == 2 and "conversation_memory" not in data:
+                    raise ValueError("conversation_memory is missing")
+                memory = ConversationMemory.model_validate_json(
+                    json.dumps(data.get("conversation_memory", {}))
+                )
+            except Exception as exc:
+                print(f"[Warning] Invalid conversation memory; using empty memory: {exc}", file=sys.stderr)
+                memory = ConversationMemory()
+            try:
+                serialized = data.get("recent_conversation", data.get("history", []))
+                if not isinstance(serialized, list):
+                    raise ValueError("recent conversation must be a list")
+                recent = bounded_recent_conversation(messages_from_dict(serialized))
+            except Exception as exc:
+                print(f"[Warning] Invalid recent conversation; using empty history: {exc}", file=sys.stderr)
+                recent = ()
+            legacy_summary = data.get("rolling_summary", "")
+            if not isinstance(legacy_summary, str):
+                legacy_summary = ""
+            known_turns = [len([m for m in recent if m.type == "human"])]
+            known_turns.extend(fact.source.turn_index for fact in memory.facts)
+            known_turns.extend(question.source_turn_index for question in memory.questions)
+            if memory.continuity.source_turn_index is not None:
+                known_turns.append(memory.continuity.source_turn_index)
+            count = data.get("completed_turn_count", max(known_turns))
+            if not isinstance(count, int) or count < max(known_turns):
+                print("[Warning] Invalid completed turn count; using known turns", file=sys.stderr)
+                count = max(known_turns)
+            start = data.get("maintenance_start_turn")
+            end = data.get("maintenance_end_turn")
+            if not (
+                (start is None and end is None)
+                or (isinstance(start, int) and isinstance(end, int)
+                    and 1 <= start <= end <= count)
+            ):
+                print("[Warning] Invalid memory maintenance window; ignoring it", file=sys.stderr)
+                start = end = None
+            enrichment_status = data.get("last_enrichment_status", "not_run")
+            if enrichment_status not in {
+                "not_run", "disabled", "accepted", "no_op", "failed_safe",
+            }:
+                enrichment_status = "not_run"
+            print(f"[Info] Resumed previous session from {session_path}")
+            return ApplicationSession(
+                memory, recent, legacy_summary, count, start, end, enrichment_status,
+            )
         except Exception as e:
             print(f"[Warning] Failed to load session file: {e}", file=sys.stderr)
-    return "", []
+    return ApplicationSession()
 
 def save_session(
     session_path: str,
-    rolling_summary: str,
-    history: list,
+    session: ApplicationSession,
     debug: dict | None = None,
 ):
     """Save conversation state and optional runtime debug information."""
@@ -270,8 +351,17 @@ def save_session(
         session_path.parent.mkdir(parents=True, exist_ok=True)
 
         session_data = {
-            "rolling_summary": rolling_summary,
-            "history": messages_to_dict(history),
+            "session_schema_version": 2,
+            "conversation_memory": session.conversation_memory.model_dump(mode="json"),
+            "recent_conversation": messages_to_dict(
+                list(bounded_recent_conversation(session.recent_conversation))
+            ),
+            # Temporary old-graph compatibility; not the memory representation.
+            "rolling_summary": session.legacy_rolling_summary,
+            "completed_turn_count": session.completed_turn_count,
+            "maintenance_start_turn": session.maintenance_start_turn,
+            "maintenance_end_turn": session.maintenance_end_turn,
+            "last_enrichment_status": session.last_enrichment_status,
         }
 
         if debug is not None:
@@ -346,20 +436,104 @@ def main():
         },
     )
 
-    history = []
-    rolling_summary = ""
+    session = load_session(settings["session_file"]) if args.resume else ApplicationSession()
+    compaction_limits = CompactionLimits(
+        target_turns=int(settings["memory_compaction_target_turns"]),
+        minimum_verbatim_turns=int(settings["memory_minimum_verbatim_turns"]),
+    )
+    try:
+        memory_updater = create_optional_memory_updater(settings)
+    except Exception as exc:
+        logger.warning("Optional memory updater unavailable: %s", type(exc).__name__)
+        memory_updater = None
 
-    if args.resume:
-        rolling_summary, history = load_session(settings["session_file"])
+    def complete_turn(user_prompt: str) -> None:
+        nonlocal session
+        terminal_evidence = []
+        history, legacy_summary = run_prompt(
+            app,
+            user_prompt,
+            history=list(session.recent_conversation),
+            rolling_summary=session.legacy_rolling_summary,
+            show_summary=bool(settings["show_summary"]),
+            completed_turn_evidence=terminal_evidence,
+            turn_index=session.completed_turn_count + 1,
+            planner_memory_context=project_planner_memory(
+                session.conversation_memory,
+                current_turn_index=session.completed_turn_count + 1,
+            ),
+        )
+        memory = session.conversation_memory
+        completed_count = session.completed_turn_count
+        maintenance_start = session.maintenance_start_turn
+        maintenance_end = session.maintenance_end_turn
+        enrichment_status = session.last_enrichment_status
+        maintained = False
+        if terminal_evidence:
+            completed_count += 1
+            try:
+                update = extract_memory_update(terminal_evidence[0])
+                memory = merge_memory(memory, update)
+                maintained = True
+            except Exception as exc:
+                logger.warning("Deterministic memory update failed: %s", type(exc).__name__)
+            if maintained:
+                if settings["memory_llm_enabled"]:
+                    if memory_updater is None:
+                        enrichment_status = "failed_safe"
+                    else:
+                        logger.info("Memory updater invoked")
+                        try:
+                            request = build_memory_update_request(terminal_evidence[0], memory)
+                            proposal = memory_updater.propose(request)
+                            if proposal.facts:
+                                memory = merge_memory(memory, proposal)
+                                enrichment_status = "accepted"
+                                logger.info("Memory proposal accepted: facts=%s", len(proposal.facts))
+                            else:
+                                enrichment_status = "no_op"
+                        except Exception as exc:
+                            enrichment_status = "failed_safe"
+                            logger.warning(
+                                "Memory proposal rejected: %s: %s",
+                                type(exc).__name__,
+                                exc,
+                            )
+                else:
+                    enrichment_status = "disabled"
+                if maintenance_end == session.completed_turn_count and maintenance_start is not None:
+                    maintenance_end = completed_count
+                else:
+                    maintenance_start = maintenance_end = completed_count
+        recent = bounded_recent_conversation(history)
+        if maintained:
+            compacted = compact_recent_conversation(
+                recent, completed_turn_count=completed_count,
+                maintenance_start_turn=maintenance_start,
+                maintenance_end_turn=maintenance_end,
+                questions=memory.questions, limits=compaction_limits,
+            )
+            removed = sum(message.type == "human" for message in recent) - sum(
+                message.type == "human" for message in compacted
+            )
+            if removed:
+                logger.info("Conversation turns compacted: count=%s", removed)
+            recent = compacted
+        session = ApplicationSession(
+            conversation_memory=memory,
+            recent_conversation=recent,
+            legacy_rolling_summary=legacy_summary,
+            completed_turn_count=completed_count,
+            maintenance_start_turn=maintenance_start,
+            maintenance_end_turn=maintenance_end,
+            last_enrichment_status=enrichment_status,
+        )
+        save_session(settings["session_file"], session)
 
     try:
 
         if args.prompt:
-            run_prompt(
-                app,
-                args.prompt,
-                show_summary=bool(settings["show_summary"]),
-            )
+            complete_turn(args.prompt)
             return
 
         print("Interactive mode: type 'exit' to quit.")
@@ -371,18 +545,12 @@ def main():
                     break
                 if not user_prompt:
                     continue
-                history, rolling_summary = run_prompt(
-                    app,
-                    user_prompt,
-                    history=history,
-                    rolling_summary=rolling_summary,
-                    show_summary=bool(settings["show_summary"]),
-                )
+                complete_turn(user_prompt)
             except KeyboardInterrupt:
                 print("\nStopping CortexNode.")
                 break
     finally:
-        save_session(settings["session_file"], rolling_summary, history)
+        save_session(settings["session_file"], session)
 
 
 if __name__ == "__main__":

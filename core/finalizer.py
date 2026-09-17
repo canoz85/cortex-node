@@ -72,6 +72,8 @@ class SummaryFinalAnswerRenderer:
         request: FinalizationRequest,
         summary: ExecutionSummary,
     ) -> str:
+        if request.accepted_direct_response is not None:
+            return request.accepted_direct_response.content
         return summary.summary_text
 
 

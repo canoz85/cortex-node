@@ -17,21 +17,6 @@ def conversational_messages(history: list) -> list:
     ]
 
 
-def latest_human_message_str(history: list) -> str:
-    
-    latest_message = latest_human_message(history)
-    if latest_message is not None:
-        raw_text = str(latest_message.content)
-        return raw_text.strip()
-    
-    return ""
-
-def latest_human_message(history: list) -> HumanMessage | None:
-    for message in reversed(history):
-        if isinstance(message, HumanMessage):
-            return message
-    return None
-
 def current_turn_messages(history: list) -> list:
     """Return messages from the latest user turn onward."""
     if not history:
@@ -41,12 +26,6 @@ def current_turn_messages(history: list) -> list:
         if isinstance(history[index], HumanMessage):
             return history[index:]
     return history
-
-
-def recent_messages(history: list, limit: int) -> list:
-    if limit <= 0:
-        return []
-    return history[-limit:]
 
 
 def normalize_message_content(message: object) -> str:
@@ -71,18 +50,6 @@ def normalize_message_content(message: object) -> str:
                 parts.append(str(item))
         return "\n".join(parts)
     return str(content)
-
-
-def is_effectively_empty_response(message: object) -> bool:
-    if getattr(message, "tool_calls", None):
-        return False
-
-    content = getattr(message, "content", "")
-    if isinstance(content, str):
-        return not content.strip()
-    if isinstance(content, list):
-        return len(content) == 0
-    return not bool(content)
 
 
 def recent_turn_slice(

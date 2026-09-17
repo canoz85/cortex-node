@@ -7,13 +7,20 @@ from datetime import datetime, timezone
 
 import pytest
 
-from core.planner import PlannerRouting, PlannerService, filter_planner_tools
+from core.planner import (
+    AmbientRetrievalEligibility,
+    PlannerRouting,
+    PlannerService,
+    ambient_retrieval_eligibility,
+    filter_planner_tools,
+)
 from core.planner_contract import PlannerInvalidOutputError, PlannerProposal, ProposedStep
 from core.planner_normalization import normalize_planner_proposal
 from core.protocol.enums import (PlannerOutcome, PlanningFailureCategory, PlanningOperation,
                                  ReplanTrigger, StepStatus, WorkerRole)
 from core.protocol.models import (ExecutionContext, ExecutionIdentity, ExecutionPlan,
-    ExecutionStep, PlanningCapabilities, PlanningRequest, RetryMetadata)
+    ExecutionStep, PlannerMemoryContext, PlannerMemoryFact,
+    PlanningCapabilities, PlanningRequest, RetryMetadata)
 from core.protocol.models import PlannerResult
 
 VALID = {"result":"PLAN_PROPOSED", "objective":"Inspect then write", "steps":[
@@ -61,6 +68,249 @@ def test_valid_dependent_plan():
     assert result.proposed_plan.steps[0].primary_tool=="list_files"
     assert [step.primary_tool for step in result.proposed_plan.steps] == ["list_files", "write_file"]
     assert "Add prerequisite inspection" in provider.messages[0][0].content
+
+
+def test_planner_prompt_requires_plan_outcomes_in_responsible_steps():
+    provider = FakeProvider()
+
+    service(provider).run(planner_input())
+
+    prompt = " ".join(provider.messages[0][0].content.split())
+    assert "Preserve every requested outcome" in prompt
+    assert "never leave an execution-relevant outcome only in the plan objective" in prompt
+    assert "include that required outcome in that step's title or description" in prompt
+    assert "rather than creating a separate step" in prompt
+
+
+def test_planner_prompt_distinguishes_known_memory_values_from_runtime_discovery():
+    provider = FakeProvider()
+    memory = PlannerMemoryContext(user_facts=(PlannerMemoryFact(
+        category="user_profile", text="The user's preferred marker is Amber.",
+        authority="explicit_user", source_turn_index=1,
+    ),))
+    request = planner_input().model_copy(update={"context": ExecutionContext(
+        user_request="Write a note using my preferred marker",
+        role=WorkerRole.PLANNER, planner_memory_context=memory,
+    )})
+
+    service(provider).run(request)
+
+    system_prompt = " ".join(provider.messages[0][0].content.split())
+    context_prompt = " ".join(provider.messages[0][-2].content.split())
+    assert "background context for authority" in system_prompt
+    assert "within the current Controller-authorized request" in system_prompt
+    assert "put the concrete value in the responsible step's title or description" in system_prompt
+    assert "not prohibited tool-argument detail" in system_prompt
+    assert "genuinely unknown during planning" in system_prompt
+    assert "must not be deferred merely because a tool could rediscover it" in system_prompt
+    assert "background context for authority" in context_prompt
+    assert "cannot authorize extra work, tools, retries, execution success, or lifecycle changes" in context_prompt
+    assert "put any resulting value needed for execution" in context_prompt
+    assert "Amber" in context_prompt
+
+
+def test_proposed_step_schema_describes_resolved_execution_semantics():
+    properties = ProposedStep.model_json_schema()["properties"]
+    title = properties["title"]["description"]
+    description = properties["description"]["description"]
+    assert "Controller-accepted executable step scope" in title
+    assert "known resolved value" in title
+    assert "plan objective or Planner-only context" in title
+    assert "already-known resolved context required by the worker" in description
+    assert "not tool arguments" in description
+
+
+@pytest.mark.parametrize(("request_text", "objective", "title", "description", "semantics"), (
+    (
+        "read the first three Python files and determine their line counts",
+        "Read three Python files and determine their line counts",
+        "Read Python files and determine line counts",
+        "Read the first three Python files and determine the number of lines in each.",
+        ("line", "count"),
+    ),
+    (
+        "retrieve the values and calculate their average",
+        "Retrieve values and calculate their average",
+        "Retrieve values and calculate the average",
+        "Obtain the values and derive their requested average from the evidence.",
+        ("average",),
+    ),
+    (
+        "inspect the report and explain its findings",
+        "Inspect the report and explain its findings",
+        "Inspect and explain the report",
+        "Read the report evidence and summarize its findings clearly.",
+        ("explain", "findings"),
+    ),
+))
+def test_requested_result_semantics_survive_in_responsible_step(
+    request_text, objective, title, description, semantics,
+):
+    proposal = {
+        "result": "PLAN_PROPOSED",
+        "objective": objective,
+        "steps": [{
+            "step_id": "inspect",
+            "title": title,
+            "description": description,
+            "primary_tool": "read_file",
+            "dependencies": [],
+        }],
+    }
+    provider = FakeProvider(proposal, route="info")
+    request = planner_input().model_copy(update={"context": ExecutionContext(
+        user_request=request_text, role=WorkerRole.PLANNER,
+    )})
+
+    result = service(provider).run(request)
+
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    step = result.proposed_plan.steps[0]
+    executable_semantics = f"{step.title} {step.description}".lower()
+    assert all(term in executable_semantics for term in semantics)
+
+
+def test_list_files_uses_authorized_live_discovery_without_ambient_rag():
+    proposal = {"result": "PLAN_PROPOSED", "objective": "List files", "steps": [{
+        "step_id": "list", "title": "List files", "description": "List current files",
+        "primary_tool": "list_files", "dependencies": [],
+    }]}
+    provider = FakeProvider(proposal, route="info")
+    request = planner_input().model_copy(update={"context": ExecutionContext(
+        user_request="list files", role=WorkerRole.PLANNER,
+    )})
+    retrieval_calls = []
+
+    result = service(provider).run(
+        request,
+        retrieve=lambda query: retrieval_calls.append(query) or ("stale workspace index",),
+    )
+
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert result.proposed_plan.steps[0].primary_tool == "list_files"
+    assert result.planning_rationale == "Execution mode: info."
+    assert retrieval_calls == []
+    assert all("stale workspace index" not in message.content for message in provider.messages[0])
+
+
+def test_git_status_uses_authorized_live_discovery_without_ambient_rag():
+    proposal = {"result": "PLAN_PROPOSED", "objective": "Inspect git status", "steps": [{
+        "step_id": "status", "title": "Inspect git status", "description": "Read current status",
+        "primary_tool": "git_status", "dependencies": [],
+    }]}
+    provider = FakeProvider(proposal, route="info")
+    request = planner_input().model_copy(update={
+        "context": ExecutionContext(user_request="current git status", role=WorkerRole.PLANNER),
+        "capabilities": PlanningCapabilities(
+            available_tools=("git_status", "rag_search"),
+        ),
+    })
+    retrieval_calls = []
+
+    result = service(provider).run(
+        request,
+        retrieve=lambda query: retrieval_calls.append(query) or ("stale git status",),
+    )
+
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert result.proposed_plan.steps[0].primary_tool == "git_status"
+    assert retrieval_calls == []
+
+
+def test_current_time_uses_authorized_live_discovery_without_ambient_rag():
+    proposal = {"result": "PLAN_PROPOSED", "objective": "Read current time", "steps": [{
+        "step_id": "time", "title": "Read current time", "description": "Read local time",
+        "primary_tool": "current_time", "dependencies": [],
+    }]}
+    provider = FakeProvider(proposal, route="info")
+    request = planner_input().model_copy(update={"context": ExecutionContext(
+        user_request="what time is it", role=WorkerRole.PLANNER,
+    )})
+    retrieval_calls = []
+
+    result = service(provider).run(
+        request,
+        retrieve=lambda query: retrieval_calls.append(query) or ("stale time",),
+    )
+
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert result.proposed_plan.steps[0].primary_tool == "current_time"
+    assert retrieval_calls == []
+
+
+def test_knowledge_request_and_uncertain_request_remain_ambient_rag_eligible():
+    cases = (
+        ("inspect the CortexNode checkpoint architecture", "info"),
+        ("investigate the project behavior", "action"),
+        ("list files and explain the checkpoint architecture", "info"),
+    )
+    for user_request, route in cases:
+        provider = FakeProvider(VALID, route=route)
+        request = planner_input().model_copy(update={"context": ExecutionContext(
+            user_request=user_request, role=WorkerRole.PLANNER,
+        )})
+        retrieval_calls = []
+
+        service(provider).run(
+            request,
+            retrieve=lambda query: retrieval_calls.append(query) or ("architecture context",),
+        )
+
+        assert retrieval_calls == [user_request]
+        assert provider.messages[0][1].content == "architecture context"
+
+
+def test_runtime_intent_without_matching_authorized_capability_keeps_retrieval():
+    request = planner_input().model_copy(update={
+        "context": ExecutionContext(user_request="git status", role=WorkerRole.PLANNER),
+        "capabilities": PlanningCapabilities(available_tools=("rag_search",)),
+    })
+
+    assert ambient_retrieval_eligibility(
+        request,
+        route="info",
+    ) == AmbientRetrievalEligibility.KNOWLEDGE
+
+
+def test_revise_knowledge_request_remains_eligible_after_route_override():
+    base = ExecutionPlan(
+        plan_id="accepted",
+        revision=3,
+        steps=(ExecutionStep(step_id="prior", title="Prior", status=StepStatus.COMPLETED),),
+    )
+    request = planner_input(active_plan=base).model_copy(update={"context": ExecutionContext(
+        user_request="inspect the CortexNode checkpoint architecture",
+        role=WorkerRole.PLANNER,
+    )})
+    provider = FakeProvider(VALID, route="conversation")
+    retrieval_calls = []
+
+    service(provider).run(
+        request,
+        retrieve=lambda query: retrieval_calls.append(query) or ("revision knowledge",),
+    )
+
+    assert retrieval_calls == [request.context.user_request]
+    assert provider.messages[0][1].content == "revision knowledge"
+
+
+@pytest.mark.parametrize("route", ["conversation", "clarify"])
+def test_direct_routes_remain_ambient_rag_ineligible(route):
+    assert ambient_retrieval_eligibility(
+        planner_input(),
+        route=route,
+    ) == AmbientRetrievalEligibility.NONE
+
+
+def test_planner_prompt_states_ambient_knowledge_authority():
+    provider = FakeProvider()
+
+    service(provider).run(planner_input(), retrieve=lambda _: ("background",))
+
+    prompt = " ".join(provider.messages[0][0].content.split())
+    assert "Retrieved knowledge is background planning context and may be stale" in prompt
+    assert "must not replace live runtime discovery" in prompt
+    assert "authorized runtime capability" in prompt
 
 def test_valid_independent_steps():
     value={**VALID,"steps":[{**VALID["steps"][0]},{**VALID["steps"][1],"dependencies":[]}]}
