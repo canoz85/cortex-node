@@ -145,16 +145,12 @@ class LLMMemoryUpdater:
             if identity in seen:
                 raise ValueError("duplicate fact scope in memory proposal")
             seen.add(identity)
-            quote = proposed.evidence_quote.strip()
-            if quote != proposed.evidence_quote or len(quote) < 4 or not any(c.isalnum() for c in quote):
-                raise ValueError("memory evidence quote must be exact")
             if proposed.category.is_user:
-                if proposed.text.casefold() == quote.casefold():
+                if proposed.text.casefold() == request.user_request.casefold():
                     raise ValueError("user fact text must be a normalized durable fact")
                 if (
                     proposed.source_handle != "human_current"
-                    or quote not in request.user_request
-                    or quote.endswith("?")
+                    or request.user_request.rstrip().endswith("?")
                 ):
                     raise ValueError("user fact has unsupported human evidence")
                 source = MemorySource(
@@ -162,21 +158,34 @@ class LLMMemoryUpdater:
                     turn_id=request.turn_id,
                 )
             else:
-                if proposed.text != quote:
-                    raise ValueError("project fact text must equal its accepted evidence span")
-                accepted = sources.get(proposed.source_handle)
-                if accepted is None or quote not in accepted.summary:
-                    raise ValueError("project fact has unsupported accepted evidence")
-                source = MemorySource(
-                    kind=SourceKind.ACCEPTED_RESULT,
-                    turn_index=request.turn_index,
-                    turn_id=request.turn_id,
-                    execution_id=request.execution_id,
-                    plan_id=accepted.plan_id,
-                    plan_revision=accepted.plan_revision,
-                    step_id=accepted.step_id,
-                    accepted_result_ref=accepted.evidence_id,
-                )
+                if proposed.source_handle == "human_current":
+                    if request.user_request.rstrip().endswith("?"):
+                        raise ValueError("project fact has unsupported human evidence")
+                    source = MemorySource(
+                        kind=SourceKind.HUMAN, turn_index=request.turn_index,
+                        turn_id=request.turn_id,
+                    )
+                else:
+                    quote = proposed.evidence_quote.strip()
+                    if (
+                        quote != proposed.evidence_quote
+                        or len(quote) < 4
+                        or not any(c.isalnum() for c in quote)
+                    ):
+                        raise ValueError("memory evidence quote must be exact")
+                    accepted = sources.get(proposed.source_handle)
+                    if accepted is None or quote not in accepted.summary:
+                        raise ValueError("project fact has unsupported accepted evidence")
+                    source = MemorySource(
+                        kind=SourceKind.ACCEPTED_RESULT,
+                        turn_index=request.turn_index,
+                        turn_id=request.turn_id,
+                        execution_id=request.execution_id,
+                        plan_id=accepted.plan_id,
+                        plan_revision=accepted.plan_revision,
+                        step_id=accepted.step_id,
+                        accepted_result_ref=accepted.evidence_id,
+                    )
             facts.append(MemoryFact(
                 category=proposed.category, scope_key=proposed.scope_key,
                 text=proposed.text, source=source,

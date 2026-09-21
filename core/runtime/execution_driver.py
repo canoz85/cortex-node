@@ -195,6 +195,10 @@ class ExecutionDriver:
                     raise WorkerDispatchError(
                         "Tool request does not match the authorized execution state"
                     )
+                plan = execution_state.protocol_visible.active_plan
+                if (plan is not None and plan.available_tools is not None
+                        and request.tool_name not in plan.available_tools):
+                    raise WorkerDispatchError("Tool is outside accepted plan capabilities")
                 selected_tool_runtime = tool_runtime or self._tool_runtime
                 execute_authorized = getattr(
                     selected_tool_runtime, "execute_authorized", None

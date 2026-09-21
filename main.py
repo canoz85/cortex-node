@@ -12,6 +12,10 @@ from core.conversation_memory_updater import LLMMemoryUpdater, build_memory_upda
 from core.memory import ConversationMemory
 from core.memory.policy import merge_memory
 from core.memory.terminal import extract_memory_update
+from core.graph_messages import (
+    ACCEPTED_FINALIZER_PROVENANCE,
+    CONVERSATION_PROVENANCE_KEY,
+)
 from core.planner_memory import project_planner_memory
 from core.logging_utils import configure_logging, get_logger
 
@@ -26,7 +30,7 @@ DEFAULT_SETTINGS = {
     "model_planner": "gpt-oss:20b", # qwen2.5:7b
     "embedding_model": "nomic-embed-text",
     "rag_top_k": 4,
-    "raw_llm": True,
+    "raw_llm": False,
     "show_summary": False,
     "log_level": "INFO",
     "json_logs": False,
@@ -80,6 +84,7 @@ def _build_settings(args: argparse.Namespace) -> dict:
         "gpu_telemetry": _env_bool("CORTEX_GPU_TELEMETRY"),
         "gpu_handoff": _env_bool("CORTEX_GPU_HANDOFF"),
         "memory_llm_enabled": _env_bool("CORTEX_MEMORY_LLM_ENABLED"),
+         
     }
     for key, value in env_overrides.items():
         if value is not None:
@@ -165,6 +170,24 @@ def parse_args() -> argparse.Namespace:
         help="Single prompt to run. If omitted, interactive mode starts.",
     )
 
+    mqtt_group = parser.add_argument_group("mqtt")
+    mqtt_group.add_argument(
+        "--mqtt",
+        action="store_true",
+        help="Receive prompts from MQTT instead of stdin.",
+    )
+    mqtt_group.add_argument(
+        "--mqtt-host",
+        default=os.getenv("CORTEX_MQTT_HOST", "localhost"),
+        help="MQTT broker host (default: localhost).",
+    )
+    mqtt_group.add_argument(
+        "--mqtt-port",
+        type=int,
+        default=int(os.getenv("CORTEX_MQTT_PORT", "1883")),
+        help="MQTT broker port (default: 1883).",
+    )
+
     output_group = parser.add_argument_group("output")
     output_group.add_argument(
         "--raw-llm",
@@ -173,24 +196,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Enable raw LLM responses (debug view) in red/italic ANSI output.",
     )
-    output_group.add_argument(
-        "--no-raw-llm",
-        dest="raw_llm",
-        action="store_false",
-        help="Disable raw LLM response output.",
-    )
+
     output_group.add_argument(
         "--show-summary",
         dest="show_summary",
         action="store_true",
         default=None,
         help="Show rolling summary output in blue after each run.",
-    )
-    output_group.add_argument(
-        "--no-show-summary",
-        dest="show_summary",
-        action="store_false",
-        help="Disable rolling summary output.",
     )
     output_group.add_argument(
         "--log-level",
@@ -270,7 +282,7 @@ def create_optional_memory_updater(settings: dict) -> LLMMemoryUpdater | None:
 
     llm = ChatOllama(
         model=str(settings["model_planner"]), temperature=0,
-        num_predict=512, client_kwargs={"timeout": 30},
+        num_predict=2048, client_kwargs={"timeout": 30},
     )
     return LLMMemoryUpdater(LangChainMemoryProposalProvider(llm))
 
@@ -447,7 +459,7 @@ def main():
         logger.warning("Optional memory updater unavailable: %s", type(exc).__name__)
         memory_updater = None
 
-    def complete_turn(user_prompt: str) -> None:
+    def complete_turn(user_prompt: str) -> str:
         nonlocal session
         terminal_evidence = []
         history, legacy_summary = run_prompt(
@@ -529,8 +541,28 @@ def main():
             last_enrichment_status=enrichment_status,
         )
         save_session(settings["session_file"], session)
+        for message in reversed(history):
+            if (
+                getattr(message, "type", "") == "ai"
+                and message.additional_kwargs.get(CONVERSATION_PROVENANCE_KEY)
+                == ACCEPTED_FINALIZER_PROVENANCE
+            ):
+                return str(message.content)
+        raise RuntimeError("run_prompt completed without an accepted final answer")
 
     try:
+
+        if getattr(args, "mqtt", False):
+            from transports.mqtt import create_transport
+
+            transport = create_transport(complete_turn)
+            print(
+                "MQTT mode: "
+                f"{args.mqtt_host}:{args.mqtt_port} "
+                "(cortex/v1/commands -> cortex/v1/responses)"
+            )
+            transport.run(args.mqtt_host, args.mqtt_port)
+            return
 
         if args.prompt:
             complete_turn(args.prompt)

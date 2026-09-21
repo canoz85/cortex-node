@@ -102,8 +102,6 @@ class MemoryFact(MemoryModel):
     def validate_claim(self) -> "MemoryFact":
         if self.category.is_user and self.source.kind not in (SourceKind.HUMAN, SourceKind.INFERRED):
             raise ValueError("user memory must originate from a human or labeled inference")
-        if not self.category.is_user and self.source.kind == SourceKind.HUMAN:
-            raise ValueError("an unverified user project claim is not a project fact")
         if self.claim == FactClaim.EXECUTION_OUTCOME and (
             self.category.is_user or self.source.kind != SourceKind.ACCEPTED_RESULT
         ):

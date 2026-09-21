@@ -33,6 +33,7 @@ dist/
 *.pid
 .coverage
 coverage.json
+logs/
 
 # Benchmark outputs
 benchmarks/results/*.json

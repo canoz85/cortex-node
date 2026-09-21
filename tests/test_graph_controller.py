@@ -1,5 +1,6 @@
 from core.finalizer import Finalizer
 from core.graph_controller import create_controller_node
+from core.graph_worker_runtime import GraphWorkerRuntimePorts
 from core.logging.node_update import extract_node_update
 from core.logging.renderer import render_node_update
 from core.graph_routing import route_after_controller
@@ -200,3 +201,61 @@ def test_non_terminal_controller_decision_does_not_invoke_finalizer():
     assert observer.requests == []
     assert "finalization_result" not in update
     assert update["controller_decision"].terminal is False
+
+
+def test_successful_planning_retry_is_consumed_before_brain_without_redispatch():
+    planner_request_ids = []
+    brain_calls = []
+
+    def planner(state):
+        request = state["execution_state"].protocol_visible.planning_request
+        planner_request_ids.append(request.request_id)
+        if len(planner_request_ids) == 1:
+            result = PlannerResult(
+                outcome=PlannerOutcome.FAILED,
+                request_id=request.request_id,
+                failure_category="PROVIDER_FAILURE",
+                message="Router structured output failed.",
+            )
+        else:
+            result = PlannerResult(
+                outcome=PlannerOutcome.EXECUTION_PLAN,
+                request_id=request.request_id,
+                proposed_plan=ExecutionPlan(
+                    plan_id="retry-plan",
+                    steps=(ExecutionStep(step_id="s1", title="Get current time"),),
+                ),
+            )
+        return {"planner_result": result}
+
+    def brain(state):
+        brain_calls.append(state["execution_state"].protocol_visible.cursor.current_worker)
+        return {"brain_result": BrainOutcome(
+            outcome=BrainOutcomeKind.INVALID_OUTPUT,
+            error_code="test-stop",
+            message="Brain was dispatched.",
+        )}
+
+    ports = GraphWorkerRuntimePorts()
+    ports.bind_nodes(planner=planner, brain=brain)
+    node = create_controller_node(worker_ports=ports)
+
+    first = node(_state())
+    first_state = {**_state(), **first}
+    retry = node(first_state)
+    retry_state = {**first_state, **retry}
+
+    successful_request_id = retry["planner_result"].request_id
+    assert retry["planner_result"].outcome == PlannerOutcome.EXECUTION_PLAN
+    assert planner_request_ids == [
+        first["planner_result"].request_id,
+        successful_request_id,
+    ]
+
+    handoff = node(retry_state)
+
+    assert planner_request_ids.count(successful_request_id) == 1
+    assert handoff["controller_decision"].decision_type == ControllerDecisionType.DISPATCH_BRAIN
+    assert handoff["controller_decision"].next_worker == WorkerRole.BRAIN
+    assert handoff["execution_state"].protocol_visible.cursor.current_worker == WorkerRole.BRAIN
+    assert brain_calls == [WorkerRole.BRAIN]

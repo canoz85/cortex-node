@@ -11,7 +11,7 @@ from .models import (
 def _rank(fact: MemoryFact) -> int:
     if fact.category.is_user:
         return 2 if fact.source.kind == SourceKind.HUMAN else 0
-    return {SourceKind.ACCEPTED_RESULT: 3, SourceKind.TOOL: 2,
+    return {SourceKind.HUMAN: 3, SourceKind.ACCEPTED_RESULT: 3, SourceKind.TOOL: 2,
             SourceKind.INFERRED: 0}[fact.source.kind]
 
 

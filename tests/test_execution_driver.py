@@ -4,6 +4,8 @@ from pathlib import Path
 import pytest
 
 from core.finalizer import Finalizer as FinalizerService
+from core.graph_constants import MUTATING_TOOLS
+from core.planner import PlannerRouting, PlannerService
 from core.protocol.controller import CortexController
 from core.protocol.enums import (
     BrainOutcome,
@@ -25,6 +27,7 @@ from core.protocol.models import (
     ExecutionState,
     ExecutionStep,
     PlannerResult,
+    PlanningCapabilities,
     ProtocolVisibleState,
     StepCompletionEvidence,
     ToolRequest,
@@ -32,6 +35,7 @@ from core.protocol.models import (
 )
 from core.runtime.controller_transition import ControllerCoordinator
 from core.runtime.execution_driver import ExecutionDriver, WorkerDispatchError
+from core.runtime.tool_result_integration import SerializedToolRuntimePort
 
 
 IDENTITY = ExecutionIdentity(execution_id="driver-test", protocol_version="1.0")
@@ -227,6 +231,94 @@ def test_complete_non_graph_lifecycle_is_controller_authorized():
     assert trace.current is None
     assert state.protocol_visible.active_plan.steps[0].status == StepStatus.COMPLETED
     assert result.execution_summary.completed_step_ids == ("read",)
+
+
+@pytest.mark.parametrize(("route", "tool_name", "executes"), [
+    ("info", "write_file", False),
+    ("info", "make_directory", False),
+    ("info", "install_package", False),
+    ("info", "read_file", True),
+    ("action", "write_file", True),
+])
+def test_planner_route_capabilities_gate_brain_tool_execution(route, tool_name, executes):
+    calls = []
+    available_tools = ("install_package", "make_directory", "read_file", "write_file")
+
+    class ProposedPlanner:
+        def run(self, request):
+            class Provider:
+                def route(self, _text):
+                    return PlannerRouting(route)
+
+                def generate(self, _messages):
+                    return {"result": "PLAN_PROPOSED", "objective": "Inspect repository",
+                        "steps": [{"step_id": "inspect", "title": "Inspect",
+                                   "description": "Inspect repository",
+                                   "primary_tool": "read_file", "dependencies": []}]}
+
+            return PlannerService(provider=Provider(), tools_set=set(available_tools),
+                domain_tool_map={}, mutating_tools=MUTATING_TOOLS,
+                system_capabilities_text="").run(request)
+
+    class RequestingBrain:
+        def run(self, _input):
+            return BrainResult(outcome=BrainOutcome.TOOL_REQUEST, step_id="inspect",
+                tool_request=ToolRequest(request_id="requested-tool", tool_name=tool_name,
+                                         arguments={"path": "target.txt"}))
+
+    class RecordingTool:
+        def __init__(self, name):
+            self.name = name
+
+        def invoke(self, arguments):
+            calls.append((self.name, arguments))
+            return ToolResult(request_id="requested-tool", success=True, message="ok")
+
+    controller = CortexController(max_reasoning_steps=10,
+        planning_capabilities=PlanningCapabilities(available_tools=available_tools))
+    driver = ExecutionDriver(coordinator=ControllerCoordinator(controller),
+        planner=ProposedPlanner(), brain=RequestingBrain(),
+        tool_runtime=SerializedToolRuntimePort([RecordingTool(name) for name in available_tools]),
+        finalizer=FinalizerService())
+    state = initial_state()
+    planned = driver.turn(state, controller_input(state))
+    accepted = driver.turn(planned.execution_state,
+                           controller_input(planned.execution_state, planned.worker_result))
+    assert accepted.execution_state.protocol_visible.active_plan.available_tools == (
+        ("read_file",) if route == "info" else available_tools)
+    requested = driver.turn(accepted.execution_state,
+                            controller_input(accepted.execution_state, accepted.worker_result))
+    if executes:
+        assert requested.decision.decision_type == ControllerDecisionType.DISPATCH_TOOL_RUNTIME
+        assert calls == [(tool_name, {"path": "target.txt"})]
+    else:
+        assert requested.decision.terminal
+        assert calls == []
+
+
+def test_tool_dispatch_rechecks_accepted_capabilities_before_runtime_invocation():
+    request = ToolRequest(request_id="blocked", tool_name="write_file", arguments={"path": "x"})
+    step = ExecutionStep(step_id="inspect", title="Inspect", primary_tool="read_file")
+    plan = ExecutionPlan(plan_id="read-only", steps=(step,), available_tools=("read_file",))
+    state = ExecutionState(protocol_visible=ProtocolVisibleState(
+        identity=IDENTITY,
+        cursor=ExecutionCursor(phase=ExecutionPhase.EXECUTING, step_id="inspect",
+                               plan_revision=1, current_worker=WorkerRole.TOOL_RUNTIME),
+        active_plan=plan, active_step=step, pending_tool_request=request))
+    decision = ControllerDecision(decision_type=ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
+        next_worker=WorkerRole.TOOL_RUNTIME, pending_tool_request=request)
+    calls = []
+
+    class Runtime:
+        def execute(self, _request):
+            calls.append(_request)
+            raise AssertionError("runtime invoked")
+
+    driver = ExecutionDriver(coordinator=ControllerCoordinator(CortexController(max_reasoning_steps=10)),
+        planner=None, brain=None, tool_runtime=Runtime(), finalizer=None)
+    with pytest.raises(WorkerDispatchError, match="outside accepted plan capabilities"):
+        driver.dispatch_authorized(state, decision, controller_input(state))
+    assert calls == []
 
 
 class FixedController:

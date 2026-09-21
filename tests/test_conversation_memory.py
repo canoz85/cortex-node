@@ -76,8 +76,8 @@ def test_explicit_user_and_accepted_project_facts_can_be_added():
 def test_assistant_prose_is_not_project_authority():
     with pytest.raises(ValidationError):
         MemorySource(kind="assistant", turn_index=1, turn_id="turn-1")
-    with pytest.raises(ValidationError):
-        project("Repo uses Rust", human())
+    user_stated = project("Repo uses Rust", human())
+    assert user_stated.source.kind == SourceKind.HUMAN
     candidate = project("Possibly Rust", inferred())
     assert candidate.source.kind == SourceKind.INFERRED
     assert candidate.claim == FactClaim.OBSERVATION
@@ -109,6 +109,67 @@ def test_accepted_semantics_outrank_raw_tool_and_inference():
     assert reverse.facts[0].text == "Task completed"
 
 
+@pytest.mark.parametrize(("old_source", "new_source", "old_turn", "new_turn", "expected"), [
+    (accepted, human, 1, 2, "new"),
+    (human, accepted, 1, 2, "new"),
+    (human, human, 1, 2, "new"),
+    (accepted, accepted, 1, 2, "new"),
+    (accepted, human, 2, 1, "old"),
+    (human, accepted, 2, 1, "old"),
+])
+def test_equal_rank_project_human_and_accepted_result_use_turn_recency(
+    old_source, new_source, old_turn, new_turn, expected,
+):
+    original = merge_memory(ConversationMemory(), MemoryUpdate(facts=(
+        project("old", old_source(old_turn), key="planner_model"),
+    )))
+
+    updated = merge_memory(original, MemoryUpdate(facts=(
+        project("new", new_source(new_turn), key="planner_model"),
+    )))
+
+    assert updated.facts[0].text == expected
+    assert updated.facts[0].source.turn_index == max(old_turn, new_turn)
+
+
+@pytest.mark.parametrize("weaker_source", [tool, inferred])
+def test_project_human_outranks_newer_weaker_sources(weaker_source):
+    original = merge_memory(ConversationMemory(), MemoryUpdate(facts=(
+        project("human", human(1), key="planner_model"),
+    )))
+
+    updated = merge_memory(original, MemoryUpdate(facts=(
+        project("weaker", weaker_source(2), key="planner_model"),
+    )))
+
+    assert updated == original
+
+
+def test_project_human_participates_in_bounded_pruning():
+    bounded = merge_memory(ConversationMemory(), MemoryUpdate(facts=(
+        project("human", human(1), key="planner_model"),
+        project("inferred", inferred(2), key="possible_model"),
+    )), limits=MemoryLimits(max_project_facts=1))
+
+    assert [(item.text, item.source.kind) for item in bounded.facts] == [
+        ("human", SourceKind.HUMAN),
+    ]
+
+
+def test_cross_category_same_scope_project_facts_remain_distinct():
+    memory = merge_memory(ConversationMemory(), MemoryUpdate(facts=(
+        fact("tooling", accepted(1), category=FactCategory.PROJECT_TOOLING,
+             key="planner_model"),
+        fact("architecture", human(2), category=FactCategory.PROJECT_ARCHITECTURE,
+             key="planner_model"),
+    )))
+
+    assert {(item.category, item.text) for item in memory.facts} == {
+        (FactCategory.PROJECT_TOOLING, "tooling"),
+        (FactCategory.PROJECT_ARCHITECTURE, "architecture"),
+    }
+
+
 def test_tool_success_cannot_establish_task_completion():
     with pytest.raises(ValidationError):
         project("Task completed", tool(), claim=FactClaim.EXECUTION_OUTCOME)
@@ -129,6 +190,7 @@ def test_duplicate_updates_are_idempotent_and_inputs_immutable():
 
 @pytest.mark.parametrize("source", [
     {"kind": "human", "turn_index": 1},
+    {"kind": "human", "turn_index": 1, "turn_id": "t", "execution_id": "e"},
     {"kind": "inferred", "turn_index": 1, "turn_id": "t", "execution_id": "e"},
     {"kind": "accepted_result", "turn_index": 1, "execution_id": "e"},
     {"kind": "tool", "turn_index": 1, "execution_id": "e",

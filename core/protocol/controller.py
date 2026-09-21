@@ -291,6 +291,9 @@ class CortexController:
                     )
 
                 request = controller_input.planning_request
+                if (request is not None and plan.available_tools is not None
+                        and not set(plan.available_tools).issubset(request.capabilities.available_tools)):
+                    return self._terminate(controller_input.cursor, "plan_capability_exceeds_controller_ceiling")
                 if request is not None and request.operation == PlanningOperation.REVISE:
                     try:
                         plan = reconcile_revision(request, controller_input.active_plan, plan)
@@ -613,6 +616,11 @@ class CortexController:
                         controller_input.cursor,
                         "brain_tool_request_missing_payload",
                     )
+
+                plan = controller_input.active_plan
+                if (plan is not None and plan.available_tools is not None
+                        and tool_request.tool_name not in plan.available_tools):
+                    return self._terminate(controller_input.cursor, "tool_outside_plan_capabilities")
 
                 if tool_request.tool_name in self._async_submission_tool_names:
                     tool_request = self._prepare_async_submission_request(

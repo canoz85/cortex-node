@@ -102,9 +102,7 @@ def test_user_fact_is_bound_to_exact_current_human_source_and_merge_only():
 
 @pytest.mark.parametrize("proposal", [
     proposed_user(handle="accepted:result-1"),
-    proposed_user(quote="I am Can."),
     proposed_project("Repository uses Python"),
-    proposed_project("Repository uses Python", handle="human_current"),
 ])
 def test_unknown_or_upgraded_provenance_is_rejected(proposal):
     provider = Provider(MemoryProposal(facts=(proposal,)))
@@ -112,7 +110,7 @@ def test_unknown_or_upgraded_provenance_is_rejected(proposal):
         LLMMemoryUpdater(provider).propose(build_memory_update_request(terminal(), ConversationMemory()))
 
 
-def test_accepted_semantic_span_can_support_project_fact_but_final_answer_cannot():
+def test_accepted_semantic_span_supports_normalized_project_fact_and_not_final_answer():
     accepted = AcceptedCompletion(step_id="inspect", summary="Repository uses Python",
                                   evidence_id="result-1", plan_id="plan", plan_revision=1)
     request = build_memory_update_request(terminal(
@@ -129,10 +127,137 @@ def test_accepted_semantic_span_can_support_project_fact_but_final_answer_cannot
         LLMMemoryUpdater(Provider(MemoryProposal(facts=(
             proposed_project("Repository uses Rust"),
         )))).propose(request)
-    with pytest.raises(ValueError):
-        LLMMemoryUpdater(Provider(MemoryProposal(facts=(
-            proposed_project("Python repository", quote="Repository uses Python"),
-        )))).propose(request)
+    normalized = LLMMemoryUpdater(Provider(MemoryProposal(facts=(
+        proposed_project("Python repository", quote="Repository uses Python"),
+    )))).propose(request)
+    assert normalized.facts[0].text == "Python repository"
+    assert normalized.facts[0].source.execution_id == "exec-1"
+    assert normalized.facts[0].source.plan_id == "plan"
+    assert normalized.facts[0].source.plan_revision == 1
+    assert normalized.facts[0].source.step_id == "inspect"
+    assert normalized.facts[0].source.accepted_result_ref == "result-1"
+
+
+def test_project_semantic_normalization_accepts_exact_supporting_evidence():
+    accepted = AcceptedCompletion(
+        step_id="inspect-planner", plan_id="plan-7", plan_revision=3,
+        evidence_id="planner-result",
+        summary="The Planner is configured to use qwen3:14b through Ollama.",
+    )
+    request = build_memory_update_request(terminal(
+        "Inspect Planner configuration", completions=(accepted,),
+    ), ConversationMemory())
+    proposal = MemoryProposal(facts=(ProposedMemoryFact(
+        category=FactCategory.PROJECT_TOOLING,
+        scope_key="planner_model",
+        text="The Planner uses qwen3:14b.",
+        source_handle="accepted:planner-result",
+        evidence_quote="The Planner is configured to use qwen3:14b through Ollama.",
+    ),))
+
+    update = LLMMemoryUpdater(Provider(proposal)).propose(request)
+
+    fact = update.facts[0]
+    assert fact.text == "The Planner uses qwen3:14b."
+    assert fact.source.kind is SourceKind.ACCEPTED_RESULT
+    assert fact.source.execution_id == "exec-1"
+    assert fact.source.plan_id == "plan-7"
+    assert fact.source.plan_revision == 3
+    assert fact.source.step_id == "inspect-planner"
+    assert fact.source.accepted_result_ref == "planner-result"
+
+
+def test_project_fact_rejects_quote_not_in_selected_accepted_completion():
+    accepted = AcceptedCompletion(
+        step_id="inspect", summary="Repository uses Python",
+        evidence_id="result-1", plan_id="plan", plan_revision=1,
+    )
+    request = build_memory_update_request(terminal(
+        "Inspect repository", completions=(accepted,),
+    ), ConversationMemory())
+    proposal = MemoryProposal(facts=(
+        proposed_project("Python repository", quote="Repository uses Rust"),
+    ))
+
+    with pytest.raises(ValueError, match="unsupported accepted evidence"):
+        LLMMemoryUpdater(Provider(proposal)).propose(request)
+
+
+@pytest.mark.parametrize(("category", "request_text", "fact_text", "scope_key"), [
+    (
+        FactCategory.PROJECT_TOOLING,
+        "I changed the Planner model to gpt-oss:20b.",
+        "Planner model is gpt-oss:20b.",
+        "planner_model",
+    ),
+    (
+        FactCategory.PROJECT_ARCHITECTURE,
+        "The Controller is the sole lifecycle authority in this project.",
+        "The Controller is the project's sole lifecycle authority.",
+        "lifecycle_authority",
+    ),
+])
+def test_explicit_user_statement_can_support_project_fact(
+    category, request_text, fact_text, scope_key,
+):
+    request = build_memory_update_request(terminal(request_text), ConversationMemory())
+    proposal = MemoryProposal(facts=(ProposedMemoryFact(
+        category=category, scope_key=scope_key, text=fact_text,
+        source_handle="human_current", evidence_quote=request_text,
+    ),))
+
+    update = LLMMemoryUpdater(Provider(proposal)).propose(request)
+
+    fact = update.facts[0]
+    assert fact.category is category
+    assert fact.scope_key == scope_key
+    assert fact.text == fact_text
+    assert fact.source.kind is SourceKind.HUMAN
+    assert fact.source.turn_id == request.turn_id
+    assert fact.source.execution_id is None
+    assert fact.source.plan_id is None
+    assert fact.source.plan_revision is None
+    assert fact.source.step_id is None
+    assert fact.source.accepted_result_ref is None
+
+
+def test_user_stated_project_fact_ignores_model_generated_evidence_quote():
+    request = build_memory_update_request(terminal(
+        "I changed the Planner model to gpt-oss:20b.",
+    ), ConversationMemory())
+    proposal = MemoryProposal(facts=(ProposedMemoryFact(
+        category=FactCategory.PROJECT_TOOLING,
+        scope_key="planner_model",
+        text="Planner model is gpt-oss:20b.",
+        source_handle="human_current",
+        evidence_quote="Planner model was changed to gpt-oss:20b",
+    ),))
+
+    update = LLMMemoryUpdater(Provider(proposal)).propose(request)
+
+    fact = update.facts[0]
+    assert fact.text == "Planner model is gpt-oss:20b."
+    assert fact.source.kind is SourceKind.HUMAN
+    assert fact.source.turn_index == request.turn_index
+    assert fact.source.turn_id == request.turn_id
+    assert fact.source.execution_id is None
+
+
+def test_user_profile_human_binding_ignores_model_generated_evidence_quote():
+    request = build_memory_update_request(terminal("My name is Can."), ConversationMemory())
+    proposal = MemoryProposal(facts=(ProposedMemoryFact(
+        category=FactCategory.USER_PROFILE,
+        scope_key="user.name",
+        text="The user's name is Can",
+        source_handle="human_current",
+        evidence_quote="The user said their name is Can",
+    ),))
+
+    update = LLMMemoryUpdater(Provider(proposal)).propose(request)
+
+    assert update.facts[0].text == "The user's name is Can"
+    assert update.facts[0].source.kind is SourceKind.HUMAN
+    assert update.facts[0].source.turn_id == request.turn_id
 
 
 def test_a_user_question_cannot_be_recast_as_an_explicit_user_fact():
@@ -218,6 +343,96 @@ def test_provider_uses_one_structured_call_with_curated_payload():
     content = llm.structured.calls[0][-1].content
     assert "Benim adım Can." in content
     assert "rolling_summary" not in content and "tool_execution_history" not in content
+
+
+@pytest.mark.parametrize(("summary", "proposal"), [
+    (
+        "The current workspace contains src, tests, README.md, and pyproject.toml.",
+        MemoryProposal(),
+    ),
+    (
+        "The current branch is main and the working tree has two modified files.",
+        MemoryProposal(),
+    ),
+    (
+        "The test run completed with 143 passed and 2 failed.",
+        MemoryProposal(),
+    ),
+    (
+        "The Planner uses gpt-oss:20b.",
+        MemoryProposal(facts=(ProposedMemoryFact(
+            category=FactCategory.PROJECT_TOOLING,
+            scope_key="planner_model",
+            text="The Planner uses gpt-oss:20b.",
+            source_handle="accepted:result-1",
+            evidence_quote="The Planner uses gpt-oss:20b.",
+        ),)),
+    ),
+    (
+        "The application uses a Controller-owned execution lifecycle.",
+        MemoryProposal(facts=(ProposedMemoryFact(
+            category=FactCategory.PROJECT_ARCHITECTURE,
+            scope_key="execution_authority",
+            text="The Controller owns the execution lifecycle.",
+            source_handle="accepted:result-1",
+            evidence_quote="The application uses a Controller-owned execution lifecycle.",
+        ),)),
+    ),
+])
+def test_provider_durability_selection_contract(summary, proposal):
+    class Structured:
+        def invoke(self, messages):
+            system_prompt = messages[0].content
+            assert "would this fact still be useful" in system_prompt
+            assert "expected to remain valid in a future conversation" in system_prompt
+            assert "transient snapshots" in system_prompt
+            assert "not durable" in system_prompt
+            assert "architecture decisions" in system_prompt
+            return proposal
+
+    class LLM:
+        def with_structured_output(self, schema, method):
+            assert schema is MemoryProposal and method == "json_schema"
+            return Structured()
+
+    accepted = AcceptedCompletion(
+        step_id="inspect", summary=summary, evidence_id="result-1",
+        plan_id="plan", plan_revision=1,
+    )
+    request = build_memory_update_request(terminal(
+        "Inspect the project", completions=(accepted,),
+    ), ConversationMemory())
+
+    generated = LangChainMemoryProposalProvider(LLM()).generate(request)
+    update = LLMMemoryUpdater(Provider(generated)).propose(request)
+
+    assert len(update.facts) == len(proposal.facts)
+    if proposal.facts:
+        assert update.facts[0].text == proposal.facts[0].text
+        assert update.facts[0].source.kind is SourceKind.ACCEPTED_RESULT
+
+
+def test_provider_durability_contract_excludes_transient_user_project_statement():
+    class Structured:
+        def invoke(self, messages):
+            system_prompt = messages[0].content
+            assert "Current file or directory listings" in system_prompt
+            assert "use source_handle human_current" in system_prompt
+            return MemoryProposal()
+
+    class LLM:
+        def with_structured_output(self, schema, method):
+            assert schema is MemoryProposal and method == "json_schema"
+            return Structured()
+
+    request = build_memory_update_request(terminal(
+        "The workspace currently contains 23 files.",
+    ), ConversationMemory())
+
+    proposal = LangChainMemoryProposalProvider(LLM()).generate(request)
+    update = LLMMemoryUpdater(Provider(proposal)).propose(request)
+
+    assert update.facts == ()
 
 
 def test_json_native_proposal_parses_and_freezes_before_strict_memory_binding():

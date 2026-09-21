@@ -91,5 +91,6 @@ def reconcile_revision(
         plan_id=accepted_plan.plan_id,
         revision=accepted_plan.revision + 1,
         objective=proposal.objective,
+        available_tools=proposal.available_tools,
         steps=reconciled_steps,
     )

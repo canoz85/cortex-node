@@ -42,9 +42,92 @@ class RouterDecisionSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     route: Literal["conversation", "info", "action", "clarify"]
-    
 
-def _llm_route_decision(   
+def _llm_route_decision(
+    user_text: str,
+    llm,
+    *,
+    propagate_errors: bool = False,
+    show_raw_llm: bool = False,
+) -> RoutingDecision | None:
+
+    try:
+        structured_router = llm.with_structured_output(
+            RouterDecisionSchema,
+            method="json_schema",
+            include_raw=True,
+        )
+
+        log_planner(
+            "router][system",
+            PLANNER_ROUTER_PROMPT,
+            enabled=show_raw_llm,
+        )
+
+        log_planner(
+            "router][human",
+            user_text,
+            enabled=show_raw_llm,
+        )
+
+        result = structured_router.invoke(
+            [
+                SystemMessage(content=PLANNER_ROUTER_PROMPT),
+                HumanMessage(content=user_text),
+            ]
+        )
+
+        log_planner(
+            "router][raw",
+            result.get("raw"),
+            enabled=show_raw_llm,
+        )
+
+        parsing_error = result.get("parsing_error")
+
+        if parsing_error is not None:
+            log_planner(
+                "router][parsing_error",
+                str(parsing_error),
+                enabled=show_raw_llm,
+            )
+
+            if propagate_errors:
+                raise parsing_error
+
+            return None
+
+        payload = result.get("parsed")
+
+        log_planner(
+            "router][structured",
+            {
+                "route": getattr(payload, "route", None),
+            },
+            enabled=show_raw_llm,
+        )
+
+        if payload is None:
+            return None
+
+        route = str(payload.route).strip()
+
+        if route not in ALLOWED_ROUTES:
+            return None
+
+        return RoutingDecision(route=route)
+
+    except Exception as exc:
+        if propagate_errors:
+            raise
+
+        logger.warning(
+            f"LLM Routing failed: {str(exc)}"
+        )
+
+        return None
+
+def _llm_route_decision_old(   
     user_text: str,
     llm,
     *,

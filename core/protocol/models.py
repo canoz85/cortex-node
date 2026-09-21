@@ -174,13 +174,14 @@ class ExecutionPlan(ImmutableProtocolModel):
     Ownership: planner proposes, controller accepts active plan revision.
     Visibility: Protocol-visible State.
 
-    Note: runtime-only routing hints belong in Working State, not this model.
+    The accepted tool ceiling is durable authorization for this plan revision.
     """
 
     plan_id: str = Field(min_length=1)
     revision: int = Field(default=1, ge=1)
     objective: str = ""
     steps: ExecutionStepList = Field(default_factory=tuple)
+    available_tools: tuple[str, ...] | None = None
 
 
 class ExecutionCursor(ImmutableProtocolModel):

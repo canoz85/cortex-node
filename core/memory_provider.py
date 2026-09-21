@@ -11,13 +11,25 @@ _SYSTEM_PROMPT = """Extract only durable memory supported by the supplied eviden
 Return a MemoryProposal object with a facts array. Return an empty facts array when unsure.
 Do not store greetings, one-off tasks, temporary results, execution mechanics, errors,
 speculation, or arbitrary final-answer prose as durable facts.
-For a user fact, use source_handle human_current and copy an exact evidence_quote from
-user_request. Set text to a concise, standalone normalized durable fact (for example,
+Apply this durability test before proposing any fact: would this fact still be useful
+and expected to remain valid in a future conversation after the immediate execution
+context is gone? If not, do not propose it. Current file or directory listings and
+counts, git or branch status, test pass/fail results, command output, process state,
+and temporary runtime, network, or device state are transient snapshots, not durable
+facts. Stable project configuration, architecture decisions, selected models or
+providers, persistent tooling choices, and durable workflow conventions may qualify.
+For a user fact, use source_handle human_current. Set text to a concise, standalone
+normalized durable fact (for example,
 "The user prefers concise answers"), not the verbatim quote or the whole conversational
-utterance. Omit greetings, questions, and incidental wording from text. The quote
-must be an exact supporting span of an explicit user statement, not a guess.
-For a project fact, use source_handle accepted:<evidence_id> from accepted_completions.
-Its text and evidence_quote must be the same exact span of that accepted summary.
+utterance. Omit greetings, questions, and incidental wording from text.
+For a project fact explicitly stated in user_request, use source_handle human_current;
+this records user-stated project knowledge, not independently verified knowledge. For a
+project fact supported by accepted execution evidence, use source_handle
+accepted:<evidence_id> from accepted_completions. Set text to a concise, standalone
+normalized durable fact. Set evidence_quote to an exact supporting span of the selected
+accepted completion. The normalized text may differ from the evidence quote. The shared
+proposal schema still requires evidence_quote for human_current, but Cortex ignores that
+field and deterministically binds human_current to the complete current user_request.
 Never treat the user request or accepted_answer as verified project evidence.
 Never invent source handles, identifiers, categories, or execution outcomes.
 Use short stable scope_key values; reuse an existing scope_key for a correction.

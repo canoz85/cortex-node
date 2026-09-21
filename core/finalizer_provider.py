@@ -131,7 +131,7 @@ class LangChainFinalAnswerRenderer:
             )),
         ]
         for message in messages:
-            log_finalizer(f"prompt][{message.type}", message.content, enabled=self.show_raw_llm)
+            log_finalizer(f"prompt][{message.type}", message.content, enabled=self.show_raw_llm, execution_id=summary.execution_id)
         stage = "provider"
         try:
             response = self._llm.invoke(messages)
@@ -140,7 +140,7 @@ class LangChainFinalAnswerRenderer:
                 "tool_calls": getattr(response, "tool_calls", None),
                 "invalid_tool_calls": getattr(response, "invalid_tool_calls", None),
                 "response_metadata": getattr(response, "response_metadata", None),
-            }, enabled=self.show_raw_llm)
+            }, enabled=self.show_raw_llm, execution_id=summary.execution_id)
             stage = "validation"
             if getattr(response, "tool_calls", None) or getattr(response, "invalid_tool_calls", None):
                 raise ValueError("Final answer provider returned tool calls; plain text required")
@@ -155,6 +155,6 @@ class LangChainFinalAnswerRenderer:
                     raise ValueError("Final answer provider returned lifecycle control text")
         except Exception as exc:
             log_finalizer("error", {"stage": stage, "type": type(exc).__name__, "message": str(exc)},
-                          enabled=self.show_raw_llm)
+                          enabled=self.show_raw_llm, execution_id=summary.execution_id)
             raise
         return content

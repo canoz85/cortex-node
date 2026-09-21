@@ -90,6 +90,7 @@ def create_controller_node(
             "execution_state": execution_state,
             "controller_decision": decision,
         }
+        worker_update = {}
         if worker_ports is not None:
             worker_update = worker_ports.consume_update()
             transported_state = worker_update.pop("execution_state", None)
@@ -104,10 +105,16 @@ def create_controller_node(
         elif decision.clear_planning_clarification:
             update["clarification_request"] = ""
 
-        if controller_input.brain_result is not None:
+        if (
+            controller_input.brain_result is not None
+            and "brain_result" not in worker_update
+        ):
             update["brain_result"] = None
 
-        if controller_input.planner_result is not None:
+        if (
+            controller_input.planner_result is not None
+            and "planner_result" not in worker_update
+        ):
             update["planner_result"] = None
 
         if decision.terminal:
@@ -124,12 +131,12 @@ def create_controller_node(
                 update["finalization_error"] = result.final_answer_error or ""
                 update["final_answer"] = result.final_answer
                 update["messages"] = [AIMessage(content=result.final_answer)]
-                print(
-                    "[finalizer] "
-                    f"execution_id={controller_input.identity.execution_id} "
-                    f"status={execution_state.protocol_visible.status.value} "
-                    f"summary={result.execution_summary.model_dump(mode='json')}"
-                )
+                # print(
+                #     "[finalizer] "
+                #     f"execution_id={controller_input.identity.execution_id} "
+                #     f"status={execution_state.protocol_visible.status.value} "
+                #     f"summary={result.execution_summary.model_dump(mode='json')}"
+                # )
             else:
                 error_text = (
                     f"{type(error).__name__}: {error}"
@@ -140,25 +147,10 @@ def create_controller_node(
                 update["finalization_error"] = error_text
                 update["final_answer"] = final_answer
                 update["messages"] = [AIMessage(content=final_answer)]
-                print(
-                    "[finalizer] "
-                    f"execution_id={controller_input.identity.execution_id} error={error_text}"
-                )
-
-
-        # print("\n====CONTROLLER====:")
-        # print("current_worker:", execution_state.protocol_visible.cursor.current_worker)
-        # print("---------------")
-        # if execution_state.protocol_visible.cursor.current_worker == WorkerRole.PLANNER:
-        #     print("active_plan:", execution_state.protocol_visible.active_plan)
-        #     print("---------------")
-        # print("active_step:", execution_state.protocol_visible.active_step)
-        # print("---------------")
-        # if execution_state.protocol_visible.cursor.current_worker == WorkerRole.BRAIN:
-        #     print("brain_result:", controller_input.brain_result)
-        #     print("---------------")
-        # print("====END CONTROLLER====\n")
-
+                # print(
+                #     "[finalizer] "
+                #     f"execution_id={controller_input.identity.execution_id} error={error_text}"
+                # )
 
         return update
 

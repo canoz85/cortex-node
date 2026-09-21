@@ -11,6 +11,8 @@ from core.brain_normalization import normalize_brain_output, normalize_brain_usa
 from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import BrainInput, BrainOutcome
 
+from core.debug import save_raw_llm
+
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +40,16 @@ LIFECYCLE_ACTION_SCHEMAS = (
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "message": {"type": "string", "description": "Concise step-local completion summary."},
+                    "message": {
+                        "type": "string",
+                        "description": (
+                            "The semantic result produced by completing the active step, "
+                            "grounded in the available evidence. Include the actual finding, "
+                            "summary, interpretation, comparison, calculation, or other "
+                            "requested result when the step produces one; do not merely state "
+                            "that the step was completed."
+                        ),
+                    },
                 },
                 "required": ["message"],
                 "additionalProperties": False,
@@ -154,10 +165,27 @@ class LangChainBrainProvider:
                 error_code=type(exc).__name__,
                 message=f"Brain provider failed ({type(exc).__name__}).",
             )
+
+        for message in messages:
+            save_raw_llm(
+                "brain",
+                f"message:{message.role}",
+                message.content,
+                execution_id=brain_input.identity.execution_id,
+            )
+        save_raw_llm(
+            "brain",
+            "response",
+            raw,
+            execution_id=brain_input.identity.execution_id,
+        )
+
+        
         if self.show_raw_llm:
             for message in messages:
                 print(f"[raw-llm][{message.role}]\n{message.content}")
             print(f"[raw-llm][response]\n{raw}")
+
         outcome = normalize_brain_output(
             raw, brain_input, self.tools_set,
             allow_text_tool_calls=not self.supports_native_tool_calls,

@@ -99,11 +99,14 @@ def normalize_planner_proposal(
             plan_id=planner_input.base_plan_id if revising else f"{planner_input.identity.execution_id}:plan",
             revision=planner_input.base_revision + 1 if revising else 1,
             objective=proposal.objective.strip() or planner_input.context.user_request,
+            available_tools=tuple(sorted(available)),
             steps=tuple(ExecutionStep(
-                step_id=step.step_id.strip(), title=step.title.strip(),
+                step_id=step.step_id.strip(), 
+                title=step.title.strip(),
                 description=step.description.strip(),
                 primary_tool=step.primary_tool.strip(),
-                status=StepStatus.PENDING, attempt=0,
+                status=StepStatus.PENDING, 
+                attempt=0,
                 depends_on_step_ids=dependencies[step.step_id.strip()],
             ) for step in proposal.steps),
         )

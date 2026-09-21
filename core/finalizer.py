@@ -103,14 +103,14 @@ class Finalizer:
                 "failed_step_ids": summary.failed_step_ids,
                 "terminal_reason": request.terminal_reason,
                 "tool_execution_history": [record.model_dump(mode="json") for record in request.tool_execution_history],
-            })
+            }, execution_id=summary.execution_id)
         try:
             final_answer = self._answer_renderer.render(request, summary).strip()
             if not final_answer:
                 raise ValueError("Final answer renderer returned empty content")
         except Exception as exc:
             log_finalizer("error", {"stage": "render", "type": type(exc).__name__, "message": str(exc)},
-                          enabled=self.show_raw_llm)
+                          enabled=self.show_raw_llm, execution_id=summary.execution_id)
             result = FinalizationResult(
                 execution_summary=summary,
                 final_answer=self._RENDER_FAILURE_ANSWER,
@@ -119,5 +119,5 @@ class Finalizer:
         else:
             result = FinalizationResult(execution_summary=summary, final_answer=final_answer)
         if self.show_raw_llm:
-            log_finalizer("normalized", result.model_dump(mode="json"))
+            log_finalizer("normalized", result.model_dump(mode="json"), execution_id=summary.execution_id)
         return result

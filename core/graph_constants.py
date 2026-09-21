@@ -40,6 +40,16 @@ are allowed; primary_tool is a non-exclusive planning hint, not an allowlist.
 Insufficient evidence alone is not a failure.
 
 Return STEP_COMPLETED only when the active step is satisfied by the available evidence.
+When returning STEP_COMPLETED, the completion message must contain the semantic result
+produced by the active step, using the available evidence.
+Do not use the completion message merely to state that the work was completed when the
+active step requires an observable result, finding, interpretation, summary, comparison,
+calculation, or other semantic output.
+Preserve the result needed by downstream execution or finalization. For example, if the
+active step requires summarizing inspected items, include the summaries themselves rather
+than only saying that the items were summarized.
+The completion message is the Controller-visible semantic result of the step.
+Completion evidence separately establishes the provenance supporting that result.
 Return REPLAN_REQUESTED when the active strategy or assumptions are no longer viable, but the overall
 user objective may still be achievable and correct continuation requires changing the accepted plan.
 This asks the Controller to authorize Planner revision. It does not require repeated identical failures.
@@ -94,5 +104,6 @@ DOMAIN_TOOL_MAP: Dict[str, Set[str]] = {
 
 MUTATING_TOOLS: Set[str] = {
     "write_file", "make_directory", "install_package", 
-    "execute_abap_report", "run_python", "run_comfy_workflow"
+    "execute_abap_report", "run_python", "run_comfy_workflow",
+    "rag_refresh_index", "download_comfy_output_image",
 }

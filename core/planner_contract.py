@@ -28,6 +28,7 @@ class ProposedStep(BaseModel):
         min_length=1,
         description="What this step must accomplish, including any already-known resolved context required by the worker. This becomes Controller-accepted active-step semantics, not tool arguments or a prompt.",
     )
+
     primary_tool: str = Field(min_length=1)
     dependencies: tuple[str, ...] = ()
 
