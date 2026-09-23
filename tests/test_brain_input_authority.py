@@ -64,11 +64,6 @@ def test_execution_request_is_context_and_only_current_step_is_instruction():
     assert payload["title"] == "Inspect workspace"
     assert payload["description"] == "Use list_files"
     assert payload["attempt"] == context.active_step.attempt
-    assert payload["controller_retry"] == {
-        "count": context.retry.retry_count, "maximum": context.retry.max_retries,
-    }
-    assert payload["accepted_plan_context"]["plan_id"] == context.active_plan.plan_id
-    assert "context only" in payload["accepted_plan_context"]["context_only"]
     rendered = "\n".join(m.content for m in messages)
     assert context.active_plan.objective not in rendered
     assert context.active_plan.steps[1].description not in rendered

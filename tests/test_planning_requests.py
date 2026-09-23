@@ -7,9 +7,10 @@ from langchain_core.messages import HumanMessage
 
 from core.graph_controller import create_controller_node
 from core.graph_planner import create_planner_node
+from core.planner_routing import RoutingDecision
 from core.runtime.controller_transition import apply_controller_decision_to_state
 from core.runtime.execution_driver import WorkerDispatchError
-from core.planner import PlannerService, PlannerRouting
+from core.planner import PlannerService
 from core.protocol.bridge import build_controller_input, build_planner_input
 from core.protocol.controller import CortexController
 from core.protocol.enums import (
@@ -145,6 +146,13 @@ def test_both_sources_share_helper_and_capture_revision_facts(trigger):
     assert applied.protocol_visible.retry == RetryMetadata(max_retries=3)
 
 
+class FakePlannerRouter:
+    def __init__(self, route: str = "action"):
+        self.route_value = route
+
+    def route(self, user_request: str):
+        return RoutingDecision(route=self.route_value)
+
 class FakeProvider:
     def __init__(self, content=None, route="info"):
         if content is None:
@@ -152,11 +160,7 @@ class FakeProvider:
                 {"step_id": "inspect", "title": "Inspect", "description": "Inspect workspace", "primary_tool": "list_files", "dependencies": []}
             ]}
         self.content = content
-        self.routing = PlannerRouting(route)
         self.messages = []
-
-    def route(self, text):
-        return self.routing
 
     def generate(self, messages):
         self.messages.append(messages)
@@ -164,9 +168,7 @@ class FakeProvider:
 
 
 def planner(provider):
-    return PlannerService(provider=provider, tools_set={"write_file", "invented"},
-        domain_tool_map={"workspace": {"list_files", "read_file", "write_file"}},
-        mutating_tools={"write_file"}, system_capabilities_text="fixture")
+    return PlannerService(provider=provider, router=FakePlannerRouter(), mutating_tools={"write_file"})
 
 
 @pytest.mark.parametrize("trigger", list(ReplanTrigger))

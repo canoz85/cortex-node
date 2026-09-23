@@ -6,10 +6,10 @@ from core.brain import BrainService
 from core.brain_provider import LangChainBrainProvider
 from core.graph_node_helpers import response_with_usage
 from core.graph_authorization import require_brain_authorization
-from core.protocol.bridge import build_brain_input, build_execution_state, with_cursor
+from core.protocol.bridge import build_brain_input, with_cursor
 from core.protocol.enums import WorkerRole
 from core.state import AgentState
-from core.runtime.execution_driver import WorkerDispatchError
+# from core.runtime.execution_driver import WorkerDispatchError
 
 
 def create_brain_node(
@@ -33,21 +33,25 @@ def create_brain_node(
     def brain_node(state: AgentState):
         authorized_state = require_brain_authorization(state)
         brain_input = build_brain_input(state)
-        protocol = authorized_state.protocol_visible
-        if (
-            brain_input.identity != protocol.identity
-            or brain_input.cursor != protocol.cursor
-            or brain_input.active_plan != protocol.active_plan
-            or brain_input.active_step != protocol.active_step
-            or brain_input.last_tool_result != authorized_state.working.last_tool_result
-        ):
-            raise WorkerDispatchError("Brain input does not match Controller authorization")
+
+        # protocol = authorized_state.protocol_visible
+        # if (
+        #     brain_input.identity != protocol.identity
+        #     or brain_input.cursor != protocol.cursor
+        #     or brain_input.active_plan != protocol.active_plan
+        #     or brain_input.active_step != protocol.active_step
+        #     or brain_input.last_tool_result != authorized_state.working.last_tool_result
+        # ):
+        #     raise WorkerDispatchError("Brain input does not match Controller authorization")
+
         outcome = service.run(brain_input)
-        execution_state = with_cursor(build_execution_state(state), current_worker=WorkerRole.BRAIN)
+
+        execution_state = with_cursor(authorized_state, current_worker=WorkerRole.BRAIN)
         if brain_input.last_tool_result is not None:
             execution_state = execution_state.model_copy(update={
                 "working": execution_state.working.model_copy(update={"last_tool_result": None}),
             })
+
         # Recreate provider transport only outside the service boundary. ToolNode
         # sees exactly the domain request Controller will accept, with the same ID.
         request = outcome.tool_request

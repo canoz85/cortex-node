@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from langchain_core.messages import AIMessage, HumanMessage
 
 from core.graph import build_app
-from core.graph_intents import RouterDecisionSchema
+from core.planner_routing import RouterDecisionSchema
 from core.protocol.bridge import build_execution_state
 from core.protocol.enums import PlanningOperation, ExecutionStatus
 

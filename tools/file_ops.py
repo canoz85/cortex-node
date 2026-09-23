@@ -19,6 +19,7 @@ from core.models import (
     MakeDirectoryResult,
     ReadFileRequest,
     ReadFileResult,
+    ToolArtifact,
     WriteFileRequest,
     WriteFileResult,
 )
@@ -165,12 +166,20 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
                 )
                 return result.to_tool_output()
 
+            existed_before = target.exists()
+
             target.write_text(request.content, encoding="utf-8")
             result = WriteFileResult(
                 success=True,
                 message=f"Wrote {len(request.content)} characters to {request.path}",
                 path=request.path,
                 characters_written=len(request.content),
+                artifacts=(
+                    ToolArtifact(
+                        path=request.path,
+                        action="modified" if existed_before else "created",
+                    ),
+                ),
             )
             return result.to_tool_output()
         except Exception as exc:

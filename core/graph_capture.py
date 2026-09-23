@@ -4,10 +4,11 @@ from dataclasses import dataclass
 
 from langchain_core.messages import ToolMessage
 
+from core.graph_messages import tool_message_content
 from core.graph_node_helpers import build_tool_signature
+from core.models import ToolArtifact
 from core.protocol.enums import AsyncJobStatus
 from core.protocol.models import ArtifactRecord, ContentIntegrity, PaginationMetadata, ToolExecutionRecord, ToolRequest, ToolResult
-from core.graph_messages import normalize_message_content, tool_message_content
 from core.graph_response_formatters import format_tool_result_response
 from core.state import AgentState
 from core.tool_output import parse_tool_result, unwrap_tool_output
@@ -27,7 +28,7 @@ class NormalizedToolPayload:
     async_job_status: AsyncJobStatus | None
     async_terminal: bool
     async_observed_at_utc: str | None
-
+    artifacts: tuple[ToolArtifact, ...] = ()
 
 def _extract_integrity_and_pagination(
     raw_content: str,
@@ -175,6 +176,7 @@ def _normalize_transport_payload(raw_content: str, *, tool_name: str = "") -> No
             async_job_status=unwrapped.get("async_job_status"),
             async_terminal=bool(unwrapped.get("async_terminal", False)),
             async_observed_at_utc=unwrapped.get("async_observed_at_utc"),
+            artifacts=unwrapped.get("artifacts", ()),
         )
 
     if isinstance(unwrapped, list):
@@ -250,6 +252,7 @@ def _build_tool_result(
         async_job_status=payload.async_job_status,
         async_terminal=payload.async_terminal,
         async_observed_at_utc=payload.async_observed_at_utc,
+        artifacts=payload.artifacts
     )
 
 
@@ -257,6 +260,20 @@ def normalize_tool_output(*, raw_content: str, request: ToolRequest) -> ToolResu
     """Normalize an existing serialized tool envelope without graph semantics."""
     return _build_tool_result(raw_content=raw_content, request=request)
 
+def build_artifact_records(
+    artifacts: tuple[ToolArtifact, ...],
+    *,
+    step_id: str,
+) -> tuple[ArtifactRecord, ...]:
+    return tuple(
+        ArtifactRecord(
+            artifact_id=f"art-{uuid.uuid4()}",
+            step_id=step_id,
+            path=artifact.path,
+            action=artifact.action,
+        )
+        for artifact in artifacts
+    )
 
 def extract_tool_artifacts(
     *, request: ToolRequest, payload: object | None, step_id: str
@@ -328,6 +345,11 @@ def create_capture_tool_output_node():
             current=tool_result,
         )
 
+        artifacts=build_artifact_records(
+            tool_result.artifacts,
+            step_id=active_step.step_id if active_step is not None else "",
+        )
+
         tool_execution_record = ToolExecutionRecord(
             execution_id=execution_state.protocol_visible.identity.execution_id,
             plan_id=execution_state.protocol_visible.active_plan.plan_id if execution_state.protocol_visible.active_plan else None,
@@ -336,11 +358,7 @@ def create_capture_tool_output_node():
             tool_name=decision.pending_tool_request.tool_name,
             arguments=decision.pending_tool_request.arguments,
             result=tool_result,
-            artifacts=_extract_artifact_records(
-                request=decision.pending_tool_request,
-                unwrapped=unwrap_tool_output(raw_content),
-                step_id=active_step.step_id if active_step is not None else "",
-            ),
+            artifacts=artifacts
         )
 
         updated_history = (

@@ -1,15 +1,13 @@
 from dataclasses import dataclass
-from typing_extensions import Literal
-
-from core.logging_utils import get_logger
-from core.planner_debug import log_planner
-
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from pydantic import BaseModel, ConfigDict
+from typing_extensions import Literal
 
-ALLOWED_ROUTES = {"info", "action", "conversation", "clarify"}
+from core.logging_utils import get_logger
+from core.planner_debug import log_planner, summarize_raw_llm
+
 
 PLANNER_ROUTER_PROMPT = """Classify the user's request by execution mode only.
 
@@ -29,8 +27,26 @@ Rules:
 Return only the structured route.
 """
 
+
 logger = get_logger(__name__)
 
+class LangChainPlannerRouter:
+    def __init__(
+        self,
+        *,
+        router_llm=None,
+        show_raw_llm: bool = False,
+    ):
+        self.router_llm = router_llm
+        self.show_raw_llm = show_raw_llm
+
+    def route(self, user_request: str) -> RoutingDecision:
+        return planner_routing_decision(
+            user_request,
+            router_llm=self.router_llm,
+            propagate_errors=True,
+            show_raw_llm=self.show_raw_llm,
+        )
 
 
 @dataclass(frozen=True)
@@ -43,6 +59,7 @@ class RouterDecisionSchema(BaseModel):
 
     route: Literal["conversation", "info", "action", "clarify"]
 
+
 def _llm_route_decision(
     user_text: str,
     llm,
@@ -50,7 +67,6 @@ def _llm_route_decision(
     propagate_errors: bool = False,
     show_raw_llm: bool = False,
 ) -> RoutingDecision | None:
-
     try:
         structured_router = llm.with_structured_output(
             RouterDecisionSchema,
@@ -79,7 +95,7 @@ def _llm_route_decision(
 
         log_planner(
             "router][raw",
-            result.get("raw"),
+            summarize_raw_llm(result.get("raw")),
             enabled=show_raw_llm,
         )
 
@@ -99,90 +115,18 @@ def _llm_route_decision(
 
         payload = result.get("parsed")
 
-        log_planner(
-            "router][structured",
-            {
-                "route": getattr(payload, "route", None),
-            },
-            enabled=show_raw_llm,
-        )
-
         if payload is None:
             return None
 
-        route = str(payload.route).strip()
-
-        if route not in ALLOWED_ROUTES:
-            return None
-
-        return RoutingDecision(route=route)
+        return RoutingDecision(route=payload.route)
 
     except Exception as exc:
         if propagate_errors:
             raise
 
-        logger.warning(
-            f"LLM Routing failed: {str(exc)}"
-        )
-
+        logger.warning(f"LLM Routing failed: {exc}")
         return None
 
-def _llm_route_decision_old(   
-    user_text: str,
-    llm,
-    *,
-    propagate_errors: bool = False,
-    show_raw_llm: bool = False,
-) -> RoutingDecision | None:
-
-    try:
-        structured_router = llm.with_structured_output(
-            RouterDecisionSchema,
-            method="json_schema",
-        )
-        log_planner("router][system", PLANNER_ROUTER_PROMPT, enabled=show_raw_llm)
-        log_planner("router][human", user_text, enabled=show_raw_llm)
-        payload = structured_router.invoke(
-            [
-                SystemMessage(content=PLANNER_ROUTER_PROMPT),
-                HumanMessage(content=user_text),
-            ]
-        )
-
-        if show_raw_llm:
-            log_planner("router][structured", {
-                key: getattr(payload, key, None)
-                for key in ("route",)
-            })
-        route = str(payload.route).strip()
-
-        if route not in ALLOWED_ROUTES:
-            return None
-
-        return RoutingDecision(route=route)
-    except Exception as exc:
-        # PlannerService opts in so model failures become PlannerResult.FAILED.
-        # Keep the historical fallback for other callers of this router helper.
-        if propagate_errors:
-            raise
-        logger.warning(f"LLM Routing failed: {str(exc)}")
-        return None
-    
-def _arbiter_route(
-    hard_decision: RoutingDecision | None,
-    llm_decision: RoutingDecision | None,
-) -> RoutingDecision:
-        
-    if hard_decision is not None:
-        return hard_decision
-
-    if llm_decision is not None:
-        return llm_decision
-
-    # Safe fallback
-    return RoutingDecision(
-        route="conversation",
-    )
 
 def planner_routing_decision(
     user_text: str,
@@ -191,25 +135,19 @@ def planner_routing_decision(
     propagate_errors: bool = False,
     show_raw_llm: bool = False,
 ) -> RoutingDecision:
-
     text = (user_text or "").strip()
+
     if not text:
-        return RoutingDecision(
-            route="clarify",
-        )
+        return RoutingDecision(route="clarify")
 
-    hard_decision: RoutingDecision | None = None
+    if router_llm is None:
+        return RoutingDecision(route="conversation")
 
-    llm_decision = None
-    if hard_decision is None and router_llm is not None:
-        llm_decision = _llm_route_decision(
-            user_text=text,
-            llm=router_llm,
-            propagate_errors=propagate_errors,
-            show_raw_llm=show_raw_llm,
-        )
-
-    return _arbiter_route(
-        hard_decision=hard_decision,
-        llm_decision=llm_decision,
+    decision = _llm_route_decision(
+        user_text=text,
+        llm=router_llm,
+        propagate_errors=propagate_errors,
+        show_raw_llm=show_raw_llm,
     )
+
+    return decision or RoutingDecision(route="conversation")

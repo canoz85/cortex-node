@@ -19,6 +19,8 @@ from pydantic import (
     model_validator,
 )
 
+from core.artifacts import ToolArtifact
+
 from .enums import (
     AsyncJobStatus,
     BrainOutcomeKind,
@@ -300,6 +302,7 @@ class ToolResult(ImmutableProtocolModel):
     async_job_status: AsyncJobStatus | None = None
     async_terminal: bool = False
     async_observed_at_utc: datetime | None = None
+    artifacts: tuple[ToolArtifact, ...] = Field(default_factory=tuple)
 
     @model_validator(mode="after")
     def validate_async_job_fields(self) -> "ToolResult":

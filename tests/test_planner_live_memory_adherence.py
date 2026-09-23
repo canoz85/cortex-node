@@ -6,8 +6,9 @@ from uuid import uuid4
 import pytest
 from langchain_ollama import ChatOllama
 
-from core.planner import PlannerRouting, PlannerService
+from core.planner import PlannerService
 from core.planner_provider import LangChainPlannerProvider
+from core.planner_routing import RoutingDecision
 from core.protocol.controller import CortexController
 from core.protocol.enums import PlannerOutcome, WorkerRole
 from core.protocol.models import (
@@ -51,20 +52,24 @@ def test_real_planner_resolves_memory_into_accepted_step_before_tools(tmp_path, 
         model=model, temperature=0, client_kwargs={"timeout": 120},
     ))
 
+    class FakePlannerRouter:
+        def __init__(self, route: str = "action"):
+            self.route_value = route
+
+        def route(self, user_request: str):
+            return RoutingDecision(route=self.route_value)
+
     class LiveProvider:
         raw_proposal = None
 
-        def route(self, user_request):
-            return PlannerRouting("action")
-
+        
         def generate(self, messages):
             self.raw_proposal = transport.generate(messages)
             return self.raw_proposal
 
     provider = LiveProvider()
     result = PlannerService(
-        provider=provider, tools_set={"write_file"}, domain_tool_map={},
-        mutating_tools=set(), system_capabilities_text="",
+        provider=provider, router=FakePlannerRouter(), mutating_tools=set(),
     ).run(worker_request, retrieve=lambda _: ())
 
     assert provider.raw_proposal is not None

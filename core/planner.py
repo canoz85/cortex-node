@@ -1,13 +1,13 @@
 """Framework-neutral Planner service for structured proposals."""
 
-from collections.abc import Callable, Mapping, Set
+from collections.abc import Callable, Set
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 import json
 import re
 
-from core.planner_debug import log_planner
+from core.planner_debug import log_planner, log_planner_request, log_planner_result
 from core.planner_contract import PlannerInvalidOutputError, PlannerProposal
 from core.planner_normalization import normalize_planner_proposal, planner_failure
 from core.protocol.models import PlanningRequest, PlannerResult
@@ -128,25 +128,20 @@ COMFYUI_PLANNING_GUIDANCE = """CAPABILITY-SPECIFIC GUIDANCE — COMFYUI GENERATI
 - Keep submission, history retrieval, and download as separate logical steps.
 """
 
-
-@dataclass(frozen=True)
-class PlannerRouting:
-    """Internal routing value, not a new execution outcome contract."""
-
-    route: str
-
-
 @dataclass(frozen=True)
 class PlannerMessage:
     role: str
     content: str
 
+@dataclass(frozen=True)
+class PlannerRoute:
+    route: str
 
-class PlannerProvider(Protocol):
-    def route(self, user_request: str) -> PlannerRouting:
-        """Run the existing router policy and return transport-free routing data."""
+class PlannerRouter(Protocol):
+    def route(self, user_request: str) -> PlannerRoute:
         ...
 
+class PlannerProvider(Protocol):
     def generate(self, messages: tuple[PlannerMessage, ...]) -> PlannerProposal:
         """Invoke once and return a structured proposal. Never retry."""
         ...
@@ -173,23 +168,14 @@ class PlannerService:
         self,
         *,
         provider: PlannerProvider,
-        tools_set: Set[str],
-        domain_tool_map: Mapping[str, Set[str]],
+        router: PlannerRouter,
         mutating_tools: Set[str],
-        system_capabilities_text: str,
         show_raw_llm: bool = False,
     ):
         self.show_raw_llm = show_raw_llm
+        self.router = router
         self.provider = provider
-
-        # tools_set remains a P1 construction compatibility argument.
-        # The Controller-issued request is the authoritative capability ceiling.
-        self.domain_tool_map = {
-            key: frozenset(value)
-            for key, value in domain_tool_map.items()
-        }
         self.mutating_tools = frozenset(mutating_tools)
-        self.system_capabilities_text = system_capabilities_text
 
     def run(
         self,
@@ -208,47 +194,29 @@ class PlannerService:
 
         execution_id = planner_input.identity.execution_id
 
-        request_debug = planner_input.model_dump(
-            mode="json",
-            include={
-                "request_id",
-                "operation",
-                "base_plan_id",
-                "base_revision",
-                "completed_step_ids",
-                "interrupted_step",
-                "trigger",
-                "reason",
-                "capabilities",
-            },
-        )
-
-        log_planner(
-            "request",
-            {
-                "user_request": planner_input.context.user_request,
-                **request_debug,
-            },
-            enabled=self.show_raw_llm,
-            execution_id=planner_input.identity.execution_id,
-        )
+        def finish(result: PlannerResult) -> PlannerResult:
+            log_planner_result(
+                result,
+                enabled=self.show_raw_llm,
+                execution_id=execution_id,
+            )
+            return result   
 
         user_request = planner_input.context.user_request
 
         try:
-            routing = self.provider.route(user_request)
+            routing = self.router.route(user_request)
 
         except Exception as exc:
-            return self._logged_result(
+            return finish(
                 planner_failure(
                     planner_input.request_id,
                     PlanningFailureCategory.PROVIDER_FAILURE,
                     (
-                        f"Planner provider failed "
+                        f"Planner router failed "
                         f"({type(exc).__name__}): {exc}"
                     ),
-                ),
-                execution_id=planner_input.identity.execution_id,
+                )
             )
 
         if (
@@ -256,16 +224,13 @@ class PlannerService:
             and routing.route in DIRECT_RESPONSE_ROUTES
         ):
             # A reclassification cannot discard a Controller-authorized revision.
-            routing = PlannerRouting("action")
+            routing = PlannerRoute(route="action")            
 
         filtered = filter_planner_tools(
             frozenset(planner_input.capabilities.available_tools),
             route=routing.route,
             mutating_tools=self.mutating_tools,
         )
-
-        # Routing may narrow the Controller's capability ceiling, never widen it.
-        filtered.intersection_update(planner_input.capabilities.available_tools)
 
         prompt = PLANNER_SYSTEM_PROMPT.format(
             route=routing.route,
@@ -296,7 +261,7 @@ class PlannerService:
             )
 
         except Exception as exc:
-            return self._logged_result(
+            return finish(
                 planner_failure(
                     planner_input.request_id,
                     PlanningFailureCategory.PROVIDER_FAILURE,
@@ -304,8 +269,7 @@ class PlannerService:
                         f"Planner context retrieval failed "
                         f"({type(exc).__name__}): {exc}"
                     ),
-                ),
-                execution_id=planner_input.identity.execution_id,
+                )
             )
 
         messages = (
@@ -329,14 +293,14 @@ class PlannerService:
                 f"prompt][{message.role}",
                 message.content,
                 enabled=self.show_raw_llm,
-                execution_id=planner_input.identity.execution_id,
+                execution_id=execution_id,
             )
 
         try:
             content = self.provider.generate(messages)
 
         except PlannerInvalidOutputError as exc:
-            return self._logged_result(
+            return finish(
                 planner_failure(
                     planner_input.request_id,
                     PlanningFailureCategory.INVALID_OUTPUT,
@@ -344,12 +308,11 @@ class PlannerService:
                         f"Planner output is invalid "
                         f"({type(exc).__name__}): {exc}"
                     ),
-                ),
-                execution_id=planner_input.identity.execution_id,
+                )
             )
 
         except Exception as exc:
-            return self._logged_result(
+            return finish(
                 planner_failure(
                     planner_input.request_id,
                     PlanningFailureCategory.PROVIDER_FAILURE,
@@ -357,22 +320,21 @@ class PlannerService:
                         f"Planner provider failed "
                         f"({type(exc).__name__}): {exc}"
                     ),
-                ),
-                execution_id=planner_input.identity.execution_id,
+                )
             )
 
-        raw = (
-            content.model_dump(mode="json")
-            if isinstance(content, PlannerProposal)
-            else content
-        )
+        # raw = (
+        #     content.model_dump(mode="json")
+        #     if isinstance(content, PlannerProposal)
+        #     else content
+        # )
 
-        log_planner(
-            "raw",
-            raw,
-            enabled=self.show_raw_llm,
-            execution_id=planner_input.identity.execution_id,
-        )
+        # log_planner(
+        #     "raw",
+        #     raw,
+        #     enabled=self.show_raw_llm,
+        #     execution_id=execution_id,
+        # )
 
         result = normalize_planner_proposal(
             content,
@@ -381,34 +343,7 @@ class PlannerService:
             effective_tools=frozenset(filtered),
         )
 
-        return self._logged_result(
-            result,
-            execution_id=planner_input.identity.execution_id,
-        )
-
-    def _logged_result(
-        self,
-        result: PlannerResult,
-        *,
-        execution_id: str | None = None,
-    ) -> PlannerResult:
-
-        log_planner(
-            "normalized",
-            result.model_dump(mode="json"),
-            enabled=self.show_raw_llm,
-            execution_id=execution_id,
-        )
-
-        if result.proposed_plan is not None:
-            log_planner(
-                "execution_plan",
-                format_execution_plan(result.proposed_plan),
-                enabled=self.show_raw_llm,
-                execution_id=execution_id,
-            )
-
-        return result
+        return finish(result)
 
 
 def planner_capability_guidance(
@@ -421,23 +356,6 @@ def planner_capability_guidance(
         return COMFYUI_PLANNING_GUIDANCE
 
     return ""
-
-
-def format_execution_plan(plan) -> str:
-    lines = [f"Objective: {plan.objective}"]
-
-    for step in plan.steps:
-        lines.extend(
-            (
-                "",
-                f"{step.step_id}. {step.title}",
-                f"   tool: {step.primary_tool}",
-                f"   depends_on: {list(step.depends_on_step_ids)}",
-            )
-        )
-
-    return "\n".join(lines)
-
 
 def planning_request_context(request: PlanningRequest) -> str:
     """Expose durable facts; instructions are guidance, not acceptance validation."""

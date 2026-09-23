@@ -30,6 +30,53 @@ def _log_native_call_attempt(raw, attempt: int) -> None:
         attempt == 1 and not calls, attempt == 2 and not calls,
     )
 
+def _summarize_response(raw) -> dict:
+    response_metadata = getattr(raw, "response_metadata", {}) or {}
+    usage_metadata = getattr(raw, "usage_metadata", {}) or {}
+
+    return {
+        "content": getattr(raw, "content", ""),
+        "tool_calls": getattr(raw, "tool_calls", []) or [],
+        "model": response_metadata.get("model")
+            or response_metadata.get("model_name"),
+        "done_reason": response_metadata.get("done_reason"),
+        "usage": {
+            "input_tokens": usage_metadata.get("input_tokens"),
+            "output_tokens": usage_metadata.get("output_tokens"),
+            "total_tokens": usage_metadata.get("total_tokens"),
+        },
+    }
+
+def _log_brain_exchange(
+    *,
+    messages: tuple[BrainMessage, ...],
+    raw,
+    execution_id: str,
+    show_raw_llm: bool,
+) -> None:
+    for message in messages:
+        save_raw_llm(
+            "brain",
+            f"message:{message.role}",
+            message.content,
+            execution_id=execution_id,
+        )
+
+    save_raw_llm(
+        "brain",
+        "response",
+        _summarize_response(raw),
+        execution_id=execution_id,
+    )
+
+    if not show_raw_llm:
+        return
+
+    for message in messages:
+        print(f"[raw-llm][{message.role}]\n{message.content}")
+
+    print(f"[raw-llm][response]\n{raw}")
+
 
 LIFECYCLE_ACTION_SCHEMAS = (
     {
@@ -128,6 +175,9 @@ class LangChainBrainProvider:
     def generate(
         self, brain_input: BrainInput, messages: tuple[BrainMessage, ...], *, tools_enabled: bool,
     ) -> BrainOutcome:
+
+        native_tools_enabled = tools_enabled and self.supports_native_tool_calls
+        
         provider_messages = [
             HumanMessage(content=message.content) if message.role == "human"
             else SystemMessage(content=message.content)
@@ -136,9 +186,9 @@ class LangChainBrainProvider:
         llm = self.tool_brain_llm if tools_enabled else self.brain_llm
         try:
             raw = llm.invoke(provider_messages)
-            if tools_enabled and self.supports_native_tool_calls:
+            if native_tools_enabled:
                 _log_native_call_attempt(raw, 1)
-            if tools_enabled and self.supports_native_tool_calls and not getattr(raw, "tool_calls", None):
+            if native_tools_enabled and not getattr(raw, "tool_calls", None):
                 raw = llm.invoke([
                     *provider_messages,
                     # Show the rejected response so this is a protocol correction,
@@ -166,25 +216,12 @@ class LangChainBrainProvider:
                 message=f"Brain provider failed ({type(exc).__name__}).",
             )
 
-        for message in messages:
-            save_raw_llm(
-                "brain",
-                f"message:{message.role}",
-                message.content,
-                execution_id=brain_input.identity.execution_id,
-            )
-        save_raw_llm(
-            "brain",
-            "response",
-            raw,
+        _log_brain_exchange(
+            messages=messages,
+            raw=raw,
             execution_id=brain_input.identity.execution_id,
+            show_raw_llm=self.show_raw_llm,
         )
-
-        
-        if self.show_raw_llm:
-            for message in messages:
-                print(f"[raw-llm][{message.role}]\n{message.content}")
-            print(f"[raw-llm][response]\n{raw}")
 
         outcome = normalize_brain_output(
             raw, brain_input, self.tools_set,

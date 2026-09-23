@@ -5,7 +5,8 @@ import pytest
 
 from core.finalizer import Finalizer as FinalizerService
 from core.graph_constants import MUTATING_TOOLS
-from core.planner import PlannerRouting, PlannerService
+from core.planner import PlannerService
+from core.planner_routing import RoutingDecision
 from core.protocol.controller import CortexController
 from core.protocol.enums import (
     BrainOutcome,
@@ -78,6 +79,14 @@ def controller_input(state, result=None) -> ControllerInput:
         **updates,
     )
 
+
+
+class FakePlannerRouter:
+    def __init__(self, route: str = "action"):
+        self.route_value = route
+
+    def route(self, user_request: str):
+        return RoutingDecision(route=self.route_value)
 
 class AuthorizationTrace:
     def __init__(self):
@@ -247,8 +256,6 @@ def test_planner_route_capabilities_gate_brain_tool_execution(route, tool_name, 
     class ProposedPlanner:
         def run(self, request):
             class Provider:
-                def route(self, _text):
-                    return PlannerRouting(route)
 
                 def generate(self, _messages):
                     return {"result": "PLAN_PROPOSED", "objective": "Inspect repository",
@@ -256,9 +263,7 @@ def test_planner_route_capabilities_gate_brain_tool_execution(route, tool_name, 
                                    "description": "Inspect repository",
                                    "primary_tool": "read_file", "dependencies": []}]}
 
-            return PlannerService(provider=Provider(), tools_set=set(available_tools),
-                domain_tool_map={}, mutating_tools=MUTATING_TOOLS,
-                system_capabilities_text="").run(request)
+            return PlannerService(provider=Provider(), router=FakePlannerRouter(), mutating_tools=MUTATING_TOOLS).run(request)
 
     class RequestingBrain:
         def run(self, _input):

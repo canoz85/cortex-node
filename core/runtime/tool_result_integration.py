@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from typing import Any, ContextManager
+import uuid
 
 from core.protocol.models import (
     ArtifactRecord,
@@ -14,7 +15,7 @@ from core.protocol.models import (
     ToolRequest,
     ToolResult,
 )
-from core.graph_capture import extract_tool_artifacts, normalize_tool_output
+from core.graph_capture import build_artifact_records, extract_tool_artifacts, normalize_tool_output
 from core.tool_output import parse_tool_result, unwrap_tool_output
 
 
@@ -67,8 +68,6 @@ def integrate_tool_result(
     execution_state: ExecutionState,
     decision: ControllerDecision,
     result: ToolResult,
-    *,
-    artifacts: tuple[ArtifactRecord, ...] = (),
 ) -> ExecutionState:
     """Append one authorized typed result to the existing evidence model."""
     request = decision.pending_tool_request
@@ -96,22 +95,22 @@ def integrate_tool_result(
         elif not result.success and result.signature:
             repeat_fail_count = 1
 
+    step_id = step.step_id if step is not None else ""
+
+    artifacts=build_artifact_records(
+        result.artifacts,
+        step_id=step_id,
+    )
+
     record = ToolExecutionRecord(
         execution_id=protocol.identity.execution_id,
         plan_id=protocol.active_plan.plan_id if protocol.active_plan else None,
         plan_revision=protocol.active_plan.revision if protocol.active_plan else None,
-        step_id=step.step_id if step is not None else "",
+        step_id=step.step_id,
         tool_name=request.tool_name,
         arguments=request.arguments,
         result=result,
-        artifacts=(
-            artifacts
-            or extract_tool_artifacts(
-                request=request,
-                payload=result.data if isinstance(result.data, dict) else {},
-                step_id=step.step_id if step is not None else "",
-            )
-        ),
+        artifacts=artifacts,
     )
     return execution_state.model_copy(
         update={

@@ -96,14 +96,22 @@ class BrainService:
         self.casual_system_prompt = casual_system_prompt
 
     def run(self, brain_input: BrainInput) -> BrainOutcome:
-        if brain_input.direct_response or (
-            brain_input.active_plan is not None and brain_input.active_step is None
-        ):
+
+        finalization_requested = (
+            brain_input.direct_response
+            or (
+                brain_input.active_plan is not None
+                and brain_input.active_step is None
+            )
+        )
+
+        if finalization_requested:
             return BrainOutcome(
                 outcome=BrainOutcomeKind.FINAL_ANSWER_READY,
                 message="Finalization requested.",
             )
-        tools_enabled = bool(not brain_input.direct_response and brain_input.active_step is not None)
+        
+        tools_enabled = brain_input.active_step is not None
         output_protocol = build_brain_output_protocol(
             supports_native_tool_calls=self.provider.supports_native_tool_calls,
             tools_enabled=tools_enabled,
@@ -112,8 +120,6 @@ class BrainService:
             system_prompt=self.agent_system_prompt if tools_enabled else self.casual_system_prompt,
             brain_input=brain_input,
             retrieval_messages=(),
-            output_protocol=output_protocol,
-            instruction_brief=_build_brain_execution_brief(brain_input) if tools_enabled else None,
         )
         # The Controller-issued active step is the task turn, after policy and
         # contextual data. Never put the overall user request in that position.
@@ -124,9 +130,7 @@ class BrainService:
 
 def _build_context_messages(
     *,
-    system_prompt: str,
-    instruction_brief: str | None,
-    retrieval_messages: Sequence[BrainMessage],
+    system_prompt: str,    retrieval_messages: Sequence[BrainMessage],
     user_request: str,
 ) -> list[BrainMessage]:
 
@@ -134,10 +138,7 @@ def _build_context_messages(
         BrainMessage(role="system", content=system_prompt),
         *retrieval_messages,
     ]
-
-    if instruction_brief:
-        context_messages.append(BrainMessage(role="system", content=instruction_brief))
-
+    
     if user_request:
         context_messages.append(
             BrainMessage(role="human", content=user_request)
@@ -148,8 +149,8 @@ def _build_context_messages(
 def _build_step_progress_messages(
     *,
     brain_input: BrainInput,
-    prompt_context: str = "",
 ) -> list[BrainMessage]:
+    
     history = brain_input.tool_execution_history
     if not history:
         return []
@@ -262,24 +263,26 @@ def _build_step_progress_messages(
             or (result.pagination is not None and result.pagination.has_more)
         )
         payload: dict[str, Any] = {
-            "request_id": result.request_id,
             "tool": record.tool_name,
             "args": bounded_value(record.arguments),
             "success": True,
             "evidence_complete": evidence_complete,
         }
 
-        if record.tool_name == "read_file":
-            rendered = (result.rendered_output or "").strip()
+        # if record.tool_name == "read_file":
+        #     rendered = (result.rendered_output or "").strip()
 
-            if rendered:
-                payload["evidence"] = rendered
-            elif result.data is not None:
-                payload["evidence"] = result.data
-        else:
-            evidence = evidence_for(record)
-            if evidence is not None:
-                payload["evidence"] = evidence
+        #     if rendered:
+        #         payload["evidence"] = rendered
+        #     elif result.data is not None:
+        #         payload["evidence"] = result.data
+        # else:
+        #     evidence = evidence_for(record)
+        #     if evidence is not None:
+        #         payload["evidence"] = evidence
+        evidence = evidence_for(record)
+        if evidence is not None:
+            payload["evidence"] = evidence
 
         if getattr(result, "integrity", None) and result.integrity.is_truncated:
             payload["integrity"] = {
@@ -330,7 +333,6 @@ def _build_step_progress_messages(
                 error["details"] = bounded_value(details)
 
         payload: dict[str, Any] = {
-            "request_id": record.result.request_id,
             "step": record.step_id,
             "tool": record.tool_name,
             "args": bounded_value(record.arguments),
@@ -398,14 +400,6 @@ def _build_step_progress_messages(
         "prior_failures": prior_failures[-max_prior_records:],
     }
 
-    # Model-context projection is independent from runtime completion provenance.
-    # Runtime may bind more records than the bounded set shown here.
-    visible = payload["current_attempts"]
-    for record in visible:
-        del record["request_id"]
-    for record in (*payload["prior_facts"], *payload["prior_failures"]):
-        del record["request_id"]
-
     return [
         BrainMessage(
             role="system",
@@ -421,28 +415,23 @@ def _build_execution_messages(
     system_prompt: str,
     brain_input: BrainInput,
     retrieval_messages: Sequence[BrainMessage],
-    instruction_brief: str | None,
-    output_protocol: str = BRAIN_OUTPUT_PROTOCOL,
-
 ) -> list[BrainMessage]:
     """Build the message list used for tool execution and action-required turns."""
 
     executing = brain_input.active_step is not None and not brain_input.direct_response
     task_message = (
-        BrainMessage(role="human", content=instruction_brief or _build_brain_execution_brief(brain_input))
+        BrainMessage(role="human", content=_build_brain_execution_brief(brain_input))
         if executing else None
     )
     pre_messages = _build_context_messages(
         system_prompt=system_prompt,
-        instruction_brief=None if executing else instruction_brief,
         retrieval_messages=retrieval_messages,
         user_request=(
-            "" if brain_input.active_step is not None and not brain_input.direct_response
-            else brain_input.context.user_request
+            "" if executing else brain_input.context.user_request
         ),
     )
 
-    if brain_input.active_step is not None and not brain_input.direct_response:
+    if executing:
         pre_messages.append(BrainMessage(
             role="system",
             content=(
@@ -461,16 +450,11 @@ def _build_execution_messages(
     pre_messages.extend(
         _build_step_progress_messages(
             brain_input=brain_input,
-            prompt_context=json.dumps([
-                (message.role, message.content)
-                for message in [*pre_messages, *([task_message] if task_message else [])]
-            ]) + output_protocol,
         )
     )
 
-    if brain_input.active_step is not None and not brain_input.direct_response:
+    if executing:
         # Keep the formatted tool/environment block after the step and evidence.
-        # Capture evidence against the full prompt above, including tool schemas.
         policy, tools_heading, capabilities = system_prompt.partition("\nAVAILABLE TOOLS:\n")
         if tools_heading:
             pre_messages[0] = BrainMessage(role="system", content=policy.rstrip())
@@ -501,25 +485,14 @@ def _build_brain_execution_brief(
         "step_id": current_step.step_id,
         "title": current_step.title,
         "description": current_step.description,
-        "attempt": current_step.attempt,
-        "controller_retry": {
-            "count": brain_input.retry.retry_count,
-            "maximum": brain_input.retry.max_retries,
-        },
     }
     if current_step.primary_tool is not None:
-        # A planning hint, not an exclusive capability set. Supporting tools
-        # remain available when the active objective genuinely requires them.
         payload["primary_tool"] = current_step.primary_tool
-        payload["primary_tool_is_exclusive"] = False
     if current_step.completion_requirement is not None:
         payload["completion_requirement"] = current_step.completion_requirement.model_dump(mode="json")
     plan = brain_input.active_plan
     if plan is not None:
         payload["accepted_plan_context"] = {
-            "plan_id": plan.plan_id,
-            "revision": plan.revision,
-            "dependency_rule": "Every dependency must have COMPLETED status before a pending step is executable.",
             "steps": [
                 {
                     "step_id": step.step_id,
@@ -528,6 +501,5 @@ def _build_brain_execution_brief(
                 }
                 for step in plan.steps
             ],
-            "context_only": "Other steps are context only; the active step remains the sole executable objective.",
         }
     return "Active step:\n" + json.dumps(payload, ensure_ascii=True)

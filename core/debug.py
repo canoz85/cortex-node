@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def save_raw_llm(worker: str, section: str, value: object, *, execution_id: str | None = None) -> None:
-    file_path = os.getenv("CORTEX_RAW_LLM_FILE")
+    file_path = os.getenv("CORTEX_RAW_LLM_FILE") or "logs/raw_llm.jsonl"
 
     if not file_path:
         return

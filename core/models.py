@@ -5,11 +5,11 @@ import json
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from core.artifacts import ToolArtifact
 from core.protocol.enums import AsyncJobStatus
 
 
 TOOL_RESULT_MARKER = "<tool_result_json>"
-
 
 class ToolSerializableModel(BaseModel):
     """Base model for tool payloads that need summary + JSON output."""
@@ -17,6 +17,7 @@ class ToolSerializableModel(BaseModel):
     display: str | None = None
     error_code: str | None = None
     error_details: dict[str, Any] | None = None
+    artifacts: tuple[ToolArtifact, ...] = Field(default_factory=tuple)
 
     @staticmethod
     def _default_display_from_payload(payload: dict[str, Any], summary: str) -> str:

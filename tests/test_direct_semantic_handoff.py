@@ -5,8 +5,9 @@ import pytest
 from core.brain import _build_brain_execution_brief
 from core.finalizer import Finalizer
 from core.finalizer_provider import LangChainFinalAnswerRenderer
-from core.planner import PlannerRouting, PlannerService, PLANNER_SYSTEM_PROMPT
+from core.planner import PlannerService, PLANNER_SYSTEM_PROMPT
 from core.planner_contract import PlannerProposal, PlannerProposalResultType, ProposedStep
+from core.planner_routing import RoutingDecision
 from core.protocol.controller import CortexController
 from core.protocol.enums import ControllerDecisionType, ExecutionStatus, PlannerOutcome
 from core.protocol.models import (
@@ -24,6 +25,12 @@ MEMORY = PlannerMemoryContext(user_facts=(PlannerMemoryFact(
     authority="explicit_user", source_turn_index=1,
 ),))
 
+class FakePlannerRouter:
+    def __init__(self, route: str = "action"):
+        self.route_value = route
+
+    def route(self, user_request: str):
+        return RoutingDecision(route=self.route_value)
 
 class Planner:
     def __init__(self, semantic, *, planned=False):
@@ -38,9 +45,7 @@ class Planner:
         })})
 
         class Provider:
-            def route(self, user_request):
-                return PlannerRouting("action" if self_planned else "conversation")
-
+        
             def generate(self, messages):
                 assert "Amber" in messages[-2].content
                 if self_planned:
@@ -59,8 +64,7 @@ class Planner:
 
         self_planned, self_semantic = self.planned, self.semantic
         return PlannerService(
-            provider=Provider(), tools_set={"write_file"}, domain_tool_map={},
-            mutating_tools=set(), system_capabilities_text="",
+            provider=Provider(), router=FakePlannerRouter(), mutating_tools=set(),
         ).run(worker_request)
 
 

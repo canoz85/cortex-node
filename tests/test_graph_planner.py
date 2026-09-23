@@ -1,202 +1,1454 @@
-"""Current Planner adapter characterization, including legacy limitations."""
+"""Framework-neutral structured Planner P3 contract tests."""
+
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import HumanMessage
 
-from core.graph_planner import create_planner_node
-from core.protocol.enums import PlannerOutcome
-from core.protocol.models import (
-    ExecutionCursor, ExecutionIdentity, ExecutionState, PlannerResult, ProtocolVisibleState,
-    PlanningCapabilities,
+from core.planner import (
+    AmbientRetrievalEligibility,
+    PlannerService,
+    ambient_retrieval_eligibility,
+    filter_planner_tools,
 )
-from core.protocol.controller import CortexController
-from core.protocol.bridge import build_controller_input, build_execution_state
-from core.runtime.controller_transition import apply_controller_decision_to_state
-from core.planner_contract import PlannerProposal
+from core.planner_contract import (
+    PlannerInvalidOutputError,
+    PlannerProposal,
+    ProposedStep,
+)
+from core.planner_normalization import normalize_planner_proposal
+from core.protocol.enums import (
+    PlannerOutcome,
+    PlanningFailureCategory,
+    PlanningOperation,
+    ReplanTrigger,
+    StepStatus,
+    WorkerRole,
+)
+from core.protocol.models import (
+    ExecutionContext,
+    ExecutionIdentity,
+    ExecutionPlan,
+    ExecutionStep,
+    PlannerMemoryContext,
+    PlannerMemoryFact,
+    PlannerResult,
+    PlanningCapabilities,
+    PlanningRequest,
+    RetryMetadata,
+)
 
 
-def authorize(state):
-    controller = CortexController(max_reasoning_steps=24, planning_capabilities=PlanningCapabilities(
-        available_tools=("list_files", "write_file", "query_abap_table", "agent_info", "current_time", "token_usage")))
-    decision = controller.decide(build_controller_input(state))
+VALID = {
+    "result": "PLAN_PROPOSED",
+    "objective": "Inspect then write",
+    "steps": [
+        {
+            "step_id": "inspect",
+            "title": "Inspect",
+            "description": "Inspect workspace",
+            "primary_tool": "list_files",
+            "dependencies": [],
+        },
+        {
+            "step_id": "write",
+            "title": "Write",
+            "description": "Create file",
+            "primary_tool": "write_file",
+            "dependencies": ["inspect"],
+        },
+    ],
+}
+
+
+def planner_input(**updates):
+    plan = updates.pop("active_plan", None)
+
+    return PlanningRequest(
+        request_id="fixture-request",
+        episode_id="fixture-episode",
+        sequence=1,
+        created_at_utc=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        operation=(
+            PlanningOperation.REVISE
+            if plan
+            else PlanningOperation.CREATE
+        ),
+        base_plan=plan,
+        base_plan_id=plan.plan_id if plan else None,
+        base_revision=plan.revision if plan else None,
+        trigger=ReplanTrigger.BRAIN_REQUESTED if plan else None,
+        reason="fixture revision" if plan else "",
+        capabilities=PlanningCapabilities(
+            available_tools=(
+                "list_files",
+                "read_file",
+                "write_file",
+                "current_time",
+                "agent_info",
+                "token_usage",
+            ),
+            unavailable_tools=("blocked_tool",),
+        ),
+        identity=ExecutionIdentity(
+            execution_id="p3",
+            protocol_version="1",
+        ),
+        context=ExecutionContext(
+            user_request="create a file",
+            role=WorkerRole.PLANNER,
+        ),
+        **updates,
+    )
+
+
+class FakeRouter:
+    def __init__(
+        self,
+        route: str = "action",
+        *,
+        error: Exception | None = None,
+    ):
+        self.route_value = route
+        self.error = error
+
+    def route(self, user_request: str):
+        if self.error is not None:
+            raise self.error
+
+        return SimpleNamespace(route=self.route_value)
+
+
+class FakeProvider:
+    def __init__(
+        self,
+        content=VALID,
+        *,
+        error_at: str | None = None,
+    ):
+        self.content = content
+        self.error_at = error_at
+        self.messages = []
+
+    def generate(self, messages):
+        self.messages.append(messages)
+
+        if self.error_at == "generate":
+            raise RuntimeError("generate failed")
+
+        if self.error_at == "invalid":
+            raise PlannerInvalidOutputError("invalid output")
+
+        return self.content
+
+
+def service(
+    provider,
+    *,
+    route: str = "action",
+    route_error: Exception | None = None,
+):
+    return PlannerService(
+        provider=provider,
+        router=FakeRouter(
+            route=route,
+            error=route_error,
+        ),
+        mutating_tools={"write_file"},
+    )
+
+
+def test_valid_dependent_plan():
+    provider = FakeProvider()
+
+    result = service(provider).run(
+        planner_input(),
+        retrieve=lambda _: ("retrieved",),
+    )
+
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert result.proposed_plan.steps[1].depends_on_step_ids == ("inspect",)
+    assert result.proposed_plan.steps[0].primary_tool == "list_files"
+    assert [
+        step.primary_tool
+        for step in result.proposed_plan.steps
+    ] == ["list_files", "write_file"]
+
+    assert "Add prerequisite inspection" in provider.messages[0][0].content
+
+
+def test_planner_prompt_requires_plan_outcomes_in_responsible_steps():
+    provider = FakeProvider()
+
+    service(provider).run(planner_input())
+
+    prompt = " ".join(
+        provider.messages[0][0].content.split()
+    )
+
+    assert "Preserve every requested outcome" in prompt
+    assert (
+        "never leave an execution-relevant outcome only in the plan objective"
+        in prompt
+    )
+    assert (
+        "include that required outcome in that step's title or description"
+        in prompt
+    )
+    assert "rather than creating a separate step" in prompt
+
+
+def test_planner_prompt_distinguishes_known_memory_values_from_runtime_discovery():
+    provider = FakeProvider()
+
+    memory = PlannerMemoryContext(
+        user_facts=(
+            PlannerMemoryFact(
+                category="user_profile",
+                text="The user's preferred marker is Amber.",
+                authority="explicit_user",
+                source_turn_index=1,
+            ),
+        )
+    )
+
+    request = planner_input().model_copy(
+        update={
+            "context": ExecutionContext(
+                user_request="Write a note using my preferred marker",
+                role=WorkerRole.PLANNER,
+                planner_memory_context=memory,
+            )
+        }
+    )
+
+    service(provider).run(request)
+
+    system_prompt = " ".join(
+        provider.messages[0][0].content.split()
+    )
+    context_prompt = " ".join(
+        provider.messages[0][-2].content.split()
+    )
+
+    assert "background context for authority" in system_prompt
+    assert (
+        "within the current Controller-authorized request"
+        in system_prompt
+    )
+    assert (
+        "put the concrete value in the responsible step's title or description"
+        in system_prompt
+    )
+    assert "not prohibited tool-argument detail" in system_prompt
+    assert "genuinely unknown during planning" in system_prompt
+    assert (
+        "must not be deferred merely because a tool could rediscover it"
+        in system_prompt
+    )
+
+    assert "background context for authority" in context_prompt
+    assert (
+        "cannot authorize extra work, tools, retries, execution success, "
+        "or lifecycle changes"
+        in context_prompt
+    )
+    assert "put any resulting value needed for execution" in context_prompt
+    assert "Amber" in context_prompt
+
+
+def test_proposed_step_schema_describes_resolved_execution_semantics():
+    properties = ProposedStep.model_json_schema()["properties"]
+
+    title = properties["title"]["description"]
+    description = properties["description"]["description"]
+
+    assert "Controller-accepted executable step scope" in title
+    assert "known resolved value" in title
+    assert "plan objective or Planner-only context" in title
+    assert (
+        "already-known resolved context required by the worker"
+        in description
+    )
+    assert "not tool arguments" in description
+
+
+@pytest.mark.parametrize(
+    (
+        "request_text",
+        "objective",
+        "title",
+        "description",
+        "semantics",
+    ),
+    (
+        (
+            "read the first three Python files and determine their line counts",
+            "Read three Python files and determine their line counts",
+            "Read Python files and determine line counts",
+            (
+                "Read the first three Python files and determine "
+                "the number of lines in each."
+            ),
+            ("line", "count"),
+        ),
+        (
+            "retrieve the values and calculate their average",
+            "Retrieve values and calculate their average",
+            "Retrieve values and calculate the average",
+            (
+                "Obtain the values and derive their requested average "
+                "from the evidence."
+            ),
+            ("average",),
+        ),
+        (
+            "inspect the report and explain its findings",
+            "Inspect the report and explain its findings",
+            "Inspect and explain the report",
+            "Read the report evidence and summarize its findings clearly.",
+            ("explain", "findings"),
+        ),
+    ),
+)
+def test_requested_result_semantics_survive_in_responsible_step(
+    request_text,
+    objective,
+    title,
+    description,
+    semantics,
+):
+    proposal = {
+        "result": "PLAN_PROPOSED",
+        "objective": objective,
+        "steps": [
+            {
+                "step_id": "inspect",
+                "title": title,
+                "description": description,
+                "primary_tool": "read_file",
+                "dependencies": [],
+            }
+        ],
+    }
+
+    provider = FakeProvider(proposal)
+
+    request = planner_input().model_copy(
+        update={
+            "context": ExecutionContext(
+                user_request=request_text,
+                role=WorkerRole.PLANNER,
+            )
+        }
+    )
+
+    result = service(
+        provider,
+        route="info",
+    ).run(request)
+
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+
+    step = result.proposed_plan.steps[0]
+    executable_semantics = (
+        f"{step.title} {step.description}".lower()
+    )
+
+    assert all(
+        term in executable_semantics
+        for term in semantics
+    )
+
+
+def test_list_files_uses_authorized_live_discovery_without_ambient_rag():
+    proposal = {
+        "result": "PLAN_PROPOSED",
+        "objective": "List files",
+        "steps": [
+            {
+                "step_id": "list",
+                "title": "List files",
+                "description": "List current files",
+                "primary_tool": "list_files",
+                "dependencies": [],
+            }
+        ],
+    }
+
+    provider = FakeProvider(proposal)
+
+    request = planner_input().model_copy(
+        update={
+            "context": ExecutionContext(
+                user_request="list files",
+                role=WorkerRole.PLANNER,
+            )
+        }
+    )
+
+    retrieval_calls = []
+
+    result = service(
+        provider,
+        route="info",
+    ).run(
+        request,
+        retrieve=lambda query: (
+            retrieval_calls.append(query)
+            or ("stale workspace index",)
+        ),
+    )
+
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert (
+        result.proposed_plan.steps[0].primary_tool
+        == "list_files"
+    )
+    assert result.planning_rationale == "Execution mode: info."
+    assert retrieval_calls == []
+
+    assert all(
+        "stale workspace index" not in message.content
+        for message in provider.messages[0]
+    )
+
+
+def test_git_status_uses_authorized_live_discovery_without_ambient_rag():
+    proposal = {
+        "result": "PLAN_PROPOSED",
+        "objective": "Inspect git status",
+        "steps": [
+            {
+                "step_id": "status",
+                "title": "Inspect git status",
+                "description": "Read current status",
+                "primary_tool": "git_status",
+                "dependencies": [],
+            }
+        ],
+    }
+
+    provider = FakeProvider(proposal)
+
+    request = planner_input().model_copy(
+        update={
+            "context": ExecutionContext(
+                user_request="current git status",
+                role=WorkerRole.PLANNER,
+            ),
+            "capabilities": PlanningCapabilities(
+                available_tools=(
+                    "git_status",
+                    "rag_search",
+                ),
+            ),
+        }
+    )
+
+    retrieval_calls = []
+
+    result = service(
+        provider,
+        route="info",
+    ).run(
+        request,
+        retrieve=lambda query: (
+            retrieval_calls.append(query)
+            or ("stale git status",)
+        ),
+    )
+
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert (
+        result.proposed_plan.steps[0].primary_tool
+        == "git_status"
+    )
+    assert retrieval_calls == []
+
+
+def test_current_time_uses_authorized_live_discovery_without_ambient_rag():
+    proposal = {
+        "result": "PLAN_PROPOSED",
+        "objective": "Read current time",
+        "steps": [
+            {
+                "step_id": "time",
+                "title": "Read current time",
+                "description": "Read local time",
+                "primary_tool": "current_time",
+                "dependencies": [],
+            }
+        ],
+    }
+
+    provider = FakeProvider(proposal)
+
+    request = planner_input().model_copy(
+        update={
+            "context": ExecutionContext(
+                user_request="what time is it",
+                role=WorkerRole.PLANNER,
+            )
+        }
+    )
+
+    retrieval_calls = []
+
+    result = service(
+        provider,
+        route="info",
+    ).run(
+        request,
+        retrieve=lambda query: (
+            retrieval_calls.append(query)
+            or ("stale time",)
+        ),
+    )
+
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert (
+        result.proposed_plan.steps[0].primary_tool
+        == "current_time"
+    )
+    assert retrieval_calls == []
+
+
+def test_knowledge_request_and_uncertain_request_remain_ambient_rag_eligible():
+    cases = (
+        (
+            "inspect the CortexNode checkpoint architecture",
+            "info",
+        ),
+        (
+            "investigate the project behavior",
+            "action",
+        ),
+        (
+            "list files and explain the checkpoint architecture",
+            "info",
+        ),
+    )
+
+    for user_request, route in cases:
+        provider = FakeProvider(VALID)
+
+        request = planner_input().model_copy(
+            update={
+                "context": ExecutionContext(
+                    user_request=user_request,
+                    role=WorkerRole.PLANNER,
+                )
+            }
+        )
+
+        retrieval_calls = []
+
+        service(
+            provider,
+            route=route,
+        ).run(
+            request,
+            retrieve=lambda query: (
+                retrieval_calls.append(query)
+                or ("architecture context",)
+            ),
+        )
+
+        assert retrieval_calls == [user_request]
+        assert (
+            provider.messages[0][1].content
+            == "architecture context"
+        )
+
+
+def test_runtime_intent_without_matching_authorized_capability_keeps_retrieval():
+    request = planner_input().model_copy(
+        update={
+            "context": ExecutionContext(
+                user_request="git status",
+                role=WorkerRole.PLANNER,
+            ),
+            "capabilities": PlanningCapabilities(
+                available_tools=("rag_search",),
+            ),
+        }
+    )
+
+    assert (
+        ambient_retrieval_eligibility(
+            request,
+            route="info",
+        )
+        == AmbientRetrievalEligibility.KNOWLEDGE
+    )
+
+
+def test_revise_knowledge_request_remains_eligible_after_route_override():
+    base = ExecutionPlan(
+        plan_id="accepted",
+        revision=3,
+        steps=(
+            ExecutionStep(
+                step_id="prior",
+                title="Prior",
+                status=StepStatus.COMPLETED,
+            ),
+        ),
+    )
+
+    request = planner_input(
+        active_plan=base,
+    ).model_copy(
+        update={
+            "context": ExecutionContext(
+                user_request=(
+                    "inspect the CortexNode checkpoint architecture"
+                ),
+                role=WorkerRole.PLANNER,
+            )
+        }
+    )
+
+    provider = FakeProvider(VALID)
+    retrieval_calls = []
+
+    service(
+        provider,
+        route="conversation",
+    ).run(
+        request,
+        retrieve=lambda query: (
+            retrieval_calls.append(query)
+            or ("revision knowledge",)
+        ),
+    )
+
+    assert retrieval_calls == [
+        request.context.user_request
+    ]
+    assert (
+        provider.messages[0][1].content
+        == "revision knowledge"
+    )
+
+
+@pytest.mark.parametrize(
+    "route",
+    ["conversation", "clarify"],
+)
+def test_direct_routes_remain_ambient_rag_ineligible(route):
+    assert (
+        ambient_retrieval_eligibility(
+            planner_input(),
+            route=route,
+        )
+        == AmbientRetrievalEligibility.NONE
+    )
+
+
+def test_planner_prompt_states_ambient_knowledge_authority():
+    provider = FakeProvider()
+
+    service(provider).run(
+        planner_input(),
+        retrieve=lambda _: ("background",),
+    )
+
+    prompt = " ".join(
+        provider.messages[0][0].content.split()
+    )
+
+    assert (
+        "Retrieved knowledge is background planning context and may be stale"
+        in prompt
+    )
+    assert (
+        "must not replace live runtime discovery"
+        in prompt
+    )
+    assert "authorized runtime capability" in prompt
+
+
+def test_valid_independent_steps():
+    value = {
+        **VALID,
+        "steps": [
+            {
+                **VALID["steps"][0],
+            },
+            {
+                **VALID["steps"][1],
+                "dependencies": [],
+            },
+        ],
+    }
+
+    result = normalize_planner_proposal(
+        value,
+        planner_input(),
+        route="action",
+    )
+
+    assert [
+        step.depends_on_step_ids
+        for step in result.proposed_plan.steps
+    ] == [(), ()]
+
+
+@pytest.mark.parametrize(
+    "mutate,needle",
+    [
+        (
+            lambda value: value["steps"].__setitem__(
+                1,
+                {
+                    **value["steps"][1],
+                    "step_id": "inspect",
+                },
+            ),
+            "unique",
+        ),
+        (
+            lambda value: value["steps"][1].update(
+                dependencies=["missing"]
+            ),
+            "unknown dependency",
+        ),
+        (
+            lambda value: (
+                value["steps"][0].update(
+                    dependencies=["write"]
+                ),
+                value["steps"][1].update(
+                    dependencies=["inspect"]
+                ),
+            ),
+            "cyclic",
+        ),
+        (
+            lambda value: value["steps"][0].update(
+                primary_tool="blocked_tool"
+            ),
+            "unavailable",
+        ),
+        (
+            lambda value: value["steps"][0].update(
+                primary_tool="invented"
+            ),
+            "unknown",
+        ),
+        (
+            lambda value: value.update(
+                steps=[]
+            ),
+            "at least one",
+        ),
+    ],
+)
+def test_invalid_plan_constraints_rejected(
+    mutate,
+    needle,
+):
+    import copy
+
+    value = copy.deepcopy(VALID)
+    mutate(value)
+
+    result = normalize_planner_proposal(
+        value,
+        planner_input(),
+        route="action",
+    )
+
+    assert result.outcome == PlannerOutcome.FAILED
+    assert (
+        result.failure_category
+        == PlanningFailureCategory.INVALID_OUTPUT
+    )
+    assert needle in result.message
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "numbered prose",
+        {},
+        {
+            "result": "PLAN_PROPOSED",
+            "steps": [
+                {
+                    "step_id": "x",
+                }
+            ],
+        },
+    ],
+)
+def test_malformed_structured_output_is_invalid(content):
+    result = service(
+        FakeProvider(content)
+    ).run(
+        planner_input()
+    )
+
+    assert (
+        result.failure_category
+        == PlanningFailureCategory.INVALID_OUTPUT
+    )
+
+
+@pytest.mark.parametrize(
+    "step_update",
+    [
+        {"primary_tool": None},
+        {"primary_tool": ""},
+        {"primary_tool": "   "},
+    ],
+)
+def test_list_files_proposal_requires_non_empty_primary_tool(
+    step_update,
+):
+    step = {
+        "step_id": "list",
+        "title": "List files",
+        "description": "Invoke the list_files tool to list files",
+        "primary_tool": "list_files",
+        "dependencies": [],
+    }
+
+    step.update(step_update)
+
+    request = planner_input().model_copy(
+        update={
+            "context": ExecutionContext(
+                user_request="list files",
+                role=WorkerRole.PLANNER,
+            )
+        }
+    )
+
+    result = service(
+        FakeProvider(
+            {
+                "result": "PLAN_PROPOSED",
+                "objective": "List files",
+                "steps": [step],
+            }
+        ),
+        route="info",
+    ).run(request)
+
+    assert result.outcome == PlannerOutcome.FAILED
+    assert (
+        result.failure_category
+        == PlanningFailureCategory.INVALID_OUTPUT
+    )
+    assert result.proposed_plan is None
+
+
+def test_list_files_proposal_rejects_missing_primary_tool():
+    request = planner_input().model_copy(
+        update={
+            "context": ExecutionContext(
+                user_request="list files",
+                role=WorkerRole.PLANNER,
+            )
+        }
+    )
+
+    result = service(
+        FakeProvider(
+            {
+                "result": "PLAN_PROPOSED",
+                "objective": "List files",
+                "steps": [
+                    {
+                        "step_id": "list",
+                        "title": "List files",
+                        "description": (
+                            "Invoke the list_files tool"
+                        ),
+                        "dependencies": [],
+                    }
+                ],
+            }
+        ),
+        route="info",
+    ).run(request)
+
+    assert result.outcome == PlannerOutcome.FAILED
+    assert (
+        result.failure_category
+        == PlanningFailureCategory.INVALID_OUTPUT
+    )
+
+
+def test_unauthorized_primary_tool_is_deterministically_invalid():
+    value = {
+        **VALID,
+        "steps": [
+            {
+                **VALID["steps"][0],
+                "primary_tool": "invented",
+            }
+        ],
+    }
+
+    result = normalize_planner_proposal(
+        value,
+        planner_input(),
+        route="action",
+    )
+
+    assert result.outcome == PlannerOutcome.FAILED
+    assert (
+        result.failure_category
+        == PlanningFailureCategory.INVALID_OUTPUT
+    )
+    assert "unknown" in result.message
+
+
+def test_router_exception_is_provider_failure():
+    result = service(
+        FakeProvider(),
+        route_error=RuntimeError("router failed"),
+    ).run(
+        planner_input()
+    )
+
+    assert (
+        result.failure_category
+        == PlanningFailureCategory.PROVIDER_FAILURE
+    )
+
+
+def test_provider_exception_is_provider_failure():
+    result = service(
+        FakeProvider(
+            error_at="generate"
+        )
+    ).run(
+        planner_input()
+    )
+
+    assert (
+        result.failure_category
+        == PlanningFailureCategory.PROVIDER_FAILURE
+    )
+
+
+def test_provider_parse_failure_is_invalid_output():
+    result = service(
+        FakeProvider(
+            error_at="invalid"
+        )
+    ).run(
+        planner_input()
+    )
+
+    assert (
+        result.failure_category
+        == PlanningFailureCategory.INVALID_OUTPUT
+    )
+
+
+@pytest.mark.parametrize(
+    "payload,outcome",
+    [
+        (
+            {
+                "result": "NO_PLAN_REQUIRED",
+                "message": "direct",
+            },
+            PlannerOutcome.DIRECT_RESPONSE,
+        ),
+        (
+            {
+                "result": "NEEDS_INPUT",
+                "message": "need path",
+            },
+            PlannerOutcome.CLARIFICATION_REQUIRED,
+        ),
+        (
+            {
+                "result": "PLANNING_FAILED",
+                "failure_category": "UNPLANNABLE",
+                "message": "impossible",
+            },
+            PlannerOutcome.FAILED,
+        ),
+    ],
+)
+def test_explicit_result_variants(
+    payload,
+    outcome,
+):
+    result = service(
+        FakeProvider(payload),
+        route="conversation",
+    ).run(
+        planner_input()
+    )
+
+    assert result.outcome == outcome
+
+    if outcome == PlannerOutcome.FAILED:
+        assert (
+            result.failure_category
+            == PlanningFailureCategory.UNPLANNABLE
+        )
+
+
+def test_revise_preserves_request_and_versions_candidate():
+    base = ExecutionPlan(
+        plan_id="accepted",
+        revision=3,
+        steps=(
+            ExecutionStep(
+                step_id="done",
+                title="Done",
+                status=StepStatus.COMPLETED,
+            ),
+        ),
+    )
+
+    request = planner_input(
+        active_plan=base,
+        completed_step_ids=("done",),
+        completed_steps=base.steps,
+        retry=RetryMetadata(
+            step_id="failed",
+            retry_count=1,
+            max_retries=2,
+        ),
+    )
+
+    before = request.model_dump_json()
+    provider = FakeProvider()
+
+    result = service(provider).run(request)
+
+    assert request.model_dump_json() == before
+    assert (
+        result.proposed_plan.plan_id,
+        result.proposed_plan.revision,
+    ) == (
+        "accepted",
+        4,
+    )
+
+    context = provider.messages[0][-2].content
+
+    assert '"completed_step_ids": ["done"]' in context
+    assert '"base_revision": 3' in context
+
+
+def test_numbered_prose_has_no_compatibility_parser():
+    result = service(
+        FakeProvider(
+            "1. Inspect - Use `list_files`"
+        )
+    ).run(
+        planner_input()
+    )
+
+    assert result.outcome == PlannerOutcome.FAILED
+    assert (
+        result.failure_category
+        == PlanningFailureCategory.INVALID_OUTPUT
+    )
+
+
+def test_planner_results_are_bound_and_outcome_payloads_are_strict():
+    from pydantic import ValidationError
+
+    with pytest.raises(
+        ValidationError,
+        match="request_id",
+    ):
+        PlannerResult(
+            outcome=PlannerOutcome.DIRECT_RESPONSE
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match="requires a plan",
+    ):
+        PlannerResult(
+            outcome=PlannerOutcome.EXECUTION_PLAN,
+            request_id="request",
+        )
+
+    with pytest.raises(
+        ValidationError,
+        match="failure category",
+    ):
+        PlannerResult(
+            outcome=PlannerOutcome.FAILED,
+            request_id="request",
+        )
+
+
+def test_planning_request_requires_explicit_episode_identity():
+    from pydantic import ValidationError
+
+    with pytest.raises(
+        ValidationError,
+        match="episode_id",
+    ):
+        PlanningRequest(
+            request_id="request",
+            sequence=1,
+            created_at_utc=datetime(
+                2026,
+                1,
+                1,
+                tzinfo=timezone.utc,
+            ),
+            operation=PlanningOperation.CREATE,
+            capabilities=PlanningCapabilities(),
+            identity=ExecutionIdentity(
+                execution_id="p6",
+                protocol_version="1",
+            ),
+            context=ExecutionContext(
+                user_request="work",
+                role=WorkerRole.PLANNER,
+            ),
+        )
+
+
+def discovery_dependent_proposal():
     return {
-        **state,
-        "execution_state": apply_controller_decision_to_state(build_execution_state(state), decision),
-        "controller_decision": decision,
+        "result": "PLAN_PROPOSED",
+        "objective": "Discover and process resources",
+        "steps": [
+            {
+                "step_id": "discover",
+                "title": "Discover resources",
+                "description": (
+                    "Discover the resources to process"
+                ),
+                "primary_tool": "list_files",
+                "dependencies": [],
+            },
+            {
+                "step_id": "process",
+                "title": "Process discovered resources",
+                "description": (
+                    "Read each resource discovered "
+                    "by the dependency step"
+                ),
+                "primary_tool": "read_file",
+                "dependencies": ["discover"],
+            },
+        ],
     }
 
 
-class DummyPlannerLLM:
-    def __init__(self, text, *, route="action", domain="workspace", confidence=0.95):
-        self.text = text
-        self.routing = SimpleNamespace(route=route)
-        self.invocations = []
-        self.routes = []
+def test_discovery_dependent_plan_is_accepted():
+    result = service(
+        FakeProvider(
+            discovery_dependent_proposal()
+        )
+    ).run(
+        planner_input()
+    )
 
-    def with_structured_output(self, schema, method):
-        def invoke(messages):
-            if schema is PlannerProposal:
-                self.invocations.append(messages)
-                if isinstance(self.text, Exception):
-                    raise self.text
-                return self.text
-            self.routes.append(messages)
-            return self.routing
-        return SimpleNamespace(invoke=invoke)
-
-    def invoke(self, messages):
-        self.invocations.append(messages)
-        if isinstance(self.text, Exception):
-            raise self.text
-        return SimpleNamespace(content=self.text)
-
-
-class DummyRAG:
-    def __init__(self):
-        self.calls = []
-
-    def format_context(self, query, top_k):
-        self.calls.append((query, top_k))
-        return "retrieved context"
-
-
-def make_node(llm, rag):
-    node = create_planner_node(planner_llm=llm, router_llm=llm, rag_service=rag,
-                               rag_top_k=4, tools_set={"list_files", "write_file", "query_abap_table"})
-    return lambda state: node(authorize(state))
-
-
-def test_structured_plan_and_retrieval():
-    proposal = {"result":"PLAN_PROPOSED","objective":"create","steps":[
-        {"step_id":"inspect","title":"Inspect","description":"Inspect","primary_tool":"list_files","dependencies":[]},
-        {"step_id":"write","title":"Write","description":"Write","primary_tool":"write_file","dependencies":["inspect"]}]}
-    llm, rag = DummyPlannerLLM(proposal), DummyRAG()
-    state = {"messages": [HumanMessage(content="create a file")]}
-    update = make_node(llm, rag)(state)
-    result = update["planner_result"]
     assert result.outcome == PlannerOutcome.EXECUTION_PLAN
-    assert result.proposed_plan.objective == "create"
-    assert [s.primary_tool for s in result.proposed_plan.steps] == ["list_files", "write_file"]
-    assert result.proposed_plan.steps[1].depends_on_step_ids == ("inspect",)
-    assert rag.calls == [("create a file", 4)]
-    assert [m.content for m in update["retrieval_messages"]] == ["retrieved context"]
-    assert llm.invocations[0][1].content == "retrieved context"
-    assert set(update) == {"planner_result", "retrieval_messages"}
-    assert set(state) == {"messages"}
+    assert (
+        result.proposed_plan.steps[1].depends_on_step_ids
+        == ("discover",)
+    )
 
 
-def test_numbered_prose_is_invalid_output():
-    llm = DummyPlannerLLM("1. Inspect - Use list_files.")
-    result = make_node(llm, DummyRAG())({"messages": [HumanMessage(content="inspect")]})["planner_result"]
+def test_one_step_can_represent_repeated_primary_tool_invocations():
+    result = service(
+        FakeProvider(
+            discovery_dependent_proposal()
+        )
+    ).run(
+        planner_input()
+    )
+
+    processing = result.proposed_plan.steps[1]
+
+    assert processing.primary_tool == "read_file"
+    assert "each resource" in processing.description
+    assert len(result.proposed_plan.steps) == 2
+
+
+def test_prompt_defers_dynamic_arguments_and_batching_to_brain():
+    provider = FakeProvider(
+        discovery_dependent_proposal()
+    )
+
+    result = service(provider).run(
+        planner_input()
+    )
+
+    prompt = provider.messages[0][0].content
+
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert (
+        "A logical step may invoke its primary tool repeatedly"
+        in prompt
+    )
+    assert (
+        "Arguments may come from dependency evidence"
+        in prompt
+    )
+    assert (
+        "Runtime-discoverable arguments or item identities are not grounds"
+        in prompt
+    )
+    assert "tool arguments" not in ProposedStep.model_fields
+
+
+def test_core_prompt_prefers_direct_tool_and_keeps_reasoning_in_brain():
+    provider = FakeProvider(
+        {
+            "result": "PLAN_PROPOSED",
+            "objective": "List files",
+            "steps": [
+                {
+                    "step_id": "list",
+                    "title": "List files",
+                    "description": "List files directly",
+                    "primary_tool": "list_files",
+                    "dependencies": [],
+                }
+            ],
+        }
+    )
+
+    request = planner_input().model_copy(
+        update={
+            "context": ExecutionContext(
+                user_request="list files",
+                role=WorkerRole.PLANNER,
+            )
+        }
+    )
+
+    result = service(
+        provider,
+        route="info",
+    ).run(request)
+
+    prompt = provider.messages[0][0].content
+
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert len(result.proposed_plan.steps) == 1
+    assert "Prefer one direct tool" in prompt
+    assert (
+        "summarization, and transformation over tool results belong to Brain"
+        in prompt
+    )
+
+
+def test_comfy_guidance_uses_action_route_and_authorized_capability_only():
+    capabilities = PlanningCapabilities(
+        available_tools=(
+            "list_files",
+            "run_comfy_workflow",
+            "get_comfy_history",
+            "download_comfy_output_image",
+        )
+    )
+
+    ordinary = FakeProvider()
+
+    ordinary_request = planner_input().model_copy(
+        update={
+            "capabilities": capabilities,
+            "context": ExecutionContext(
+                user_request="Generate a cat image and save it.",
+                role=WorkerRole.PLANNER,
+            ),
+        }
+    )
+
+    service(
+        ordinary,
+        route="info",
+    ).run(
+        ordinary_request
+    )
+
+    assert (
+        "CAPABILITY-SPECIFIC GUIDANCE"
+        not in ordinary.messages[0][0].content
+    )
+
+    image = FakeProvider()
+
+    image_request = planner_input().model_copy(
+        update={
+            "capabilities": capabilities,
+            "context": ExecutionContext(
+                user_request="Generate a cat image and save it.",
+                role=WorkerRole.PLANNER,
+            ),
+        }
+    )
+
+    service(
+        image,
+        route="action",
+    ).run(
+        image_request
+    )
+
+    prompt = image.messages[0][0].content
+
+    assert (
+        "CAPABILITY-SPECIFIC GUIDANCE — COMFYUI GENERATION"
+        in prompt
+    )
+    assert "run_comfy_workflow" in prompt
+
+    fragment = prompt.split(
+        "CAPABILITY-SPECIFIC GUIDANCE — COMFYUI GENERATION:",
+        1,
+    )[1]
+
+    submission = fragment.index(
+        "run_comfy_workflow"
+    )
+    history = fragment.index(
+        "get_comfy_history",
+        submission,
+    )
+    download = fragment.index(
+        "download_comfy_output_image",
+        history,
+    )
+
+    assert submission < history < download
+
+    unrelated_action = FakeProvider()
+
+    unrelated_request = planner_input().model_copy(
+        update={
+            "capabilities": capabilities,
+            "context": ExecutionContext(
+                user_request="perform the authorized action",
+                role=WorkerRole.PLANNER,
+            ),
+        }
+    )
+
+    service(
+        unrelated_action,
+        route="action",
+    ).run(
+        unrelated_request
+    )
+
+    assert (
+        "CAPABILITY-SPECIFIC GUIDANCE — COMFYUI GENERATION"
+        in unrelated_action.messages[0][0].content
+    )
+
+
+def test_genuinely_missing_capability_can_remain_unplannable():
+    proposal = {
+        "result": "PLANNING_FAILED",
+        "failure_category": "UNPLANNABLE",
+        "message": "A required capability is unavailable.",
+    }
+
+    result = service(
+        FakeProvider(proposal)
+    ).run(
+        planner_input()
+    )
+
     assert result.outcome == PlannerOutcome.FAILED
+    assert (
+        result.failure_category
+        == PlanningFailureCategory.UNPLANNABLE
+    )
 
 
-@pytest.mark.parametrize("route", ["conversation", "clarify"])
-def test_direct_routes_require_explicit_structured_result(route):
-    llm, rag = DummyPlannerLLM({"result":"NO_PLAN_REQUIRED","message":"direct"}, route=route), DummyRAG()
-    update = make_node(llm, rag)({"messages": [HumanMessage(content="hello")]})
-    assert update["planner_result"].outcome == PlannerOutcome.DIRECT_RESPONSE
-    assert update["retrieval_messages"] == []
-    assert len(llm.invocations) == 1
-    assert rag.calls == []
+def test_info_filter_removes_mutating_tools_without_mutating_inputs():
+    tools = {
+        "custom",
+        "write_file",
+    }
+    mutating = {
+        "write_file",
+    }
+
+    assert filter_planner_tools(
+        tools,
+        route="info",
+        mutating_tools=mutating,
+    ) == {
+        "custom",
+    }
+
+    assert tools == {
+        "custom",
+        "write_file",
+    }
 
 
-@pytest.mark.parametrize("route,has_write", [("info", False), ("action", True)])
-def test_current_tool_filtering(route, has_write):
-    llm = DummyPlannerLLM({"result":"PLAN_PROPOSED","steps":[{"step_id":"inspect","title":"Inspect","description":"Inspect","primary_tool":"list_files","dependencies":[]}]}, route=route)
-    make_node(llm, DummyRAG())({"messages": [HumanMessage(content="inspect")]})
-    prompt = llm.invocations[0][0].content
-    tools = prompt.split("AVAILABLE TOOLS FOR THIS REQUEST", 1)[1].split("PLANNING RULES:", 1)[0]
-    assert "- list_files" in tools
-    assert ("- write_file" in tools) == has_write
-    assert "- query_abap_table" in tools
-    assert all(f"- {tool}" in tools for tool in ("agent_info", "token_usage", "current_time"))
+def test_service_runs_with_framework_imports_blocked():
+    script = '''
+import importlib.abc
+import sys
+
+sys.path.insert(0, "tests")
 
 
-def test_router_route_is_not_subject_to_confidence_fallback():
-    proposal = {"result":"PLAN_PROPOSED","steps":[
-        {"step_id":"inspect","title":"Inspect","description":"Inspect",
-         "primary_tool":"list_files","dependencies":[]}]}
-    llm, rag = DummyPlannerLLM(proposal, route="info", confidence=0.5), DummyRAG()
-    result = make_node(llm, rag)({"messages": [HumanMessage(content="inspect")]})["planner_result"]
-    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
-    assert len(llm.invocations) == 1
+class Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.startswith((
+            "langchain",
+            "langgraph",
+            "ollama",
+            "core.graph",
+            "core.planner_provider",
+            "core.planner_routing",
+        )):
+            raise AssertionError(fullname)
 
 
-def execution_state():
-    return ExecutionState(protocol_visible=ProtocolVisibleState(
-        identity=ExecutionIdentity(execution_id="p1-adapter", protocol_version="1"),
-        cursor=ExecutionCursor(),
-    ))
+sys.meta_path.insert(0, Block())
 
+from test_planner import FakeProvider, planner_input, service
+from core.protocol.enums import PlannerOutcome
 
-def test_adapter_delegates_and_preserves_execution_state():
-    calls = []
-    class FakeService:
-        def run(self, planner_input, *, retrieve):
-            calls.append(planner_input)
-            assert retrieve(planner_input.context.user_request) == ("retrieved context",)
-            return PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE,
-                                 request_id=planner_input.request_id, message="fake result")
-    state = {"execution_state": execution_state(), "messages": [HumanMessage(content="hello")]}
-    before = state["execution_state"].model_dump(mode="json")
-    node = create_planner_node(planner_service=FakeService(), rag_service=DummyRAG(),
-                               rag_top_k=4, tools_set=set())
-    update = node(authorize(state))
-    assert update["planner_result"].message == "fake result"
-    assert len(calls) == 1
-    assert calls[0].identity == state["execution_state"].protocol_visible.identity
-    assert set(update) == {"planner_result", "retrieval_messages"}
-    assert state["execution_state"].model_dump(mode="json") == before
+assert (
+    service(FakeProvider())
+    .run(planner_input())
+    .outcome
+    == PlannerOutcome.EXECUTION_PLAN
+)
+'''
 
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            "-c",
+            script,
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env={
+            **os.environ,
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        capture_output=True,
+        text=True,
+    )
 
-@pytest.mark.parametrize("content", ["", "completely malformed", RuntimeError("offline")])
-def test_failure_reaches_existing_controller_path(content):
-    from core.graph_controller import create_controller_node
-    from core.protocol.enums import ExecutionStatus
-    state = {"execution_state": execution_state(), "messages": [HumanMessage(content="inspect")]}
-    before = state["execution_state"].model_dump(mode="json")
-    llm = DummyPlannerLLM(content)
-    authorized = authorize(state)
-    node = create_planner_node(planner_llm=llm, router_llm=llm, rag_service=DummyRAG(),
-                               rag_top_k=4, tools_set={"list_files", "write_file", "query_abap_table"})
-    update = node(authorized)
-    assert update["planner_result"].outcome == PlannerOutcome.FAILED
-    assert state["execution_state"].model_dump(mode="json") == before
-    applied = create_controller_node()({**authorized, **update})
-    assert applied["controller_decision"].decision_type.value == "dispatch_planner"
-    assert applied["execution_state"].protocol_visible.status == ExecutionStatus.NON_TERMINAL
-    assert applied["execution_state"].protocol_visible.planning_request.attempt == 2
-    assert applied["planner_result"] is None
-    assert len(llm.invocations) == 1
-
-
-def test_router_provider_exception_is_failed_not_direct_response():
-    class BrokenRouter(DummyPlannerLLM):
-        def with_structured_output(self, schema, method):
-            raise RuntimeError("router offline")
-    llm, rag = BrokenRouter("unused"), DummyRAG()
-    update = make_node(llm, rag)({"messages": [HumanMessage(content="inspect")]})
-    assert update["planner_result"].outcome == PlannerOutcome.FAILED
-    assert update["planner_result"].message == "Planner provider failed (RuntimeError)."
-    assert llm.invocations == []
-    assert rag.calls == []
-
-
-def test_missing_router_retains_direct_fallback():
-    llm, rag = DummyPlannerLLM({"result":"NO_PLAN_REQUIRED"}), DummyRAG()
-    node = create_planner_node(planner_llm=llm, rag_service=rag, rag_top_k=4, tools_set=set())
-    assert node(authorize({"messages": [HumanMessage(content="inspect")]}))["planner_result"].outcome == PlannerOutcome.DIRECT_RESPONSE
-    assert len(llm.invocations) == 1
-
-
-def test_retrieval_is_per_invocation_not_shared_service_state():
-    llm, rag = DummyPlannerLLM({"result":"PLAN_PROPOSED","steps":[{"step_id":"inspect","title":"Inspect","description":"Inspect","primary_tool":"list_files","dependencies":[]}]}), DummyRAG()
-    node = make_node(llm, rag)
-    first = node({"messages": [HumanMessage(content="first")]})
-    llm.routing.route = "conversation"
-    second = node({"messages": [HumanMessage(content="second")]})
-    assert len(first["retrieval_messages"]) == 1
-    assert second["retrieval_messages"] == []
-    assert rag.calls == [("first", 4)]
+    assert (
+        completed.returncode == 0
+    ), completed.stdout + completed.stderr

@@ -11,9 +11,10 @@ from core.memory import (
     MemorySource, OpenQuestion, QuestionStatus, SourceKind, TurnStatus,
 )
 from core.planner import planning_request_context
-from core.planner import PlannerRouting, PlannerService
+from core.planner import PlannerService
 from core.planner_contract import PlannerProposal, PlannerProposalResultType
 from core.planner_memory import PlannerMemoryLimits, project_planner_memory
+from core.planner_routing import RoutingDecision
 from core.protocol.bridge import build_brain_input, build_controller_input
 from core.protocol.enums import (
     ExecutionPhase, PlannerOutcome, PlanningOperation, ReplanTrigger, WorkerRole,
@@ -220,15 +221,19 @@ def test_current_request_and_memory_use_one_existing_planner_generation(route):
         }),
     })
 
+    class FakePlannerRouter:
+        def __init__(self, route: str = "action"):
+            self.route_value = route
+
+        def route(self, user_request: str):
+            return RoutingDecision(route=self.route_value)
+        
+
     class Provider:
         routes = 0
         generations = 0
         messages = None
 
-        def route(self, user_request):
-            self.routes += 1
-            assert user_request == "Use long answers instead"
-            return PlannerRouting(route)
 
         def generate(self, messages):
             self.generations += 1
@@ -236,9 +241,7 @@ def test_current_request_and_memory_use_one_existing_planner_generation(route):
             return PlannerProposal(result=PlannerProposalResultType.NO_PLAN_REQUIRED)
 
     provider = Provider()
-    service = PlannerService(provider=provider, tools_set={"list_files"},
-                             domain_tool_map={}, mutating_tools=set(),
-                             system_capabilities_text="")
+    service = PlannerService(provider=provider, router=FakePlannerRouter(), mutating_tools=set())
     service.run(worker_request)
     assert provider.routes == provider.generations == 1
     assert provider.messages[-1].role == "human"

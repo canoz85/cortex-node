@@ -70,7 +70,7 @@ def test_adapter_flag_router_and_model_parity(capsys, route, confidence):
         assert bool(output) == enabled
         if enabled:
             assert "[planner:router][structured]" in output
-            assert '"selected"' in output
+            assert '"route": "action"' in output
         assert len(llm.routes) == 1
         assert len(llm.invocations) == 1
     assert results[0] == results[1]

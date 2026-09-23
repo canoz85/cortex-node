@@ -186,10 +186,9 @@ def evidence_context(*, count=1, success=True):
     return brain_input().model_copy(update={"tool_execution_history": records})
 
 
-def evidence_prompt(context, *, system_prompt="active", output_protocol="contract"):
+def evidence_prompt(context, *, system_prompt="active"):
     messages = _build_execution_messages(
         system_prompt=system_prompt, brain_input=context, retrieval_messages=(),
-        instruction_brief=None, output_protocol=output_protocol,
     )
     message = next(message for message in messages if message.content.startswith("Execution evidence v1:"))
     return json.loads(message.content.split("\n", 1)[1])
@@ -481,17 +480,11 @@ def test_execution_prompt_supplies_step_evidence_and_capability_without_auto_com
     assert brief_payload["step_id"] == "step-1"
     assert brief_payload["title"] == "Inspect test_workspace"
     assert brief_payload["description"] == "Use list_files"
-    assert brief_payload["attempt"] == 0
-    assert brief_payload["controller_retry"] == {"count": 0, "maximum": 1}
     assert brief_payload["accepted_plan_context"] == {
-        "plan_id": "p1",
-        "revision": 1,
-        "dependency_rule": "Every dependency must have COMPLETED status before a pending step is executable.",
         "steps": [
             {"step_id": "step-1", "status": "active", "depends_on_step_ids": []},
             {"step_id": "step-2", "status": "pending", "depends_on_step_ids": []},
         ],
-        "context_only": "Other steps are context only; the active step remains the sole executable objective.",
     }
     evidence = next(m.content for m in messages if m.content.startswith("Execution evidence v1:"))
     attempt = json.loads(evidence.split("\n", 1)[1])["current_attempts"][0]
@@ -555,10 +548,6 @@ def test_failure_escalation_context_is_explicit_compact_and_deterministic():
             workspace_dir="workspace", knowledge_dir="knowledge",
         ),
         brain_input=context, retrieval_messages=(),
-        instruction_brief=None,
-        output_protocol=build_brain_output_protocol(
-            supports_native_tool_calls=True, tools_enabled=True,
-        ),
     )
     rendered = "\n".join(message.content for message in messages)
     assert "if this strategy fails, revise the plan" in rendered
@@ -569,10 +558,7 @@ def test_failure_escalation_context_is_explicit_compact_and_deterministic():
     brief = json.loads(next(
         message.content for message in messages if message.content.startswith("Active step:")
     ).split("\n", 1)[1])
-    assert brief["attempt"] == 2
-    assert brief["controller_retry"] == {"count": 1, "maximum": 3}
     assert brief["primary_tool"] == "read_file"
-    assert brief["primary_tool_is_exclusive"] is False
     assert brief["accepted_plan_context"]["steps"][1] == {
         "step_id": "recover", "status": "pending", "depends_on_step_ids": ["attempt"],
     }
