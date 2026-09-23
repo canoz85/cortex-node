@@ -9,12 +9,11 @@ from core.graph_authorization import require_brain_authorization
 from core.protocol.bridge import build_brain_input, with_cursor
 from core.protocol.enums import WorkerRole
 from core.state import AgentState
-# from core.runtime.execution_driver import WorkerDispatchError
 
 
 def create_brain_node(
-    *, brain_llm, tool_brain_llm, agent_system_prompt: str,
-    casual_system_prompt: str, tools_set: set[str], show_raw_llm: bool,
+    *, brain_llm, executable_tools, agent_system_prompt: str,
+    casual_system_prompt: str,  show_raw_llm: bool,
     brain_service: BrainService | None = None,
     supports_native_tool_calls: bool = True,
 ):
@@ -22,8 +21,8 @@ def create_brain_node(
     # accepted runtime uses the active-step prompt to assess cumulative evidence.
     service = brain_service or BrainService(
         provider=LangChainBrainProvider(
-            brain_llm=brain_llm, tool_brain_llm=tool_brain_llm,
-            tools_set=tools_set, show_raw_llm=show_raw_llm,
+            brain_llm=brain_llm, executable_tools=executable_tools,
+            show_raw_llm=show_raw_llm,
             supports_native_tool_calls=supports_native_tool_calls,
         ),
         agent_system_prompt=agent_system_prompt,

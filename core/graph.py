@@ -13,7 +13,7 @@ from langgraph.prebuilt import ToolNode
 from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE
 from core.graph_authorization import require_tool_authorization
 from core.graph_nodes import create_graph_nodes
-from core.brain_provider import native_brain_tools, text_tool_definitions
+from core.brain_provider import text_tool_definitions
 from core.graph_routing import  route_after_controller
 from core.graph_worker_runtime import GraphWorkerRuntimePorts
 from core.graph_runner import run_prompt
@@ -305,9 +305,6 @@ def build_app(
 
     planner_llm = chat_model_factory(model_planner, 0)
     brain_llm = chat_model_factory(model, 0)
-    tool_brain_llm = chat_model_factory(model, 0)
-    if supports_native_tool_calls:
-        tool_brain_llm = tool_brain_llm.bind_tools(native_brain_tools(tools))
 
     direct_tool_runtime = (
         SerializedToolRuntimePort(tools, require_structured=False)
@@ -317,7 +314,7 @@ def build_app(
     worker_ports = GraphWorkerRuntimePorts(tool_runtime=direct_tool_runtime)
     controller_node, planner_node, brain_node, capture_tool_output_node, summarize_memory_node = graph_nodes_factory(
         brain_llm=brain_llm,
-        tool_brain_llm=tool_brain_llm,
+        executable_tools=tools,
         planner_llm=planner_llm,
         rag_service=rag_service,
         rag_top_k=rag_top_k,

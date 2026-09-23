@@ -16,6 +16,34 @@ from core.debug import save_raw_llm
 
 logger = logging.getLogger(__name__)
 
+def _ensure_native_call(
+    *,
+    llm,
+    provider_messages,
+    raw,
+):
+    _log_native_call_attempt(raw, 1)
+
+    if getattr(raw, "tool_calls", None):
+        return raw
+
+    corrected = llm.invoke([
+        *provider_messages,
+        *([AIMessage(content=raw.content)] if isinstance(raw, AIMessage) else []),
+        SystemMessage(content=(
+            "The previous response was invalid because it did not contain a native tool call. "
+            "Do not write function-call syntax as text. Return exactly one native tool call. "
+            "Use one of the currently bound executable or lifecycle tools. "
+            "Lifecycle actions returned in content are text, not native calls. "
+            "If reporting a lifecycle outcome, invoke brain_step_completed, "
+            "brain_step_failed, or brain_replan_requested through the native tool channel "
+            "with its required arguments and leave content empty. "
+            "Keep the same active-step decision; correct only the response protocol."
+        )),
+    ])
+
+    _log_native_call_attempt(corrected, 2)
+    return corrected
 
 def _log_native_call_attempt(raw, attempt: int) -> None:
     calls = getattr(raw, "tool_calls", None)
@@ -49,15 +77,21 @@ def _summarize_response(raw) -> dict:
 
 def _log_brain_exchange(
     *,
-    messages: tuple[BrainMessage, ...],
+    messages,
     raw,
     execution_id: str,
     show_raw_llm: bool,
 ) -> None:
     for message in messages:
+        role = (
+            "human"
+            if isinstance(message, HumanMessage)
+            else "system"
+        )
+
         save_raw_llm(
             "brain",
-            f"message:{message.role}",
+            f"message:{role}",
             message.content,
             execution_id=execution_id,
         )
@@ -73,7 +107,12 @@ def _log_brain_exchange(
         return
 
     for message in messages:
-        print(f"[raw-llm][{message.role}]\n{message.content}")
+        role = (
+            "human"
+            if isinstance(message, HumanMessage)
+            else "system"
+        )
+        print(f"[raw-llm][{role}]\n{message.content}")
 
     print(f"[raw-llm][response]\n{raw}")
 
@@ -160,15 +199,68 @@ def text_tool_definitions(tools) -> str:
         ensure_ascii=True,
     )
 
+def _resolve_authorized_tools(
+    brain_input: BrainInput,
+    executable_tools: dict[str, object],
+) -> tuple[set[str], list]:
+    authorized_names = set(
+        brain_input.active_plan.available_tools or ()
+        if brain_input.active_plan is not None
+        else ()
+    )
+
+    authorized_tools = [
+        tool
+        for name, tool in executable_tools.items()
+        if name in authorized_names
+    ]
+
+    return authorized_names, authorized_tools
+
+def _limit_visible_tools(messages, authorized_tools, *, native: bool):
+    """Replace the construction-time tool catalog with this plan's authorization."""
+    limited = []
+    for message in messages:
+        content = message.content
+        if isinstance(message, SystemMessage) and content.startswith("AVAILABLE TOOLS:\n"):
+            visible = (
+                "\n".join(f"- {tool.name}" for tool in authorized_tools)
+                if native else text_tool_definitions(authorized_tools)
+            )
+            _, separator, environment = content.partition("\nENVIRONMENT:\n")
+            content = f"AVAILABLE TOOLS:\n{visible}\n"
+            if separator:
+                content += separator + environment
+            message = SystemMessage(content=content)
+        limited.append(message)
+    return limited
+
+def _to_provider_messages(
+    messages: tuple[BrainMessage, ...],
+) -> list:
+    provider_messages = []
+
+    for message in messages:
+        if message.role == "human":
+            provider_messages.append(HumanMessage(content=message.content))
+        elif message.role == "system":
+            provider_messages.append(SystemMessage(content=message.content))
+        else:
+            raise ValueError(f"Unsupported Brain message role: {message.role}")
+
+    return provider_messages
+
 
 class LangChainBrainProvider:
     def __init__(
-        self, *, brain_llm, tool_brain_llm, tools_set: set[str],
+        self, *, brain_llm, executable_tools,
         show_raw_llm: bool = False, supports_native_tool_calls: bool = True,
     ):
         self.brain_llm = brain_llm
-        self.tool_brain_llm = tool_brain_llm
-        self.tools_set = set(tools_set)
+        self.executable_tools = {
+            tool.name: tool for tool in executable_tools
+            if isinstance(getattr(tool, "name", None), str) and tool.name
+        }
         self.show_raw_llm = show_raw_llm
         self.supports_native_tool_calls = supports_native_tool_calls
 
@@ -176,36 +268,27 @@ class LangChainBrainProvider:
         self, brain_input: BrainInput, messages: tuple[BrainMessage, ...], *, tools_enabled: bool,
     ) -> BrainOutcome:
 
+        authorized_tool_names, authorized_tools = _resolve_authorized_tools(
+            brain_input, self.executable_tools
+        )
         native_tools_enabled = tools_enabled and self.supports_native_tool_calls
         
-        provider_messages = [
-            HumanMessage(content=message.content) if message.role == "human"
-            else SystemMessage(content=message.content)
-            for message in messages
-        ]
-        llm = self.tool_brain_llm if tools_enabled else self.brain_llm
+        provider_messages = _to_provider_messages(messages)
         try:
+            if tools_enabled:
+                provider_messages = _limit_visible_tools(
+                    provider_messages, authorized_tools,
+                    native=self.supports_native_tool_calls,
+                )
+            llm = (
+                self.brain_llm.bind_tools(native_brain_tools(authorized_tools))
+                if native_tools_enabled else self.brain_llm
+            )
             raw = llm.invoke(provider_messages)
             if native_tools_enabled:
-                _log_native_call_attempt(raw, 1)
-            if native_tools_enabled and not getattr(raw, "tool_calls", None):
-                raw = llm.invoke([
-                    *provider_messages,
-                    # Show the rejected response so this is a protocol correction,
-                    # not a fresh task invocation. Never interpret its content.
-                    *([AIMessage(content=raw.content)] if isinstance(raw, AIMessage) else []),
-                    SystemMessage(content=(
-                        "The previous response was invalid because it did not contain a native tool call. "
-                        "Do not write function-call syntax as text. Return exactly one native tool call. "
-                        "Use one of the currently bound executable or lifecycle tools."
-                        " Lifecycle actions returned in content are text, not native calls. "
-                        "If reporting a lifecycle outcome, invoke brain_step_completed, "
-                        "brain_step_failed, or brain_replan_requested through the native tool channel "
-                        "with its required arguments and leave content empty. "
-                        "Keep the same active-step decision; correct only the response protocol."
-                    )),
-                ])
-                _log_native_call_attempt(raw, 2)
+                raw = _ensure_native_call(
+                    llm=llm, provider_messages=provider_messages, raw=raw,
+                )
         except Exception as exc:
             # Provider/structured-output errors are values at the service boundary.
             # Exception retries remain a Controller decision.
@@ -217,14 +300,14 @@ class LangChainBrainProvider:
             )
 
         _log_brain_exchange(
-            messages=messages,
+            messages=provider_messages,
             raw=raw,
             execution_id=brain_input.identity.execution_id,
             show_raw_llm=self.show_raw_llm,
         )
 
         outcome = normalize_brain_output(
-            raw, brain_input, self.tools_set,
+            raw, brain_input, set(self.executable_tools) & authorized_tool_names,
             allow_text_tool_calls=not self.supports_native_tool_calls,
         )
         return outcome.model_copy(update={"usage": normalize_brain_usage(raw)})

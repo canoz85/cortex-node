@@ -1,6 +1,7 @@
 """Message authority at the real Brain service/provider boundary."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -23,13 +24,17 @@ class Model:
         self.calls.append(messages)
         return self.reply(messages) if callable(self.reply) else self.reply
 
+    def bind_tools(self, tools):
+        self.bound_tools = list(tools)
+        return self
+
 
 def setup():
     model = Model()
     service = BrainService(
         provider=LangChainBrainProvider(
-            brain_llm=model, tool_brain_llm=model,
-            tools_set={"list_files", "read_file"},
+            brain_llm=model,
+            executable_tools=[SimpleNamespace(name="list_files"), SimpleNamespace(name="read_file")],
         ),
         agent_system_prompt="Execute the active step",
         casual_system_prompt="Converse",
@@ -42,7 +47,10 @@ def setup():
         identity=ExecutionIdentity(execution_id="authority", protocol_version="1.0"),
         cursor=ExecutionCursor(step_id="s1"),
         context=ExecutionContext(user_request="List files and read only Python files starting with c"),
-        active_plan=ExecutionPlan(plan_id="p1", objective="Full objective", steps=steps),
+        active_plan=ExecutionPlan(
+            plan_id="p1", objective="Full objective", steps=steps,
+            available_tools=("list_files", "read_file"),
+        ),
         active_step=steps[0],
     )
     return service, model, context
@@ -153,7 +161,7 @@ def test_satisfied_step_completes_with_current_evidence_and_later_tools_still_av
     assert outcome.kind == BrainOutcomeKind.STEP_COMPLETED
     assert outcome.completion_evidence.tool_request_ids == ()
     assert outcome.tool_request is None
-    assert service.provider.tools_set == {"list_files", "read_file"}
+    assert set(service.provider.executable_tools) == {"list_files", "read_file"}
 
 
 def test_successful_read_is_grounded_before_brain_can_repeat_the_same_call():

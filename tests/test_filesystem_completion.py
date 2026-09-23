@@ -329,7 +329,7 @@ def test_composition_registers_versioned_provider(monkeypatch):
                  "create_summarize_memory_node", "create_brain_node"):
         monkeypatch.setattr(graph_nodes, name, Mock())
     graph_nodes.create_graph_nodes(
-        brain_llm=None, tool_brain_llm=None, planner_llm=None, rag_service=None,
+        brain_llm=None, executable_tools=[], planner_llm=None, rag_service=None,
         rag_top_k=0, agent_system_prompt="",
         casual_system_prompt="", sap_system_prompt=None,
         tools_set=set(), show_raw_llm=False,

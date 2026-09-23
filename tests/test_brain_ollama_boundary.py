@@ -7,7 +7,7 @@ from langchain_ollama import ChatOllama
 from ollama._types import ChatRequest
 
 from core.brain import BrainMessage, BrainService, build_brain_output_protocol
-from core.brain_provider import LangChainBrainProvider, native_brain_tools, LIFECYCLE_ACTION_SCHEMAS
+from core.brain_provider import LangChainBrainProvider, LIFECYCLE_ACTION_SCHEMAS
 from core.protocol.enums import BrainOutcomeKind as Kind
 from tools.git_ops import get_git_tools
 from test_brain_outcomes import brain_input
@@ -22,9 +22,18 @@ def boundary(replies):
         return iter([{"message": {"role": "assistant", **next(replies)}, "done": True}])
     llm = ChatOllama(model="gemma4:26b", temperature=0)
     llm._client = SimpleNamespace(chat=chat)
-    bound = llm.bind_tools(native_brain_tools(get_git_tools(".")))
-    return LangChainBrainProvider(brain_llm=llm, tool_brain_llm=bound,
-                                 tools_set={"git_status", "git_diff", "git_log", "git_show"}), requests
+    return LangChainBrainProvider(
+        brain_llm=llm, executable_tools=get_git_tools("."),
+    ), requests
+
+
+def git_brain_input():
+    context = brain_input()
+    return context.model_copy(update={
+        "active_plan": context.active_plan.model_copy(update={
+            "available_tools": ("git_status", "git_diff", "git_log", "git_show"),
+        }),
+    })
 
 
 def native(name, args):
@@ -43,7 +52,7 @@ def test_native_actions_survive_real_ollama_boundary(name, args, kind, retry):
                if retry else []) + [native(name, args)]
     provider, requests = boundary(replies)
     protocol = build_brain_output_protocol(supports_native_tool_calls=True, tools_enabled=True)
-    outcome = provider.generate(brain_input(), (BrainMessage("system", protocol),), tools_enabled=True)
+    outcome = provider.generate(git_brain_input(), (BrainMessage("system", protocol),), tools_enabled=True)
     assert outcome.kind == kind
     assert len(requests) == (2 if retry else 1)
     for request in requests:
@@ -69,7 +78,7 @@ def test_native_actions_survive_real_ollama_boundary(name, args, kind, retry):
 
 def test_exhausted_textual_pseudo_calls_are_typed_failure():
     provider, requests = boundary([{"content": 'brain_step_completed{"message":"Done"}'}] * 2)
-    outcome = provider.generate(brain_input(), (), tools_enabled=True)
+    outcome = provider.generate(git_brain_input(), (), tools_enabled=True)
     assert outcome.kind == Kind.INVALID_OUTPUT
     assert outcome.error_code == "expected_structured_outcome"
     assert len(requests) == 2
@@ -87,7 +96,7 @@ def test_native_protocol_does_not_ask_for_textual_outcome_object():
 
 def test_active_task_is_last_user_turn_at_ollama_boundary_without_filtering_tools():
     provider, requests = boundary([native("git_status", {})])
-    context = brain_input()
+    context = git_brain_input()
     context = context.model_copy(update={
         "active_step": context.active_step.model_copy(update={
             "title": "Inspect status", "description": "Inspect repository status", "primary_tool": "git_status",

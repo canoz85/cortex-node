@@ -134,12 +134,10 @@ def test_build_app_uses_injected_factories(tmp_path):
     assert graph_nodes_kwargs["rag_top_k"] == 7
     assert graph_nodes_kwargs["tools_set"] == {"list_files"}
 
-    llm = graph_nodes_kwargs["tool_brain_llm"]
     brain_llm = graph_nodes_kwargs["brain_llm"]
     planner_llm = graph_nodes_kwargs["planner_llm"]
-    assert llm["kind"] == "bound"
-    assert llm["model"] == "test-model"
     assert brain_llm.model == "test-model"
+    assert graph_nodes_kwargs["executable_tools"][0].name == "list_files"
     assert planner_llm.model == "planner-model"
 
     tool_node_tools = call_log["tool_node_tools"]

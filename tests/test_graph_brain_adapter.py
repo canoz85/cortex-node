@@ -22,7 +22,7 @@ from core.protocol.bridge import (
 from core.protocol.enums import BrainOutcomeKind as Kind, ControllerDecisionType, ExecutionPhase, ExecutionStatus, PlannerOutcome, StepStatus, WorkerRole
 from core.protocol.models import (
     BrainOutcome, BrainUsage, ControllerDecision, ExecutionCursor, ExecutionIdentity, ExecutionPlan,
-    ExecutionState, ExecutionStep, PlannerResult, ProtocolVisibleState,
+    ExecutionState, ExecutionStep, PlannerResult, PlanningCapabilities, ProtocolVisibleState,
     RetryMetadata, StepCompletionEvidence, ToolRequest, ToolResult, WorkingState,
 )
 
@@ -50,7 +50,7 @@ def authorize_brain(state):
 
 def node(**kwargs):
     return create_brain_node(
-        brain_llm=None, tool_brain_llm=None, agent_system_prompt="active",
+        brain_llm=None, executable_tools=[], agent_system_prompt="active",
         casual_system_prompt="casual", tools_set={"read_file"},
         show_raw_llm=False, **kwargs,
     )
@@ -166,6 +166,7 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
         controller = create_controller_node(
             finalizer=Finalizer(answer_renderer=Renderer()),
             worker_ports=kwargs["worker_ports"],
+            planning_capabilities=PlanningCapabilities(available_tools=("read_file",)),
         )
 
         def observe_controller(state):
@@ -180,11 +181,14 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
             return {"planner_result": PlannerResult(
                 outcome=PlannerOutcome.EXECUTION_PLAN,
                 request_id=request_id,
-                proposed_plan=ExecutionPlan(plan_id="p1", steps=(ExecutionStep(step_id="s1", title="Read the file"),)),
+                    proposed_plan=ExecutionPlan(
+                        plan_id="p1", steps=(ExecutionStep(step_id="s1", title="Read the file"),),
+                        available_tools=("read_file",),
+                    ),
             )}
 
         brain = create_brain_node(**{name: kwargs[name] for name in (
-            "brain_llm", "tool_brain_llm", "agent_system_prompt",
+            "brain_llm", "executable_tools", "agent_system_prompt",
             "casual_system_prompt", "tools_set", "show_raw_llm",
             "supports_native_tool_calls",
         )})
@@ -227,9 +231,9 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
     assert [enabled for enabled, _ in calls] == (
         [] if direct else [supports_native_tool_calls, supports_native_tool_calls]
     )
-    assert len(bindings) == (1 if supports_native_tool_calls else 0)
+    assert len(bindings) == (2 if supports_native_tool_calls and not direct else 0)
     assert tool_node_bindings == [read_file]
-    if supports_native_tool_calls:
+    if supports_native_tool_calls and not direct:
         assert bindings[0][0] is read_file
         assert {item["function"]["name"] for item in bindings[0][1:]} == {
             "brain_step_completed", "brain_step_failed", "brain_replan_requested",

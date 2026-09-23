@@ -34,7 +34,7 @@ def _brain_node(monkeypatch, *, direct_response: bool):
     monkeypatch.setattr(graph_brain, "build_brain_input", lambda _state: brain_input)
     node = graph_brain.create_brain_node(
         brain_llm=FakeLLM("ordinary direct reply"),
-        tool_brain_llm=FakeLLM("unused"),
+        executable_tools=[],
         agent_system_prompt="agent",
         casual_system_prompt="casual",
         tools_set=set(),

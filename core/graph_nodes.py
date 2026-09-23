@@ -18,7 +18,7 @@ from core.rag import WorkspaceRAG
 def create_graph_nodes(
     *,
     brain_llm: ChatOllama,
-    tool_brain_llm: ChatOllama,
+    executable_tools,
     planner_llm: ChatOllama,
     rag_service: WorkspaceRAG,
     rag_top_k: int,
@@ -55,10 +55,9 @@ def create_graph_nodes(
 
     brain_node = create_brain_node(
         brain_llm=brain_llm,
-        tool_brain_llm=tool_brain_llm,
+        executable_tools=executable_tools,
         agent_system_prompt=agent_system_prompt,
         casual_system_prompt=casual_system_prompt,
-        tools_set=tools_set,
         show_raw_llm=show_raw_llm,
         supports_native_tool_calls=supports_native_tool_calls,
     )

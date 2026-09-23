@@ -5,18 +5,16 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from typing import Any, ContextManager
-import uuid
 
 from core.protocol.models import (
-    ArtifactRecord,
     ControllerDecision,
     ExecutionState,
     ToolExecutionRecord,
     ToolRequest,
     ToolResult,
 )
-from core.graph_capture import build_artifact_records, extract_tool_artifacts, normalize_tool_output
-from core.tool_output import parse_tool_result, unwrap_tool_output
+from core.graph_capture import build_artifact_records, normalize_tool_output
+from core.tool_output import compute_repeat_fail_count, parse_tool_result, unwrap_tool_output
 
 
 class SerializedToolRuntimePort:
@@ -79,27 +77,21 @@ def integrate_tool_result(
     protocol = execution_state.protocol_visible
     if protocol.pending_tool_request != request:
         raise ValueError("Tool result request is not current in execution state")
-    step = protocol.active_step
-    working = execution_state.working
-    previous = working.last_tool_result
-    repeat_fail_count = 0
-    if not (result.is_async_job and not result.async_terminal):
-        if (
-            not result.success
-            and result.signature
-            and previous is not None
-            and previous.signature == result.signature
-            and previous.success is False
-        ):
-            repeat_fail_count = working.repeat_fail_count + 1
-        elif not result.success and result.signature:
-            repeat_fail_count = 1
 
-    step_id = step.step_id if step is not None else ""
+    step = protocol.active_step
+    if step is None:
+        raise ValueError("Tool result integration requires an active step.")
+
+    working = execution_state.working
+    repeat_fail_count = compute_repeat_fail_count(
+        previous=working.last_tool_result,
+        previous_repeat_count=working.repeat_fail_count,
+        current=result,
+    )
 
     artifacts=build_artifact_records(
         result.artifacts,
-        step_id=step_id,
+        step_id=step.step_id,
     )
 
     record = ToolExecutionRecord(

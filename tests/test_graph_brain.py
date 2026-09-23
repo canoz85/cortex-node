@@ -52,6 +52,10 @@ class FakeLLM:
         self.invocations.append(list(messages))
         return AIMessage(content=self.reply_text)
 
+    def bind_tools(self, tools):
+        self.bound_tools = list(tools)
+        return self
+
 
 def test_brain_node_constructs_brain_input_once(monkeypatch):
     bridge_calls: list[dict] = []
@@ -67,11 +71,10 @@ def test_brain_node_constructs_brain_input_once(monkeypatch):
     monkeypatch.setattr(graph_brain, "build_brain_input", fake_build_brain_input)
 
     brain_llm = FakeLLM("discussion reply")
-    tool_brain_llm = FakeLLM("action reply")
 
     brain_node = graph_brain.create_brain_node(
         brain_llm=brain_llm,
-        tool_brain_llm=tool_brain_llm,
+        executable_tools=[],
         agent_system_prompt="agent prompt",
         casual_system_prompt="casual prompt",
         tools_set=set(),
@@ -102,7 +105,6 @@ def test_brain_node_constructs_brain_input_once(monkeypatch):
     assert isinstance(result["messages"][0], AIMessage)
     assert result["messages"][0].content == "discussion reply"
     assert len(brain_llm.invocations) == 1
-    assert len(tool_brain_llm.invocations) == 0
 
 
 def _execution_state_with_step(step_id: str) -> ExecutionState:
@@ -182,11 +184,10 @@ def test_tool_result_keeps_active_step_worker_and_cumulative_evidence(monkeypatc
     monkeypatch.setattr(graph_brain, "build_brain_input", lambda _state: brain_input)
 
     brain_llm = FakeLLM("step-check")
-    tool_brain_llm = FakeLLM("unused")
 
     brain_node = graph_brain.create_brain_node(
         brain_llm=brain_llm,
-        tool_brain_llm=tool_brain_llm,
+        executable_tools=[],
         agent_system_prompt="agent prompt",
         casual_system_prompt="casual prompt",
         tools_set=set(),
@@ -202,10 +203,9 @@ def test_tool_result_keeps_active_step_worker_and_cumulative_evidence(monkeypatc
 
     brain_node(state)
 
-    assert len(tool_brain_llm.invocations) == 2
-    rendered_messages = [str(getattr(m, "content", "")) for m in tool_brain_llm.invocations[0]]
+    assert len(brain_llm.invocations) == 2
+    rendered_messages = [str(getattr(m, "content", "")) for m in brain_llm.invocations[0]]
     assert any("Execution evidence v1:" in content for content in rendered_messages)
-    assert len(brain_llm.invocations) == 0
 
 
 def test_normal_execution_messages_include_structured_tool_progress(monkeypatch):
@@ -247,11 +247,10 @@ def test_normal_execution_messages_include_structured_tool_progress(monkeypatch)
     monkeypatch.setattr(graph_brain, "build_brain_input", lambda _state: brain_input)
 
     brain_llm = FakeLLM("unused")
-    tool_brain_llm = FakeLLM("next tool request")
 
     brain_node = graph_brain.create_brain_node(
         brain_llm=brain_llm,
-        tool_brain_llm=tool_brain_llm,
+        executable_tools=[],
         agent_system_prompt="agent prompt",
         casual_system_prompt="casual prompt",
         tools_set=set(),
@@ -267,6 +266,6 @@ def test_normal_execution_messages_include_structured_tool_progress(monkeypatch)
 
     brain_node(state)
 
-    assert len(tool_brain_llm.invocations) == 2
-    rendered_messages = [str(getattr(m, "content", "")) for m in tool_brain_llm.invocations[0]]
+    assert len(brain_llm.invocations) == 2
+    rendered_messages = [str(getattr(m, "content", "")) for m in brain_llm.invocations[0]]
     assert any("Execution evidence v1:" in content for content in rendered_messages)

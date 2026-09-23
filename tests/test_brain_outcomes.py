@@ -4,6 +4,7 @@ import json
 import inspect
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -33,7 +34,10 @@ def brain_input(*, direct=False, final=False, retry_count=0, max_retries=1):
             plan_revision=1, controller_iteration=1,
         ),
         context=ExecutionContext(user_request="Read all files and report"),
-        active_plan=None if direct else ExecutionPlan(plan_id="p1", steps=(step,)),
+        active_plan=None if direct else ExecutionPlan(
+            plan_id="p1", steps=(step,),
+            available_tools=("read_file", "write_file", "list_files"),
+        ),
         active_step=None if direct or final else step,
         direct_response=direct,
         retry=RetryMetadata(retry_count=retry_count, max_retries=max_retries),
@@ -324,6 +328,10 @@ class FakeModel:
             raise self.reply
         return self.reply
 
+    def bind_tools(self, tools):
+        self.bound_tools = list(tools)
+        return self
+
 
 class SequenceModel:
     def __init__(self, *replies):
@@ -337,6 +345,61 @@ class SequenceModel:
             raise reply
         return reply
 
+    def bind_tools(self, tools):
+        self.bound_tools = list(tools)
+        return self
+
+
+def executable_tools(*names):
+    return [SimpleNamespace(name=name) for name in names]
+
+
+def test_provider_binds_only_plan_authorized_tools_and_keeps_supporting_tools():
+    model = FakeModel(native_action("list_files", {"path": "."}))
+    context = brain_input()
+    context = context.model_copy(update={
+        "active_plan": context.active_plan.model_copy(update={
+            "available_tools": ("read_file", "list_files"),
+        }),
+        "active_step": context.active_step.model_copy(update={"primary_tool": "read_file"}),
+    })
+    provider = LangChainBrainProvider(
+        brain_llm=model,
+        executable_tools=executable_tools("read_file", "write_file", "list_files"),
+    )
+
+    outcome = provider.generate(context, (), tools_enabled=True)
+
+    assert outcome.kind == Kind.TOOL_REQUESTED
+    assert outcome.tool_request.tool_name == "list_files"
+    bound_names = {
+        tool.name if hasattr(tool, "name") else tool["function"]["name"]
+        for tool in model.bound_tools
+    }
+    assert bound_names == {
+        "read_file", "list_files", "brain_step_completed",
+        "brain_step_failed", "brain_replan_requested",
+    }
+
+
+def test_provider_rejects_registered_tool_not_authorized_by_active_plan():
+    model = FakeModel(native_action("write_file", {"path": "a", "content": "x"}))
+    context = brain_input()
+    context = context.model_copy(update={
+        "active_plan": context.active_plan.model_copy(update={
+            "available_tools": ("read_file",),
+        }),
+    })
+    provider = LangChainBrainProvider(
+        brain_llm=model,
+        executable_tools=executable_tools("read_file", "write_file"),
+    )
+
+    outcome = provider.generate(context, (), tools_enabled=True)
+
+    assert outcome.kind == Kind.INVALID_OUTPUT
+    assert outcome.error_code == "unknown_tool"
+
 
 @pytest.mark.parametrize("first_text", [
     'brain_step_completed(message="Do not reuse me")',
@@ -347,7 +410,8 @@ def test_native_compliance_uses_bound_model_and_only_native_response(first_text,
     native = native_action("brain_step_completed", {"message": "Native completion"})
     bound = SequenceModel(*([AIMessage(content=first_text), native] if retry else [native]))
     unbound = FakeModel(RuntimeError("must not invoke unbound model"))
-    provider = LangChainBrainProvider(brain_llm=unbound, tool_brain_llm=bound, tools_set={"read_file"})
+    unbound.bind_tools = lambda tools: bound
+    provider = LangChainBrainProvider(brain_llm=unbound, executable_tools=executable_tools("read_file"))
     result = provider.generate(brain_input(), (BrainMessage(role="system", content="Active step"),), tools_enabled=True)
     assert result.kind == Kind.STEP_COMPLETED
     assert result.completion_evidence.summary == "Native completion"
@@ -376,7 +440,7 @@ def test_native_compliance_uses_bound_model_and_only_native_response(first_text,
 def test_textual_lifecycle_is_never_salvaged_after_compliance_retry(name, arguments):
     text = AIMessage(content=f"{name}({arguments})")
     model = SequenceModel(text, text)
-    provider = LangChainBrainProvider(brain_llm=model, tool_brain_llm=model, tools_set={"read_file"})
+    provider = LangChainBrainProvider(brain_llm=model, executable_tools=executable_tools("read_file"))
     result = provider.generate(brain_input(), (), tools_enabled=True)
     assert len(model.calls) == 2
     assert result.kind == Kind.INVALID_OUTPUT
@@ -390,7 +454,7 @@ def test_compliance_retry_is_disabled_outside_native_execution(native, enabled):
     raw = AIMessage(content='read_file(path="a.py")')
     model = SequenceModel(raw)
     provider = LangChainBrainProvider(
-        brain_llm=model, tool_brain_llm=model, tools_set={"read_file"}, supports_native_tool_calls=native,
+        brain_llm=model, executable_tools=executable_tools("read_file"), supports_native_tool_calls=native,
     )
     context = brain_input(direct=not enabled)
     result = provider.generate(context, (), tools_enabled=enabled)
@@ -400,7 +464,7 @@ def test_compliance_retry_is_disabled_outside_native_execution(native, enabled):
 
 def test_compliance_retry_exception_returns_provider_failure():
     model = SequenceModel(AIMessage(content="Done"), RuntimeError("offline"))
-    provider = LangChainBrainProvider(brain_llm=model, tool_brain_llm=model, tools_set={"read_file"})
+    provider = LangChainBrainProvider(brain_llm=model, executable_tools=executable_tools("read_file"))
     result = provider.generate(brain_input(), (), tools_enabled=True)
     assert len(model.calls) == 2
     assert result.kind == Kind.PROVIDER_FAILURE
@@ -416,7 +480,7 @@ def test_compliance_retry_exception_returns_provider_failure():
 ])
 def test_provider_invocation_retries_only_missing_native_calls(reply, kind):
     model = FakeModel(reply)
-    provider = LangChainBrainProvider(brain_llm=model, tool_brain_llm=model, tools_set={"read_file"})
+    provider = LangChainBrainProvider(brain_llm=model, executable_tools=executable_tools("read_file"))
     result = provider.generate(brain_input(), (BrainMessage(role="human", content="read all"),), tools_enabled=True)
     assert result.kind == kind
     assert len(model.calls) == (2 if kind == Kind.INVALID_OUTPUT else 1)
@@ -449,7 +513,7 @@ def test_execution_prompt_supplies_step_evidence_and_capability_without_auto_com
 
     model = FakeModel(AIMessage(content="Analysis of fix.txt"))
     provider = LangChainBrainProvider(
-        brain_llm=model, tool_brain_llm=model, tools_set={"list_files", "read_file"},
+        brain_llm=model, executable_tools=executable_tools("list_files", "read_file"),
         supports_native_tool_calls=supports_native_tool_calls,
     )
     result = BrainService(
@@ -641,7 +705,7 @@ def test_tool_output_schema_cannot_redefine_model_facing_completion_contract(sup
     context = context.model_copy(update={"tool_execution_history": (record,)})
     model = FakeModel(AIMessage(content=json.dumps(completion())))
     provider = LangChainBrainProvider(
-        brain_llm=model, tool_brain_llm=model, tools_set={"read_file"},
+        brain_llm=model, executable_tools=executable_tools("read_file"),
         supports_native_tool_calls=supports_native_tool_calls,
     )
     BrainService(
@@ -673,7 +737,7 @@ def test_service_instructs_one_tool_mechanism_and_provider_returns_the_domain_re
     )
     model = FakeModel(reply)
     provider = LangChainBrainProvider(
-        brain_llm=model, tool_brain_llm=model, tools_set={"read_file"},
+        brain_llm=model, executable_tools=executable_tools("read_file"),
         supports_native_tool_calls=supports_native_tool_calls,
     )
     service = BrainService(provider=provider, agent_system_prompt="active", casual_system_prompt="casual")
@@ -704,7 +768,7 @@ def test_service_instructs_one_tool_mechanism_and_provider_returns_the_domain_re
 ])
 def test_text_tool_requests_require_explicit_non_native_provider_configuration(raw):
     native_model = FakeModel(raw)
-    native_provider = LangChainBrainProvider(brain_llm=native_model, tool_brain_llm=native_model, tools_set={"read_file"})
+    native_provider = LangChainBrainProvider(brain_llm=native_model, executable_tools=executable_tools("read_file"))
     assert native_provider.supports_native_tool_calls is True
     rejected = native_provider.generate(brain_input(), (), tools_enabled=True)
     assert rejected.kind == Kind.INVALID_OUTPUT
@@ -715,7 +779,7 @@ def test_text_tool_requests_require_explicit_non_native_provider_configuration(r
 
     text_model = FakeModel(raw)
     text_provider = LangChainBrainProvider(
-        brain_llm=text_model, tool_brain_llm=text_model, tools_set={"read_file"},
+        brain_llm=text_model, executable_tools=executable_tools("read_file"),
         supports_native_tool_calls=False,
     )
     accepted = text_provider.generate(brain_input(), (), tools_enabled=True)
@@ -732,7 +796,7 @@ def test_text_tool_requests_require_explicit_non_native_provider_configuration(r
 def test_non_tool_json_outcomes_remain_for_non_native_compatibility(payload, kind, context):
     model = FakeModel(AIMessage(content=json.dumps(payload)))
     provider = LangChainBrainProvider(
-        brain_llm=model, tool_brain_llm=model, tools_set={"read_file"},
+        brain_llm=model, executable_tools=executable_tools("read_file"),
         supports_native_tool_calls=False,
     )
     assert provider.generate(context, (), tools_enabled=context.active_step is not None).kind == kind
@@ -757,7 +821,7 @@ def test_native_completion_rejects_removed_opaque_reference_field_without_retry(
         "brain_step_completed", {"message": "Done", "evidence_refs": ["bad"]},
     ))
     result = LangChainBrainProvider(
-        brain_llm=model, tool_brain_llm=model, tools_set={"read_file"},
+        brain_llm=model, executable_tools=executable_tools("read_file"),
     ).generate(evidence_context(), (), tools_enabled=True)
     assert len(model.calls) == 1
     assert result.kind == Kind.INVALID_OUTPUT
@@ -853,7 +917,7 @@ assert not hasattr(outcome, "final_answer")
 def test_brain_does_not_invoke_provider_or_construct_answer_in_finalization_modes(direct, supports_native_tool_calls):
     model = FakeModel(AIMessage(content="obsolete provider answer"))
     provider = LangChainBrainProvider(
-        brain_llm=model, tool_brain_llm=model, tools_set=set(),
+        brain_llm=model, executable_tools=[],
         supports_native_tool_calls=supports_native_tool_calls,
     )
     result = BrainService(

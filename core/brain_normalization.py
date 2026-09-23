@@ -36,19 +36,7 @@ def _json(text: str):
     def invalid_constant(_value):
         raise InvalidBrainOutput("non_finite_json_number")
 
-    try:
-        return json.loads(
-            text,
-            object_pairs_hook=unique_pairs,
-            parse_constant=invalid_constant,
-        )
-    except Exception as e:
-        print("TYPE:", type(e).__name__)
-        print("ERROR:", e)
-        print("TEXT REPR:", repr(text))
-        raise
-
-    # return json.loads(text, object_pairs_hook=unique_pairs, parse_constant=invalid_constant)
+    return json.loads(text, object_pairs_hook=unique_pairs, parse_constant=invalid_constant)
 
 
 def _field(value, name, default=None):
@@ -72,74 +60,100 @@ def _step_id(payload: dict, brain_input: BrainInput) -> str:
         raise InvalidBrainOutput("step_id_does_not_match_active_step")
     return step_id
 
-
-def _tool(call, brain_input: BrainInput, allowed_tools: set[str]) -> ToolRequest:
+def _parse_call(call) -> tuple[str, dict]:
     if not isinstance(call, dict):
         raise InvalidBrainOutput("invalid_tool_call")
+
     if "function" in call:
         _only_fields(call, {"id", "type", "function"})
         call = call["function"]
+
         if not isinstance(call, dict):
             raise InvalidBrainOutput("invalid_tool_function")
+
     _only_fields(call, {"id", "type", "name", "arguments", "args"})
+
     name = _text(call.get("name"), "tool_name")
-    if name not in allowed_tools:
-        raise InvalidBrainOutput("unknown_tool")
+
     if "arguments" in call and "args" in call:
         raise InvalidBrainOutput("ambiguous_tool_arguments")
+
     arguments = call.get("arguments", call.get("args", {}))
+
     if isinstance(arguments, str):
         arguments = _json(arguments)
+
     if not isinstance(arguments, dict):
         raise InvalidBrainOutput("tool_arguments_must_be_object")
-    # Domain IDs are independent of provider tool-call IDs and deterministic for
-    # the same invocation, including retries and repeated calls in later turns.
+
+    return name, arguments
+
+def _tool_request(
+    name: str,
+    arguments: dict,
+    brain_input: BrainInput,
+    allowed_tools: set[str],
+) -> ToolRequest:
+    if name not in allowed_tools:
+        raise InvalidBrainOutput("unknown_tool")
+
     identity = {
         "execution": brain_input.identity.execution_id,
         "cursor": brain_input.cursor.model_dump(mode="json"),
         "history_length": len(brain_input.tool_execution_history),
         "retry": brain_input.retry.retry_count,
-        "name": name, "arguments": arguments,
+        "name": name,
+        "arguments": arguments,
     }
-    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, allow_nan=False).encode()).hexdigest()[:24]
+
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, allow_nan=False).encode()
+    ).hexdigest()[:24]
+
     return ToolRequest(
         request_id=f"{brain_input.identity.execution_id}:tool:{digest}",
-        tool_name=name, arguments=arguments,
+        tool_name=name,
+        arguments=arguments,
     )
 
-
-def _tool_outcome(calls, brain_input: BrainInput, allowed_tools: set[str]) -> BrainOutcome:
-    if not isinstance(calls, (list, tuple)) or len(calls) != 1:
-        raise InvalidBrainOutput("exactly_one_tool_call_required")
+def _tool_requested_outcome(
+    *,
+    name: str,
+    arguments: dict,
+    brain_input: BrainInput,
+    allowed_tools: set[str],
+) -> BrainOutcome:
     if brain_input.direct_response or brain_input.active_step is None:
         raise InvalidBrainOutput("tool_call_requires_active_step")
+
     return BrainOutcome(
         outcome=Kind.TOOL_REQUESTED,
         step_id=brain_input.active_step.step_id,
-        tool_request=_tool(calls[0], brain_input, allowed_tools),
+        tool_request=_tool_request(
+            name,
+            arguments,
+            brain_input,
+            allowed_tools,
+        ),
         message="Brain requested tool execution.",
     )
 
+def _tool_outcome(
+    calls,
+    brain_input: BrainInput,
+    allowed_tools: set[str],
+) -> BrainOutcome:
+    if not isinstance(calls, (list, tuple)) or len(calls) != 1:
+        raise InvalidBrainOutput("exactly_one_tool_call_required")
 
-def _native_call(call) -> tuple[str, dict]:
-    if not isinstance(call, dict):
-        raise InvalidBrainOutput("invalid_tool_call")
-    if "function" in call:
-        _only_fields(call, {"id", "type", "function"})
-        call = call["function"]
-        if not isinstance(call, dict):
-            raise InvalidBrainOutput("invalid_tool_function")
-    _only_fields(call, {"id", "type", "name", "arguments", "args"})
-    name = _text(call.get("name"), "tool_name")
-    if "arguments" in call and "args" in call:
-        raise InvalidBrainOutput("ambiguous_tool_arguments")
-    arguments = call.get("arguments", call.get("args", {}))
-    if isinstance(arguments, str):
-        arguments = _json(arguments)
-    if not isinstance(arguments, dict):
-        raise InvalidBrainOutput("tool_arguments_must_be_object")
-    return name, arguments
+    name, arguments = _parse_call(calls[0])
 
+    return _tool_requested_outcome(
+        name=name,
+        arguments=arguments,
+        brain_input=brain_input,
+        allowed_tools=allowed_tools,
+    )
 
 def _native_outcome(
     calls, brain_input: BrainInput, allowed_tools: set[str],
@@ -148,9 +162,15 @@ def _native_outcome(
         raise InvalidBrainOutput("exactly_one_tool_call_required")
     if brain_input.direct_response or brain_input.active_step is None:
         raise InvalidBrainOutput("native_call_requires_active_step")
-    name, arguments = _native_call(calls[0])
+    name, arguments = _parse_call(calls[0])
     if name in allowed_tools:
-        return _tool_outcome(calls, brain_input, allowed_tools)
+        return _tool_requested_outcome(
+            name=name,
+            arguments=arguments,
+            brain_input=brain_input,
+            allowed_tools=allowed_tools,
+        )
+
     step_id = brain_input.active_step.step_id
     if name == "brain_step_completed":
         _only_fields(arguments, {"message"})
@@ -283,9 +303,6 @@ def _text_outcome(
         candidate = match.group(1).strip()
     if candidate.startswith(("{", "[")):
         payload = _json(candidate)
-        has_contract_fields = isinstance(payload, dict) and bool(
-            payload.keys() & {"kind", "tool_calls", "name", "function"}
-        )
         return _structured(payload, brain_input, allowed_tools, allow_text_tool_calls=allow_text_tool_calls)
     # Preserve complete keyword-only function text from non-tool-capable models.
     # Never search within prose or guess arguments from a partial call.
@@ -306,60 +323,147 @@ def _text_outcome(
         return BrainOutcome(outcome=Kind.STEP_FAILED, message=text, error_code="missing_execution_plan")
     raise InvalidBrainOutput("expected_structured_outcome")
 
+def _unwrap_provider_output(raw: object):
+    if isinstance(raw, Mapping) and "parsing_error" in raw:
+        if raw["parsing_error"] is not None or raw.get("parsed") is None:
+            raise InvalidBrainOutput("structured_output_failure")
+
+        parsed = raw["parsed"]
+        if isinstance(parsed, BaseModel):
+            parsed = parsed.model_dump(mode="json")
+
+        if _field(raw.get("raw"), "tool_calls"):
+            raise InvalidBrainOutput("ambiguous_structured_and_native_output")
+
+        return parsed
+
+    if isinstance(raw, Mapping) and "choices" in raw:
+        if len(raw["choices"]) != 1:
+            raise InvalidBrainOutput("ambiguous_provider_choices")
+        return raw["choices"][0]["message"]
+
+    if isinstance(raw, Mapping) and isinstance(raw.get("message"), Mapping):
+        return raw["message"]
+
+    return raw
+
+def _normalize_native_output(
+    raw,
+    brain_input: BrainInput,
+    allowed_tools: set[str],
+) -> BrainOutcome | None:
+    if _field(raw, "invalid_tool_calls"):
+        raise InvalidBrainOutput("invalid_native_tool_call")
+
+    native = _field(raw, "tool_calls")
+    additional = _field(raw, "additional_kwargs", {}) or {}
+    encoded_native = additional.get("tool_calls")
+
+    if native and encoded_native:
+        left = _native_outcome(native, brain_input, allowed_tools)
+        right = _native_outcome(encoded_native, brain_input, allowed_tools)
+
+        if left != right:
+            raise InvalidBrainOutput("conflicting_native_tool_calls")
+
+    calls = native or encoded_native
+    if not calls:
+        return None
+
+    content = raw if isinstance(raw, str) else _field(raw, "content", "")
+    text = _content_text("" if content is None else content).strip()
+
+    if (
+        text.startswith(("{", "[", "```"))
+        or re.match(r"^[A-Za-z_]\w*\s*\(", text)
+    ):
+        raise InvalidBrainOutput("ambiguous_native_and_structured_output")
+
+    return _native_outcome(
+        calls,
+        brain_input,
+        allowed_tools,
+    )
+
+def _normalize_text_output(
+    raw,
+    brain_input: BrainInput,
+    allowed_tools: set[str],
+    *,
+    allow_text_tool_calls: bool,
+) -> BrainOutcome:
+    if isinstance(raw, Mapping) and any(
+        key in raw for key in ("kind", "name", "function")
+    ):
+        return _structured(
+            dict(raw),
+            brain_input,
+            allowed_tools,
+            allow_text_tool_calls=allow_text_tool_calls,
+        )
+
+    content = raw if isinstance(raw, str) else _field(raw, "content", "")
+
+    return _text_outcome(
+        _content_text(content),
+        brain_input,
+        allowed_tools,
+        allow_text_tool_calls=allow_text_tool_calls,
+    )
 
 def normalize_brain_output(
-    raw: object, brain_input: BrainInput, allowed_tools: set[str], *, allow_text_tool_calls: bool = False,
+    raw: object,
+    brain_input: BrainInput,
+    allowed_tools: set[str],
+    *,
+    allow_text_tool_calls: bool = False,
 ) -> BrainOutcome:
     """Normalize once. Text tool compatibility requires explicit provider opt-in."""
+
     try:
-        if isinstance(raw, Mapping) and "parsing_error" in raw:
-            if raw["parsing_error"] is not None or raw.get("parsed") is None:
-                raise InvalidBrainOutput("structured_output_failure")
-            parsed = raw["parsed"]
-            if isinstance(parsed, BaseModel):
-                parsed = parsed.model_dump(mode="json")
-            if _field(raw.get("raw"), "tool_calls"):
-                raise InvalidBrainOutput("ambiguous_structured_and_native_output")
-            return _structured(parsed, brain_input, allowed_tools, allow_text_tool_calls=allow_text_tool_calls)
-        if isinstance(raw, Mapping) and "choices" in raw:
-            if len(raw["choices"]) != 1:
-                raise InvalidBrainOutput("ambiguous_provider_choices")
-            raw = raw["choices"][0]["message"]
-        elif isinstance(raw, Mapping) and isinstance(raw.get("message"), Mapping):
-            raw = raw["message"]
-        if isinstance(raw, Mapping) and any(key in raw for key in ("kind", "name", "function")):
-            return _structured(dict(raw), brain_input, allowed_tools, allow_text_tool_calls=allow_text_tool_calls)
-        if _field(raw, "invalid_tool_calls"):
-            raise InvalidBrainOutput("invalid_native_tool_call")
-        native = _field(raw, "tool_calls")
-        additional = _field(raw, "additional_kwargs", {}) or {}
-        encoded_native = additional.get("tool_calls")
-        # LangChain may mirror the original native calls in additional_kwargs.
-        # Accept the mirror only if both representations normalize identically.
-        if native and encoded_native:
-            left = _native_outcome(native, brain_input, allowed_tools)
-            right = _native_outcome(encoded_native, brain_input, allowed_tools)
-            if left != right:
-                raise InvalidBrainOutput("conflicting_native_tool_calls")
-        calls = native or encoded_native
-        content = raw if isinstance(raw, str) else _field(raw, "content", "")
-        if calls:
-            text = _content_text("" if content is None else content).strip()
-            if text.startswith(("{", "[", "```")) or re.match(r"^[A-Za-z_]\w*\s*\(", text):
-                raise InvalidBrainOutput("ambiguous_native_and_structured_output")
-            return _native_outcome(calls, brain_input, allowed_tools)
-        return _text_outcome(
-            _content_text(content), brain_input, allowed_tools, allow_text_tool_calls=allow_text_tool_calls,
+        raw = _unwrap_provider_output(raw)
+
+        native_outcome = _normalize_native_output(
+            raw,
+            brain_input,
+            allowed_tools,
         )
-    except (ValueError, TypeError, KeyError, AttributeError, SyntaxError, RecursionError) as exc:
-        code = str(exc) if isinstance(exc, InvalidBrainOutput) else "malformed_model_output"
+
+        if native_outcome is not None:
+            return native_outcome
+
+        return _normalize_text_output(
+            raw,
+            brain_input,
+            allowed_tools,
+            allow_text_tool_calls=allow_text_tool_calls,
+        )
+
+    except (
+        ValueError,
+        TypeError,
+        KeyError,
+        AttributeError,
+        SyntaxError,
+        RecursionError,
+    ) as exc:
+        code = (
+            str(exc)
+            if isinstance(exc, InvalidBrainOutput)
+            else "malformed_model_output"
+        )
+
         return BrainOutcome(
-            outcome=Kind.INVALID_OUTPUT, error_code=code,
-            step_id=brain_input.active_step.step_id if brain_input.active_step else None,
+            outcome=Kind.INVALID_OUTPUT,
+            error_code=code,
+            step_id=(
+                brain_input.active_step.step_id
+                if brain_input.active_step
+                else None
+            ),
             message=f"Brain returned invalid output ({code}).",
         )
-
-
+    
 def normalize_brain_usage(raw: object) -> BrainUsage:
     """Ignore malformed accounting metadata without changing a valid outcome."""
     metadata = _field(raw, "response_metadata", {}) or {}

@@ -6,12 +6,12 @@ from langchain_core.messages import ToolMessage
 
 from core.graph_messages import tool_message_content
 from core.graph_node_helpers import build_tool_signature
-from core.models import ToolArtifact
+from core.artifacts import ToolArtifact
 from core.protocol.enums import AsyncJobStatus
 from core.protocol.models import ArtifactRecord, ContentIntegrity, PaginationMetadata, ToolExecutionRecord, ToolRequest, ToolResult
 from core.graph_response_formatters import format_tool_result_response
 from core.state import AgentState
-from core.tool_output import parse_tool_result, unwrap_tool_output
+from core.tool_output import parse_tool_result, unwrap_tool_output, build_artifact_records, compute_repeat_fail_count
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +40,7 @@ def _extract_integrity_and_pagination(
     offset = 0
     limit = None
     has_pagination = False
+    has_more = False
 
     if isinstance(unwrapped, dict):
         if "is_truncated" in unwrapped:
@@ -90,7 +91,7 @@ def _extract_integrity_and_pagination(
     pagination = None
     if has_pagination or is_truncated:
         pagination = PaginationMetadata(
-            has_more=is_truncated or (total_items > 0 and (offset + returned_items) < total_items),
+            has_more=is_truncated or has_more,
             total_items=total_items,
             returned_items=returned_items,
             offset=offset,
@@ -98,39 +99,6 @@ def _extract_integrity_and_pagination(
         )
 
     return integrity, pagination
-
-
-def _extract_artifact_records(
-    request: ToolRequest,
-    unwrapped: object | None,
-    step_id: str,
-) -> tuple[ArtifactRecord, ...]:
-    if not isinstance(unwrapped, dict):
-        return ()
-
-    path = unwrapped.get("path")
-    if not isinstance(path, str) or not path.strip():
-        path = request.arguments.get("path") if isinstance(request.arguments, dict) else None
-
-    if not isinstance(path, str) or not path.strip():
-        return ()
-
-    tool_name = request.tool_name.lower()
-    action = "modified"
-    if "write" in tool_name or "create" in tool_name or "make" in tool_name:
-        action = "created"
-    elif "delete" in tool_name or "remove" in tool_name:
-        action = "deleted"
-
-    return (
-        ArtifactRecord(
-            artifact_id=f"art-{uuid.uuid4()}",
-            step_id=step_id,
-            path=path.strip(),
-            action=action,
-        ),
-    )
-
 
 def _structured_result_data(unwrapped: dict, tool_name: str):
     """Preserve known file-result fields without inventing absent evidence.
@@ -227,14 +195,35 @@ def _normalize_transport_payload(raw_content: str, *, tool_name: str = "") -> No
         async_observed_at_utc=None,
     )
 
-
-def _build_tool_result(
+def _build_tool_execution_record(
     *,
-    raw_content: str,
+    execution_state,
     request: ToolRequest,
-) -> ToolResult:
-    payload = _normalize_transport_payload(raw_content, tool_name=request.tool_name)
+    result: ToolResult,
+) -> ToolExecutionRecord:
+    protocol = execution_state.protocol_visible
+    active_step = protocol.active_step
+    active_plan = protocol.active_plan
+    step_id = active_step.step_id 
 
+    return ToolExecutionRecord(
+        execution_id=protocol.identity.execution_id,
+        plan_id=active_plan.plan_id if active_plan is not None else None,
+        plan_revision=active_plan.revision if active_plan is not None else None,
+        step_id=step_id,
+        tool_name=request.tool_name,
+        arguments=request.arguments,
+        result=result,
+        artifacts=build_artifact_records(
+            result.artifacts,
+            step_id=step_id,
+        ),
+    )
+
+def normalize_tool_output(*, raw_content: str, request: ToolRequest) -> ToolResult:
+    """Normalize an existing serialized tool envelope without graph semantics."""
+
+    payload = _normalize_transport_payload(raw_content, tool_name=request.tool_name)
     signature = build_tool_signature(request)
 
     return ToolResult(
@@ -255,67 +244,18 @@ def _build_tool_result(
         artifacts=payload.artifacts
     )
 
-
-def normalize_tool_output(*, raw_content: str, request: ToolRequest) -> ToolResult:
-    """Normalize an existing serialized tool envelope without graph semantics."""
-    return _build_tool_result(raw_content=raw_content, request=request)
-
-def build_artifact_records(
-    artifacts: tuple[ToolArtifact, ...],
-    *,
-    step_id: str,
-) -> tuple[ArtifactRecord, ...]:
-    return tuple(
-        ArtifactRecord(
-            artifact_id=f"art-{uuid.uuid4()}",
-            step_id=step_id,
-            path=artifact.path,
-            action=artifact.action,
-        )
-        for artifact in artifacts
-    )
-
-def extract_tool_artifacts(
-    *, request: ToolRequest, payload: object | None, step_id: str
-) -> tuple[ArtifactRecord, ...]:
-    """Extract the artifact records shared by graph and direct runtimes."""
-    return _extract_artifact_records(
-        request=request,
-        unwrapped=payload,
-        step_id=step_id,
-    )
-
-
-def _compute_repeat_fail_count(
-    *,
-    previous: ToolResult | None,
-    previous_repeat_count: int,
-    current: ToolResult,
-) -> int:
-    if current.is_async_job and not current.async_terminal:
-        return 0
-
-    if (
-        not current.success
-        and current.signature
-        and previous is not None
-        and previous.signature == current.signature
-        and previous.success is False
-    ):
-        return previous_repeat_count + 1
-
-    if not current.success and current.signature:
-        return 1
-
-    return 0
-
-
 def create_capture_tool_output_node():
     def capture_tool_output_node(state: AgentState):
 
         execution_state = state["execution_state"]
         decision = state.get("controller_decision")
         history = state.get("messages", [])
+
+        active_step = execution_state.protocol_visible.active_step
+        if active_step is None:
+            raise RuntimeError(
+                "Capture executed without an active step."
+            )
 
         if not history:
             return {}
@@ -331,7 +271,7 @@ def create_capture_tool_output_node():
 
         raw_content = tool_message_content(last_message)
 
-        tool_result = _build_tool_result(
+        tool_result = normalize_tool_output(
             raw_content=raw_content,
             request=decision.pending_tool_request,
         )
@@ -339,26 +279,16 @@ def create_capture_tool_output_node():
         working = execution_state.working
         active_step = execution_state.protocol_visible.active_step
 
-        repeat_fail_count = _compute_repeat_fail_count(
+        repeat_fail_count = compute_repeat_fail_count(
             previous=working.last_tool_result,
             previous_repeat_count=working.repeat_fail_count,
             current=tool_result,
         )
 
-        artifacts=build_artifact_records(
-            tool_result.artifacts,
-            step_id=active_step.step_id if active_step is not None else "",
-        )
-
-        tool_execution_record = ToolExecutionRecord(
-            execution_id=execution_state.protocol_visible.identity.execution_id,
-            plan_id=execution_state.protocol_visible.active_plan.plan_id if execution_state.protocol_visible.active_plan else None,
-            plan_revision=execution_state.protocol_visible.active_plan.revision if execution_state.protocol_visible.active_plan else None,
-            step_id=active_step.step_id if active_step is not None else "",
-            tool_name=decision.pending_tool_request.tool_name,
-            arguments=decision.pending_tool_request.arguments,
+        tool_execution_record = _build_tool_execution_record(
+            execution_state=execution_state,
+            request=decision.pending_tool_request,
             result=tool_result,
-            artifacts=artifacts
         )
 
         updated_history = (
