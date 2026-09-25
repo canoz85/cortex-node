@@ -14,7 +14,7 @@ from core.runtime.portable_orchestration import PortableExecutionRuntime
 
 
 class _GraphDeferredWorkerPort:
-    """Non-terminal workers remain physical graph nodes in Slice 3."""
+    """Deferred worker port used by the legacy graph topology."""
 
     def run(self, _value):
         raise RuntimeError("graph worker dispatch must be deferred")
@@ -70,10 +70,6 @@ def create_controller_node(
         controller_input = portable_turn.controller_input
         turn = portable_turn.driver_turn
         decision = turn.decision
-
-        # print("\n=== CONTROLLER DECISION ===")
-        # print("decision:", decision)
-        #print("before:", state["execution_state"].protocol_visible)
 
         execution_state = turn.execution_state
 

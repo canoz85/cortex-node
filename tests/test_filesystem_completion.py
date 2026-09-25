@@ -326,7 +326,7 @@ def test_composition_registers_versioned_provider(monkeypatch):
     factory = Mock()
     monkeypatch.setattr(graph_nodes, "create_controller_node", factory)
     for name in ("create_planner_node", "create_capture_tool_output_node",
-                 "create_summarize_memory_node", "create_brain_node"):
+                 "create_brain_node"):
         monkeypatch.setattr(graph_nodes, name, Mock())
     graph_nodes.create_graph_nodes(
         brain_llm=None, executable_tools=[], planner_llm=None, rag_service=None,

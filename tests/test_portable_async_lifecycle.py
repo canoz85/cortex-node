@@ -35,7 +35,7 @@ from core.runtime.execution_driver import ExecutionDriver
 from core.runtime.portable_orchestration import PortableExecutionRuntime
 from core.runtime.tool_result_integration import integrate_tool_result
 from core.runtime.tool_result_integration import SerializedToolRuntimePort
-from core.tool_output import parse_tool_result, unwrap_tool_output
+from core.tool_output import parse_tool_output, unwrap_tool_output
 import tools.comfy_ops as comfy_ops
 from tools.comfy_ops import get_comfy_tools
 
@@ -293,7 +293,7 @@ def test_real_comfy_history_shape_crosses_portable_poll_boundary(
     )
     production_value = history_tool.invoke({"prompt_id": "job-1"})
     assert isinstance(production_value, str)
-    assert parse_tool_result(production_value) is None
+    assert parse_tool_output(production_value) is None
     production_payload = unwrap_tool_output(production_value)
     assert production_payload["prompt_id"] == "job-1"
     assert "status_details" in production_payload

@@ -35,12 +35,7 @@ class PortableExecutionRuntime:
         execution_state: ExecutionState,
         wake: AsyncExecutionWake,
     ) -> AsyncExecutionWake:
-        """Accept semantic wake correlation without treating it as authorization.
-
-        Stage 6A establishes this framework-neutral entrypoint only. The legacy
-        polling adapter still recovers the checkpointed wait decision and owns
-        poll construction, execution, and graph resume until later Stage 6 slices.
-        """
+        """Validate semantic async wake correlation without treating it as authorization."""
 
         if not isinstance(execution_state, ExecutionState):
             raise TypeError("execution_state must be an ExecutionState")
@@ -135,13 +130,13 @@ class PortableExecutionRuntime:
         })
         worker_result = None
         terminal_dispatch_error = None
-        dispatchable = decision.terminal or decision.decision_type in {
+        dispatchable = decision.decision_type in {
             ControllerDecisionType.DISPATCH_PLANNER,
             ControllerDecisionType.DISPATCH_BRAIN,
             ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
             ControllerDecisionType.PAUSE,
         }
-        if dispatch_worker and dispatchable or decision.terminal:
+        if (dispatch_worker and dispatchable) or decision.terminal:
             try:
                 worker_result = self._driver.dispatch_authorized(
                     transitioned, decision, prepared

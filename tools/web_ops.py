@@ -1,13 +1,13 @@
 import requests
 from bs4 import BeautifulSoup
-from core.models import ToolResult, ToolSerializableModel
+from core.models import ToolOutputEnvelope, ToolSerializableModel
 from core.error_codes import ERROR_CODES
 
 class WebSearchResult(ToolSerializableModel):
     query: str
     results: list[dict]  # [{"title": "...", "url": "...", "snippet": "..."}]
 
-def search_web(query: str, max_results: int = 5) -> ToolResult:
+def search_web(query: str, max_results: int = 5) -> ToolOutputEnvelope:
     """Search DuckDuckGo Lite (no API key, local-only scraping)."""
     try:
         url = "https://lite.duckduckgo.com/lite/"
@@ -35,14 +35,14 @@ def search_web(query: str, max_results: int = 5) -> ToolResult:
         for r in results:
             display_text += f"- {r['title']}: {r['snippet']}\n"
         
-        return ToolResult(
+        return ToolOutputEnvelope(
             success=True,
             message=display_text,
             data={"query": query, "results": results},
             display=display_text
         )
     except Exception as e:
-        return ToolResult(
+        return ToolOutputEnvelope(
             success=False,
             message=f"Web search failed: {str(e)}",
             data={},

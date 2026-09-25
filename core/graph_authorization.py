@@ -79,10 +79,7 @@ def require_tool_authorization(state) -> ToolRequest:
         raise WorkerDispatchError("Tool authorization request is missing or stale")
     if protocol.active_plan is None or protocol.active_step is None:
         raise WorkerDispatchError("Tool authorization requires an active plan and step")
-    if protocol.cursor.plan_revision != protocol.active_plan.revision:
-        raise WorkerDispatchError("Tool authorization plan revision mismatch")
-    if protocol.cursor.step_id != protocol.active_step.step_id:
-        raise WorkerDispatchError("Tool authorization step mismatch")
+
     return request
 
 

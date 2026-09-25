@@ -3,7 +3,7 @@ import logging
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from core.graph_runner import run_prompt
-from core.models import ToolResult
+from core.models import ToolOutputEnvelope
 from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import (
     BrainOutcome,
@@ -120,7 +120,7 @@ def test_run_prompt_handles_tool_flow(capsys):
             "steps": 3,
             "messages": [
                 ToolMessage(
-                    content=ToolResult(success=True, message="Listing for .", data={"entries": ["a.py"]}).to_tool_output(),
+                    content=ToolOutputEnvelope(success=True, message="Listing for .", data={"entries": ["a.py"]}).to_tool_output(),
                     tool_call_id="call-1",
                 )
             ],
@@ -197,7 +197,7 @@ def test_run_prompt_logs_completion_metrics(caplog):
             "steps": 3,
             "messages": [
                 ToolMessage(
-                    content=ToolResult(success=True, message="Listing for .", data={"entries": ["a.py"]}).to_tool_output(),
+                    content=ToolOutputEnvelope(success=True, message="Listing for .", data={"entries": ["a.py"]}).to_tool_output(),
                     tool_call_id="call-1",
                 )
             ],

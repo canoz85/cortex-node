@@ -35,20 +35,14 @@ def map_controller_decision(
         case ControllerDecisionType.DISPATCH_TOOL_RUNTIME:
             return "tools"
 
-        case ControllerDecisionType.DISPATCH_SUMMARY:
-             return END #return "summarize_memory" todo commented for debugging, we are not using summarize_memory node
-
-        case ControllerDecisionType.AWAIT_ASYNC_JOB:
-            return END
-
-        case ControllerDecisionType.PAUSE:
-            return END
-
-        case ControllerDecisionType.CANCEL:
-            return END
-
-        case ControllerDecisionType.TERMINATE:
-            return END
+        case (
+            ControllerDecisionType.DISPATCH_SUMMARY
+            | ControllerDecisionType.AWAIT_ASYNC_JOB
+            | ControllerDecisionType.PAUSE
+            | ControllerDecisionType.CANCEL
+            | ControllerDecisionType.TERMINATE
+        ):
+             return END
 
     raise ValueError(
         f"Unsupported controller decision: {decision.decision_type}"

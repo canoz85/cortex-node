@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from core.completion import immutable
 from core.graph_capture import create_capture_tool_output_node
 from core.models import ListFilesResult, ReadFileResult
-from core.models import ToolResult as TransportToolResult
+from core.models import ToolOutputEnvelope as TransportToolResult
 from core.protocol.enums import AsyncJobStatus, ControllerDecisionType, ExecutionPhase, WorkerRole
 from core.protocol.models import (
     ControllerDecision,

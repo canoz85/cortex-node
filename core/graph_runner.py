@@ -24,7 +24,6 @@ from core.protocol.models import (
     AsyncJobPolicy, ControllerDecision, ExecutionState, FinalizationResult,
     PlannerMemoryContext,
 )
-from core.runtime.accessors import get_execution_state
 from core.runtime.async_wake import AsyncExecutionWake
 from core.state import AgentState
 
@@ -91,10 +90,6 @@ def _pretty_summary_text(raw_summary: str) -> str:
 
     return "\n".join(lines)
 
-
-
-
-
 def run_prompt(
     app,
     prompt: str,
@@ -141,7 +136,6 @@ def run_prompt(
     # changing execution order, routing, or worker behavior.
     execution_state = legacy_state_to_execution_state(initial_state)
     initial_state["execution_state"] = execution_state
-    _ = get_execution_state(initial_state)
 
     conversation_history = list(initial_state["messages"])
     metrics = RunMetrics()
@@ -222,13 +216,6 @@ def run_prompt(
                 async_job_id=latest_controller_decision.async_job_id,
             ),
         )
-
-    # if metrics.latest_step_count >= MAX_REASONING_STEPS:
-    #     print(
-    #         f"\n{ANSI_BLUE}[system]{ANSI_RESET}\n"
-    #         f"{ANSI_BLUE}Max reasoning steps reached ({MAX_REASONING_STEPS}). "
-    #         f"Stopping to avoid unbounded loops.{ANSI_RESET}"
-    #     )
 
     if show_summary and metrics.latest_summary.strip():
         print(f"\n{ANSI_BLUE}[summary]{ANSI_RESET}")

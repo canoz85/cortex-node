@@ -5,7 +5,6 @@ from core.state import AgentState
 
 
 def route_after_controller(state: AgentState):
-        
     decision = get_controller_decision(state)
 
     if decision is None:

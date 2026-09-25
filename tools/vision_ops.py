@@ -4,7 +4,7 @@ from langchain_core.tools import tool
 from langchain_ollama import ChatOllama
 
 from core.error_codes import FILE_PATH_NOT_FOUND, VISION_ANALYSIS_FAILED, VISION_MODEL_UNAVAILABLE
-from core.models import ToolResult
+from core.models import ToolOutputEnvelope
 from tools.sandbox_paths import resolve_safe_path, resolve_workspace
 
 
@@ -17,7 +17,7 @@ def get_vision_tools(workspace_dir: str):
         try:
             safe_path = resolve_safe_path(workspace_root, image_path)
             if not safe_path.exists() or not safe_path.is_file():
-                return ToolResult(
+                return ToolOutputEnvelope(
                     success=False,
                     message=f"Image not found: {image_path}",
                     error_code=FILE_PATH_NOT_FOUND,
@@ -45,13 +45,13 @@ def get_vision_tools(workspace_dir: str):
                     ]
                 )
                 description = str(getattr(result, "content", "") or "").strip() or "No description generated."
-                return ToolResult(
+                return ToolOutputEnvelope(
                     success=True,
                     message=description,
                     data={"path": str(safe_path), "description": description},
                 ).to_tool_output()
             except Exception as exc:
-                return ToolResult(
+                return ToolOutputEnvelope(
                     success=False,
                     message="Vision model (llava) is unavailable or failed to process the image.",
                     error_code=VISION_MODEL_UNAVAILABLE,
@@ -61,14 +61,14 @@ def get_vision_tools(workspace_dir: str):
                     },
                 ).to_tool_output()
         except ValueError as exc:
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=False,
                 message=str(exc),
                 error_code=FILE_PATH_NOT_FOUND,
                 error_details={"path": image_path},
             ).to_tool_output()
         except Exception as exc:
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=False,
                 message=f"Image analysis failed: {exc}",
                 error_code=VISION_ANALYSIS_FAILED,

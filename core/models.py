@@ -128,7 +128,7 @@ class AsyncToolResult(ToolSerializableModel):
     async_observed_at_utc: datetime | None = None
 
     @model_validator(mode="after")
-    def validate_async_job_fields(self) -> "ToolResult":
+    def validate_async_job_fields(self) -> "ToolOutputEnvelope":
         if not self.is_async_job:
             if any((self.async_job_id, self.async_job_status, self.async_terminal, self.async_observed_at_utc)):
                 raise ValueError("async fields require is_async_job=True")
@@ -149,7 +149,7 @@ class AsyncToolResult(ToolSerializableModel):
         return self
 
 
-class ToolResult(AsyncToolResult):
+class ToolOutputEnvelope(AsyncToolResult):
     """Generic structured response envelope for tools."""
 
     @staticmethod
@@ -161,7 +161,7 @@ class ToolResult(AsyncToolResult):
         return summary.strip() or None, payload.strip()
 
     @classmethod
-    def try_parse(cls, raw: Any) -> "ToolResult | None":
+    def try_parse(cls, raw: Any) -> "ToolOutputEnvelope | None":
         if isinstance(raw, cls):
             return raw
 

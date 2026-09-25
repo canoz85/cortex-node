@@ -1,6 +1,6 @@
 import json
 
-from core.models import ToolResult
+from core.models import ToolOutputEnvelope
 
 
 def get_tool(tools: list, name: str):
@@ -11,7 +11,7 @@ def get_tool(tools: list, name: str):
 
 
 def parse_result(raw: str) -> dict:
-    _, payload = ToolResult.split_tool_output(raw)
+    _, payload = ToolOutputEnvelope.split_tool_output(raw)
     try:
         parsed = json.loads(payload)
     except json.JSONDecodeError as exc:

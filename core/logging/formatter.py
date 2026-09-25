@@ -6,7 +6,7 @@ from langchain_core.messages import BaseMessage
 
 from core.graph_messages import normalize_message_content
 from core.protocol.models import ToolResult
-from core.tool_output import parse_tool_result
+from core.tool_output import parse_tool_output
 
 
 MAX_DEFAULT_TOOL_RESULT_CHARS = 500
@@ -88,7 +88,7 @@ def format_tool_result(tool_result: ToolResult | str | None) -> str:
             return message
         return "Completed." if tool_result.success else "Failed."
 
-    parsed = parse_tool_result(tool_result)
+    parsed = parse_tool_output(tool_result)
 
     if parsed is not None:
         message = _compact_tool_message(parsed.message)

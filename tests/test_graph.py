@@ -95,10 +95,7 @@ def test_build_app_uses_injected_factories(tmp_path):
         def capture_tool_output_node(_state):
             return {}
 
-        def summarize_memory_node(_state):
-            return {}
-
-        return controller_node, planner_node, brain_node, capture_tool_output_node, summarize_memory_node
+        return controller_node, planner_node, brain_node, capture_tool_output_node
 
     def tool_node_factory(tools):
         call_log["tool_node_tools"] = list(tools)
@@ -196,10 +193,7 @@ def test_build_app_propagates_same_execution_state_across_graph_nodes(tmp_path):
         def capture_tool_output_node(_state):
             return {}
 
-        def summarize_memory_node(_state):
-            return {}
-
-        return controller_node, planner_node, brain_node, capture_tool_output_node, summarize_memory_node
+        return controller_node, planner_node, brain_node, capture_tool_output_node
 
     def tool_node_factory(_tools):
         def _tool_node(state):
@@ -302,10 +296,7 @@ def test_build_app_supports_invoke_only_tool_nodes(tmp_path):
             observed["capture"].append(state["execution_state"])
             return {"last_tool_signature": "capture"}
 
-        def summarize_memory_node(_state):
-            return {}
-
-        return controller_node, planner_node, brain_node, capture_tool_output_node, summarize_memory_node
+        return controller_node, planner_node, brain_node, capture_tool_output_node
 
     def tool_node_factory(_tools):
         return InvokeOnlyNode(lambda state: observed["tools"].append(state["execution_state"]) or {"last_tool_output": "ok"})

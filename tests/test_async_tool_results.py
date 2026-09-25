@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from core.models import ToolResult as TransportToolResult
+from core.models import ToolOutputEnvelope as TransportToolResult
 from core.protocol.enums import AsyncJobStatus
 from core.protocol.models import ToolResult as ProtocolToolResult
 

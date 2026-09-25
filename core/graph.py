@@ -14,7 +14,7 @@ from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, MAX_REASONING_ST
 from core.graph_authorization import require_tool_authorization
 from core.graph_nodes import create_graph_nodes
 from core.brain_provider import text_tool_definitions
-from core.graph_routing import  route_after_controller
+from core.graph_routing import route_after_controller
 from core.graph_worker_runtime import GraphWorkerRuntimePorts
 from core.graph_runner import run_prompt
 from core.graph_async_resume import LangGraphAsyncResumeAdapter
@@ -286,10 +286,18 @@ def build_app(
             rag_service,
             model,
         )
-    tools_set = {getattr(tool, "name", "") for tool in tools}
 
-    # Format the available tools into a clean, scannable string block
-    tools_list_str = "\n".join([f"- {name}" for name in sorted(tools_set) if name])
+    tools_set = {
+        tool.name
+        for tool in tools
+        if isinstance(getattr(tool, "name", None), str) and tool.name
+    }
+
+    tools_list_str = "\n".join(
+        f"- {name}"
+        for name in sorted(tools_set)
+    )
+
     if not supports_native_tool_calls:
         tools_list_str = text_tool_definitions(tools)
 
@@ -312,7 +320,7 @@ def build_app(
         else None
     )
     worker_ports = GraphWorkerRuntimePorts(tool_runtime=direct_tool_runtime)
-    controller_node, planner_node, brain_node, capture_tool_output_node, summarize_memory_node = graph_nodes_factory(
+    controller_node, planner_node, brain_node, capture_tool_output_node = graph_nodes_factory(
         brain_llm=brain_llm,
         executable_tools=tools,
         planner_llm=planner_llm,
@@ -388,12 +396,7 @@ def build_app(
             capture_tool_output_node,
             resource_observer=resource_observer,
         )
-        _register_state_node(
-            workflow,
-            "summarize_memory",
-            summarize_memory_node,
-            resource_observer=resource_observer,
-        )
+        
 
         workflow.set_entry_point("controller")
         workflow.add_edge("planner", "controller")
@@ -401,7 +404,6 @@ def build_app(
         workflow.add_edge("tools", "capture_tool_output")
         workflow.add_edge("capture_tool_output", "controller")
         workflow.add_edge("brain", "controller")
-        workflow.add_edge("summarize_memory", END)
 
     compiled_graph = workflow.compile(
         checkpointer=checkpointer_factory(),

@@ -4,7 +4,7 @@ from langchain_core.tools import tool
 
 from core.error_codes import INFO_TIME_FORMAT_ERROR, INFO_TOKEN_USAGE_UNAVAILABLE
 from core.graph_constants import MAX_REASONING_STEPS
-from core.models import ToolResult
+from core.models import ToolOutputEnvelope
 
 _runtime: dict = {}
 
@@ -26,7 +26,7 @@ def get_info_tools(model: str, workspace_dir: str):
     def agent_info() -> str:
         """Return current runtime configuration and the last known token usage."""
         usage = _runtime.get("token_usage")
-        return ToolResult(
+        return ToolOutputEnvelope(
             success=True,
             message="CortexNode runtime info",
             data={
@@ -43,12 +43,12 @@ def get_info_tools(model: str, workspace_dir: str):
         """Return token counts from the most recent brain node response."""
         usage = _runtime.get("token_usage")
         if not usage:
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=False,
                 message="No token usage recorded yet.",
                 error_code=INFO_TOKEN_USAGE_UNAVAILABLE,
             ).to_tool_output()
-        return ToolResult(
+        return ToolOutputEnvelope(
             success=True,
             message="Most recent token usage",
             data=usage,
@@ -60,7 +60,7 @@ def get_info_tools(model: str, workspace_dir: str):
         try:
             now = datetime.now()
             formatted = now.strftime(format)
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=True,
                 message="Current local system time",
                 data={
@@ -70,7 +70,7 @@ def get_info_tools(model: str, workspace_dir: str):
                 },
             ).to_tool_output()
         except Exception as exc:
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=False,
                 message=f"Error formatting current time: {exc}",
                 error_code=INFO_TIME_FORMAT_ERROR,

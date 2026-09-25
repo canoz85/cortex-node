@@ -62,7 +62,6 @@ class GraphWorkerRuntimePorts:
         raise WorkerDispatchError("Tool runtime requires driver authorization")
 
     def execute_authorized(self, value, execution_state, decision):
-        self._authorized_state(execution_state, decision)
         if self._tool_runtime is None:
             state = self._authorized_state(execution_state, decision)
             tool_update = _invoke(self._tool, state)

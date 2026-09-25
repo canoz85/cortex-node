@@ -14,7 +14,7 @@ from core.graph_brain import create_brain_node
 from core.graph_capture import create_capture_tool_output_node
 from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, SYSTEM_PROMPT_TEMPLATE
 from core.graph_controller import create_controller_node
-from core.models import ToolResult as TransportToolResult
+from core.models import ToolOutputEnvelope as TransportToolResult
 from core.protocol.bridge import (
     _legacy_brain_result_to_model, brain_result_to_legacy, build_brain_input,
     build_controller_input,

@@ -1,5 +1,3 @@
-import uuid
-from typing import Set
 from langchain_ollama import ChatOllama
 
 from core.graph_brain import create_brain_node
@@ -11,7 +9,6 @@ from core.completion import CompletionService
 from core.completion_providers.filesystem import FileReadCollectionProvider, PROVIDER_ID
 from core.graph_planner import create_planner_node
 from core.protocol.models import PlanningCapabilities
-from core.graph_summarize import create_summarize_memory_node
 
 from core.rag import WorkspaceRAG
 
@@ -25,7 +22,7 @@ def create_graph_nodes(
     agent_system_prompt: str,
     casual_system_prompt: str,
     sap_system_prompt: str | None,
-    tools_set: Set[str],
+    tools_set: set[str],
     show_raw_llm: bool,
     supports_native_tool_calls: bool = True,
     worker_ports=None,
@@ -51,8 +48,6 @@ def create_graph_nodes(
     )
     capture_tool_output_node = create_capture_tool_output_node()
 
-    summarize_memory_node = create_summarize_memory_node(summarize_llm=planner_llm,)
-
     brain_node = create_brain_node(
         brain_llm=brain_llm,
         executable_tools=executable_tools,
@@ -62,6 +57,4 @@ def create_graph_nodes(
         supports_native_tool_calls=supports_native_tool_calls,
     )
 
-
-
-    return controller_node, planner_node, brain_node, capture_tool_output_node, summarize_memory_node
+    return controller_node, planner_node, brain_node, capture_tool_output_node

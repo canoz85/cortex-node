@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from core.completion import CompletionService
 from core.graph_worker_runtime import GraphWorkerRuntimePorts
-from core.models import ReadFileResult, ToolResult as TransportToolResult
+from core.models import ReadFileResult, ToolOutputEnvelope as TransportToolResult
 from core.protocol.enums import BrainOutcome, ControllerDecisionType, ExecutionPhase, WorkerRole
 from core.protocol.models import (
     BrainResult,

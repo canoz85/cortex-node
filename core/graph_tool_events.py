@@ -3,7 +3,7 @@ import json
 from langchain_core.messages import AIMessage, ToolMessage
 
 from core.graph_messages import current_turn_messages, normalize_message_content
-from core.tool_output import parse_tool_result, unwrap_tool_output
+from core.tool_output import parse_tool_output, unwrap_tool_output
 
 
 def _infer_tool_name(unwrapped: dict | list | str | None) -> str:
@@ -43,7 +43,7 @@ def current_turn_tool_events(history: list) -> list[dict]:
         if not isinstance(message, ToolMessage):
             continue
         raw_content = normalize_message_content(message)
-        parsed = parse_tool_result(raw_content)
+        parsed = parse_tool_output(raw_content)
         unwrapped = unwrap_tool_output(raw_content)
         tool_call = tool_call_lookup.get(getattr(message, "tool_call_id", ""), {})
         tool_name = str(tool_call.get("name", "") or _infer_tool_name(unwrapped))

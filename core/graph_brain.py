@@ -17,8 +17,6 @@ def create_brain_node(
     brain_service: BrainService | None = None,
     supports_native_tool_calls: bool = True,
 ):
-    # The checker prompt remains a construction compatibility argument. The
-    # accepted runtime uses the active-step prompt to assess cumulative evidence.
     service = brain_service or BrainService(
         provider=LangChainBrainProvider(
             brain_llm=brain_llm, executable_tools=executable_tools,
@@ -32,16 +30,6 @@ def create_brain_node(
     def brain_node(state: AgentState):
         authorized_state = require_brain_authorization(state)
         brain_input = build_brain_input(state)
-
-        # protocol = authorized_state.protocol_visible
-        # if (
-        #     brain_input.identity != protocol.identity
-        #     or brain_input.cursor != protocol.cursor
-        #     or brain_input.active_plan != protocol.active_plan
-        #     or brain_input.active_step != protocol.active_step
-        #     or brain_input.last_tool_result != authorized_state.working.last_tool_result
-        # ):
-        #     raise WorkerDispatchError("Brain input does not match Controller authorization")
 
         outcome = service.run(brain_input)
 

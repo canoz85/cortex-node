@@ -12,7 +12,7 @@ from core.error_codes import (
     EXEC_SCRIPT_NOT_FOUND,
     EXEC_TIMEOUT,
 )
-from core.models import ToolResult
+from core.models import ToolOutputEnvelope
 from tools.sandbox_paths import resolve_safe_path, resolve_workspace
 
 def _resolve_pip_command(workspace_root: Path) -> tuple[list[str] | None, list[str]]:
@@ -62,7 +62,7 @@ def get_exec_tools(workspace_dir: str):
         try:
             script = resolve_safe_path(workspace_root, path)
             if not script.exists() or script.suffix != ".py":
-                return ToolResult(
+                return ToolOutputEnvelope(
                     success=False,
                     message=f"Error: Python file does not exist: {path}",
                     error_code=EXEC_SCRIPT_NOT_FOUND,
@@ -93,7 +93,7 @@ def get_exec_tools(workspace_dir: str):
 
             stdout = result.stdout.strip() or "<empty>"
             stderr = result.stderr.strip() or "<empty>"
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=(result.returncode == 0),
                 message="Python execution completed",
                 data={
@@ -113,7 +113,7 @@ def get_exec_tools(workspace_dir: str):
                 ),
             ).to_tool_output()
         except subprocess.TimeoutExpired:
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=False,
                 message=f"Error: execution timed out after {timeout_seconds} seconds",
                 error_code=EXEC_TIMEOUT,
@@ -123,7 +123,7 @@ def get_exec_tools(workspace_dir: str):
                 },
             ).to_tool_output()
         except Exception as exc:
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=False,
                 message=f"Error running Python: {exc}",
                 error_code=EXEC_RUNTIME_ERROR,
@@ -139,7 +139,7 @@ def get_exec_tools(workspace_dir: str):
         try:
             pip_cmd, attempted = _resolve_pip_command(workspace_root)
             if not pip_cmd:
-                return ToolResult(
+                return ToolOutputEnvelope(
                     success=False,
                     message="No usable Python interpreter found for pip installation.",
                     data={},
@@ -160,7 +160,7 @@ def get_exec_tools(workspace_dir: str):
             stderr = (result.stderr or "").strip()
 
             if result.returncode == 0:
-                return ToolResult(
+                return ToolOutputEnvelope(
                     success=True,
                     message=f"Successfully installed {package_name}",
                     data={
@@ -170,7 +170,7 @@ def get_exec_tools(workspace_dir: str):
                     },
                 ).to_tool_output()
 
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=False,
                 message=f"Failed to install {package_name}: {(stderr[-300:] if stderr else 'unknown pip error')}",
                 data={},
@@ -183,7 +183,7 @@ def get_exec_tools(workspace_dir: str):
             ).to_tool_output()
 
         except subprocess.TimeoutExpired:
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=False,
                 message=f"Package install timeout after {timeout_seconds}s",
                 data={},
@@ -191,7 +191,7 @@ def get_exec_tools(workspace_dir: str):
                 error_details={"package": package_name, "timeout_seconds": timeout_seconds},
             ).to_tool_output()
         except FileNotFoundError as exc:
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=False,
                 message=f"Package install failed: interpreter or pip not found ({exc})",
                 data={},
@@ -199,7 +199,7 @@ def get_exec_tools(workspace_dir: str):
                 error_details={"package": package_name},
             ).to_tool_output()
         except Exception as e:
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=False,
                 message=str(e),
                 data={},

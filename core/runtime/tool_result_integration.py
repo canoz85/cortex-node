@@ -13,8 +13,7 @@ from core.protocol.models import (
     ToolRequest,
     ToolResult,
 )
-from core.graph_capture import build_artifact_records, normalize_tool_output
-from core.tool_output import compute_repeat_fail_count, parse_tool_result, unwrap_tool_output
+from core.tool_output import compute_repeat_fail_count, parse_tool_output, unwrap_tool_output, build_artifact_records, normalize_tool_output
 
 
 class SerializedToolRuntimePort:
@@ -55,7 +54,7 @@ class SerializedToolRuntimePort:
             raise TypeError("Tool runtime returned no typed ToolResult")
         if (
             self._require_structured
-            and parse_tool_result(output) is None
+            and parse_tool_output(output) is None
             and not isinstance(unwrap_tool_output(output), dict)
         ):
             raise TypeError("Tool runtime returned no typed ToolResult")

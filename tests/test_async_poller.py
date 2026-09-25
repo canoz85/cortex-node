@@ -15,7 +15,7 @@ from core.graph import build_app
 from core.graph_async_resume import LangGraphAsyncResumeAdapter
 from core.graph_routing import route_after_controller
 from core.graph_runner import run_prompt
-from core.models import ToolResult as TransportToolResult
+from core.models import ToolOutputEnvelope as TransportToolResult
 from core.protocol.enums import (
     AsyncJobStatus,
     BrainOutcome,

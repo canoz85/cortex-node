@@ -1,7 +1,7 @@
 from langchain_core.tools import tool
 
 from core.error_codes import RAG_NO_RESULTS, RAG_REFRESH_FAILED, RAG_SEARCH_FAILED
-from core.models import ToolResult
+from core.models import ToolOutputEnvelope
 from core.rag import WorkspaceRAG
 
 
@@ -13,7 +13,7 @@ def get_rag_tools(rag_service: WorkspaceRAG):
             payload = rag_service.to_payload(query=query, top_k=top_k)
             results = payload.get("results", [])
             if not results:
-                return ToolResult(
+                return ToolOutputEnvelope(
                     success=False,
                     message="No relevant knowledge found.",
                     data=payload,
@@ -21,13 +21,13 @@ def get_rag_tools(rag_service: WorkspaceRAG):
                     error_details={"query": query, "top_k": top_k},
                 ).to_tool_output()
 
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=True,
                 message=f"Found {len(results)} relevant chunk(s).",
                 data=payload,
             ).to_tool_output()
         except Exception as exc:
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=False,
                 message=f"Error searching knowledge: {exc}",
                 error_code=RAG_SEARCH_FAILED,
@@ -43,13 +43,13 @@ def get_rag_tools(rag_service: WorkspaceRAG):
         """Rebuild the in-memory knowledge index."""
         try:
             chunk_count = rag_service.refresh()
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=True,
                 message="Knowledge index refreshed.",
                 data={"chunks_indexed": chunk_count},
             ).to_tool_output()
         except Exception as exc:
-            return ToolResult(
+            return ToolOutputEnvelope(
                 success=False,
                 message=f"Error refreshing knowledge index: {exc}",
                 error_code=RAG_REFRESH_FAILED,
