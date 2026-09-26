@@ -338,6 +338,17 @@ class ToolExecutionRecord(ImmutableProtocolModel):
     artifacts: tuple[ArtifactRecord, ...] = Field(default_factory=tuple)
 
 
+class ExactCollection(ImmutableProtocolModel):
+    """Exact ordered members projected from one accepted tool result."""
+
+    source_record_index: int = Field(ge=0)
+    source_request_id: str | None = None
+    data_path: tuple[str | int, ...] = Field(default_factory=tuple)
+    label: str = "Results"
+    # None is an unresolved Brain proposal; an empty tuple is a bound empty set.
+    items: tuple[DomainJsonValue, ...] | None = None
+
+
 class ReplanRequest(ImmutableProtocolModel):
     """Typed replan request generated when plan continuation is insufficient.
 
@@ -384,6 +395,7 @@ class StepCompletionEvidence(ImmutableProtocolModel):
     plan_id: str | None = None
     plan_revision: int | None = Field(default=None, ge=1)
     evidence_id: str | None = None
+    exact_collection: ExactCollection | None = None
 
 
 class AcceptedStepResult(ImmutableProtocolModel):
@@ -411,6 +423,14 @@ class AcceptedStepResult(ImmutableProtocolModel):
             raise ValueError(
                 "Accepted step result requires Controller-bound completion evidence"
             )
+        if (
+            evidence.exact_collection is not None
+            and (
+                evidence.exact_collection.items is None
+                or evidence.exact_collection.source_request_id is None
+            )
+        ):
+            raise ValueError("Accepted exact collection requires Controller-bound items")
         return self
 
 
@@ -1128,7 +1148,7 @@ class ControllerDecision(ImmutableProtocolModel):
     @model_validator(mode="after")
     def validate_terminal_status_and_cursor(self) -> "ControllerDecision":
         if self.accepted_direct_response is not None and (
-            self.decision_type != ControllerDecisionType.DISPATCH_SUMMARY
+            self.decision_type != ControllerDecisionType.TERMINATE
             or self.execution_status != ExecutionStatus.COMPLETED
             or self.accepted_plan is not None
             or self.completed_step_id is not None

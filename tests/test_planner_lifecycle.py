@@ -55,7 +55,7 @@ def test_create_plan_and_no_plan_have_distinct_terminal_semantics():
     no_plan = ctrl.decide(result_input(dispatch, request, PlannerResult(
         outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=request.request_id, message="No tools required",
     )))
-    assert no_plan.decision_type == ControllerDecisionType.DISPATCH_SUMMARY
+    assert no_plan.decision_type == ControllerDecisionType.TERMINATE
     assert no_plan.execution_status == ExecutionStatus.COMPLETED
     assert no_plan.accepted_plan is None and no_plan.terminal
     assert no_plan.clear_planning_request

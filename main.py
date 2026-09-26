@@ -18,6 +18,7 @@ from core.graph_messages import (
 )
 from core.planner_memory import project_planner_memory
 from core.logging_utils import configure_logging, get_logger
+from core.logging.renderer import render_system_message
 
 from core.graph import build_app, run_prompt
 from core.runtime.gpu_resources import GpuResourceMode, GpuResourcePolicy
@@ -32,7 +33,8 @@ DEFAULT_SETTINGS = {
     "rag_top_k": 4,
     "raw_llm": False,
     "show_summary": False,
-    "log_level": "INFO",
+    "verbose": False,
+    "log_level": "WARNING",
     "json_logs": False,
     "gpu_telemetry": True,
     "gpu_handoff": True,
@@ -80,6 +82,7 @@ def _build_settings(args: argparse.Namespace) -> dict:
         "log_level": os.getenv("CORTEX_LOG_LEVEL"),
         "raw_llm": _env_bool("CORTEX_RAW_LLM"),
         "show_summary": _env_bool("CORTEX_SHOW_SUMMARY"),
+        "verbose": _env_bool("CORTEX_VERBOSE"),
         "json_logs": _env_bool("CORTEX_JSON_LOGS"),
         "gpu_telemetry": _env_bool("CORTEX_GPU_TELEMETRY"),
         "gpu_handoff": _env_bool("CORTEX_GPU_HANDOFF"),
@@ -105,6 +108,7 @@ def _build_settings(args: argparse.Namespace) -> dict:
         "rag_top_k": args.rag_top_k,
         "raw_llm": args.raw_llm,
         "show_summary": args.show_summary,
+        "verbose": args.verbose,
         "log_level": args.log_level,
         "json_logs": args.json_logs,
         "gpu_telemetry": args.gpu_telemetry,
@@ -205,6 +209,12 @@ def parse_args() -> argparse.Namespace:
         help="Show rolling summary output in blue after each run.",
     )
     output_group.add_argument(
+        "--verbose",
+        action="store_true",
+        default=None,
+        help="Show semantic Controller transitions in addition to worker output.",
+    )
+    output_group.add_argument(
         "--log-level",
         default=None,
         help="Logging level (DEBUG, INFO, WARNING, ERROR).",
@@ -284,7 +294,10 @@ def create_optional_memory_updater(settings: dict) -> LLMMemoryUpdater | None:
         model=str(settings["model_planner"]), temperature=0,
         num_predict=2048, client_kwargs={"timeout": 30},
     )
-    return LLMMemoryUpdater(LangChainMemoryProposalProvider(llm))
+    return LLMMemoryUpdater(LangChainMemoryProposalProvider(
+        llm,
+        show_raw_llm=bool(settings["raw_llm"]),
+    ))
 
 
 def load_session(session_path: str) -> ApplicationSession:
@@ -388,7 +401,7 @@ def save_session(
                 default=str,
             )
 
-        print(f"\n[Info] Session state saved to {session_path}")
+        render_system_message("Session saved.")
 
     except Exception as e:
         print(
@@ -474,6 +487,7 @@ def main():
                 session.conversation_memory,
                 current_turn_index=session.completed_turn_count + 1,
             ),
+            verbose=bool(settings["verbose"]),
         )
         memory = session.conversation_memory
         completed_count = session.completed_turn_count

@@ -101,6 +101,7 @@ def run_prompt(
     completed_turn_evidence: list[CompletedTurnEvidence] | None = None,
     turn_index: int = 1,
     planner_memory_context: PlannerMemoryContext | None = None,
+    verbose: bool = False,
 ) -> tuple[list, str]:
     prior_messages = list(bounded_recent_conversation(conversational_messages(history or [])))
     run_id = run_id or uuid.uuid4().hex[:12]
@@ -188,16 +189,7 @@ def run_prompt(
 
                 metrics.node_updates += 1
 
-                if node_update.transition:
-                    log_event(
-                        logger,
-                        logging.INFO,
-                        "Graph node update",
-                        node=node_update.to_node,
-                        transition=node_update.transition,
-                    )
-
-                render_node_update(node_update)
+                render_node_update(node_update, verbose=verbose)
 
                 from_node = node_name
 

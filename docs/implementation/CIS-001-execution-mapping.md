@@ -102,7 +102,6 @@ Compatibility-only node mapping:
 - Planner Runtime Node: `planner`
 - Brain Runtime Node: `brain`
 - Tool Runtime Node: `tools`
-- Summary Runtime Node: `summarize_memory`
 - Tool Capture Runtime Node: `capture_tool_output` (runtime normalization helper)
 
 This multi-node mapping exists for injected test/integration compatibility and must

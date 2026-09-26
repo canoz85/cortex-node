@@ -286,7 +286,7 @@ def test_local_polling_resumes_from_capture_without_brain_hot_loop(
     if status == AsyncJobStatus.RUNNING:
         assert final_decision.decision_type == ControllerDecisionType.AWAIT_ASYNC_JOB
     else:
-        assert final_decision.decision_type == ControllerDecisionType.DISPATCH_SUMMARY
+        assert final_decision.decision_type == ControllerDecisionType.TERMINATE
 
     followup_events = list(
         runtime.wake_and_resume(
@@ -308,13 +308,13 @@ def test_local_polling_resumes_from_capture_without_brain_hot_loop(
 def test_run_prompt_reenters_runtime_only_for_await_decision():
     await_decision = _await_decision()
     summary_decision = ControllerDecision(
-        decision_type=ControllerDecisionType.DISPATCH_SUMMARY,
+        decision_type=ControllerDecisionType.TERMINATE,
         reason="Finished.",
-        next_worker=WorkerRole.SUMMARY,
+        next_worker=WorkerRole.CONTROLLER,
         execution_status=ExecutionStatus.COMPLETED,
         cursor=ExecutionCursor(
             phase=ExecutionPhase.COMPLETED,
-            current_worker=WorkerRole.SUMMARY,
+            current_worker=WorkerRole.CONTROLLER,
         ),
         terminal=True,
     )

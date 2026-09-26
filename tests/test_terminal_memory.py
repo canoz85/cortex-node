@@ -111,7 +111,7 @@ def terminal_event(*, status=ExecutionStatus.COMPLETED, accepted=True, direct=Fa
         ExecutionStatus.FAILED: ExecutionPhase.FAILED,
         ExecutionStatus.CANCELLED: ExecutionPhase.CANCELLED,
     }[status]
-    cursor = ExecutionCursor(phase=phase, current_worker=WorkerRole.SUMMARY)
+    cursor = ExecutionCursor(phase=phase, current_worker=WorkerRole.CONTROLLER)
     provenance = (StepCompletionEvidence(
         step_id="read", summary="Controller accepted result",
         execution_id=run_id, plan_id="plan-1", plan_revision=1,
@@ -122,7 +122,11 @@ def terminal_event(*, status=ExecutionStatus.COMPLETED, accepted=True, direct=Fa
         status=status, cursor=cursor, completion_provenance=provenance,
     ))
     decision = ControllerDecision(
-        decision_type=ControllerDecisionType.DISPATCH_SUMMARY,
+        decision_type=(
+            ControllerDecisionType.CANCEL
+            if status == ExecutionStatus.CANCELLED
+            else ControllerDecisionType.TERMINATE
+        ),
         execution_status=status, cursor=cursor, terminal=True,
         direct_response=direct, reason="terminal reason",
     )

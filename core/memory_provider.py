@@ -5,6 +5,7 @@ import json
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.conversation_memory_updater import MemoryProposal, MemoryUpdateRequest
+from core.debug import log_llm_exchange
 
 
 _SYSTEM_PROMPT = """Extract only durable memory supported by the supplied evidence.
@@ -38,15 +39,39 @@ Do not propose question changes. Do not rewrite the memory store."""
 
 
 class LangChainMemoryProposalProvider:
-    def __init__(self, llm):
+    def __init__(self, llm, *, show_raw_llm: bool = False):
         self.llm = llm
+        self.show_raw_llm = show_raw_llm
 
     def generate(self, request: MemoryUpdateRequest) -> MemoryProposal:
-        structured = self.llm.with_structured_output(MemoryProposal, method="json_schema")
-        result = structured.invoke([
+        try:
+            structured = self.llm.with_structured_output(
+                MemoryProposal, method="json_schema", include_raw=True,
+            )
+        except TypeError:
+            # Compatibility for provider/test doubles without include_raw.
+            structured = self.llm.with_structured_output(
+                MemoryProposal, method="json_schema",
+            )
+        messages = [
             SystemMessage(content=_SYSTEM_PROMPT),
             HumanMessage(content=json.dumps(request.model_dump(mode="json"), ensure_ascii=False)),
-        ])
+        ]
+        exchange = structured.invoke(messages)
+        if isinstance(exchange, dict) and "raw" in exchange and "parsed" in exchange:
+            raw = exchange.get("raw")
+            result = exchange.get("parsed")
+            parsing_error = exchange.get("parsing_error")
+            if parsing_error is not None:
+                raise parsing_error
+        else:
+            raw = exchange
+            result = exchange
+        log_llm_exchange(
+            worker="memory", operation="update", messages=messages,
+            response=raw, execution_id=request.execution_id,
+            enabled=self.show_raw_llm,
+        )
         if isinstance(result, MemoryProposal):
             return result
         return MemoryProposal.model_validate(result)

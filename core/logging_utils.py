@@ -68,7 +68,14 @@ def configure_logging(level: str = "INFO", json_logs: bool = False) -> None:
         handler.setFormatter(text_formatter)
 
     root.addHandler(handler)
-    root.setLevel(getattr(logging, str(level).upper(), logging.INFO))
+    configured_level = getattr(logging, str(level).upper(), logging.INFO)
+    root.setLevel(configured_level)
+
+    # HTTP transport chatter is useful while debugging but should not compete
+    # with the semantic console story in normal or verbose operation.
+    transport_level = logging.DEBUG if configured_level <= logging.DEBUG else logging.WARNING
+    logging.getLogger("httpx").setLevel(transport_level)
+    logging.getLogger("httpcore").setLevel(transport_level)
 
 
 def get_logger(name: str) -> logging.Logger:

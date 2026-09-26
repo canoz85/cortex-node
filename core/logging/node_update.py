@@ -34,6 +34,8 @@ class NodeUpdate:
     from_node: str | None
     to_node: str
 
+    controller_events: tuple[str, ...] = ()
+
     @property
     def transition_reason(self) -> str | None:
         if self.planner_result is not None:
@@ -149,22 +151,46 @@ def extract_node_update(
 
     accepted_plan = None
     accepted_completion_message = ""
+    controller_events: list[str] = []
     if isinstance(controller_decision, ControllerDecision):
         if (
             controller_decision.reason == "Plan accepted."
             and controller_decision.accepted_plan is not None
         ):
             accepted_plan = controller_decision.accepted_plan
+            controller_events.append("Plan ready")
         if controller_decision.completion_evidence is not None:
             accepted_completion_message = (
                 controller_decision.completion_evidence.summary
             )
+
+        if (
+            brain_result is not None
+            and brain_result.outcome == BrainOutcome.TOOL_REQUEST
+            and brain_result.tool_request is not None
+        ):
+            controller_events.append(
+                f"Tool requested: {brain_result.tool_request.tool_name}"
+            )
+
+        if tool_result is not None:
+            suffix = f": {tool_name}" if tool_name else ""
+            controller_events.append(f"Tool completed{suffix}")
+
+        if controller_decision.completed_step_id is not None:
+            controller_events.append(
+                f"Step completed: {controller_decision.completed_step_id}"
+            )
+
+        if controller_decision.terminal:
+            controller_events.append("Execution completed")
 
     has_summary_update = "rolling_summary" in value
 
     return NodeUpdate(
         from_node=from_node,
         to_node=to_node,
+        controller_events=tuple(controller_events),
         planner_result=planner_result,
         accepted_plan=accepted_plan,
         brain_result=brain_result,

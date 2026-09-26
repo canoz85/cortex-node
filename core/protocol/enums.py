@@ -16,7 +16,6 @@ class WorkerRole(StrEnum):
     PLANNER = "planner"
     BRAIN = "brain"
     TOOL_RUNTIME = "tool_runtime"
-    SUMMARY = "summary"
 
 
 class ExecutionPhase(StrEnum):
@@ -123,7 +122,6 @@ class ControllerDecisionType(StrEnum):
     DISPATCH_PLANNER = "dispatch_planner"
     DISPATCH_BRAIN = "dispatch_brain"
     DISPATCH_TOOL_RUNTIME = "dispatch_tool_runtime"
-    DISPATCH_SUMMARY = "dispatch_summary"
     AWAIT_ASYNC_JOB = "await_async_job"
     REQUEST_REPLAN = "request_replan"
 

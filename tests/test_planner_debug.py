@@ -1,115 +1,95 @@
-"""Debug diagnostics must not affect Planner execution."""
-import builtins
+"""Exchange-based raw diagnostics for Planner invocations."""
 
-import pytest
+import json
+from pathlib import Path
 
-from test_planner import FakeProvider, planner_input, service, VALID
-from core.protocol.models import ExecutionPlan, ExecutionStep
-from test_graph_planner import DummyPlannerLLM, DummyRAG, authorize
-from langchain_core.messages import HumanMessage
-from core.graph_planner import create_planner_node
-from core.logging.node_update import NodeUpdate
-from core.logging.renderer import render_node_update
-from core.planner_debug import log_planner
+from langchain_core.messages import AIMessage
+
+from core.planner_contract import PlannerProposal
+from core.planner_provider import LangChainPlannerProvider
+from core.planner_routing import planner_routing_decision
 
 
-@pytest.mark.parametrize("route,content,error", [
-    ("action", VALID, None), ("conversation", VALID, None),
-    ("action", "malformed", None), ("action", VALID, "route"),
-    ("action", VALID, "generate"),
-])
-@pytest.mark.parametrize("revise", [False, True])
-def test_service_debug_parity(capsys, route, content, error, revise):
-    request = planner_input(active_plan=ExecutionPlan(
-        plan_id="prior-plan", revision=1, objective="create a file",
-        steps=(ExecutionStep(step_id="step-1", title="Inspect", description="Inspect", primary_tool="list_files"),),
-    ) if revise else None)
-    results, calls = [], []
-    for enabled in (False, True):
-        provider = FakeProvider(content, route=route, error_at=error)
-        planner = service(provider)
-        planner.show_raw_llm = enabled
-        results.append(planner.run(request))
-        calls.append((provider.requests, provider.messages))
-        output = capsys.readouterr().out
-        assert bool(output) == enabled
-        if enabled:
-            assert "[planner:request]" in output
-            assert "[planner:normalized]" in output
-            assert "fixture-request" in output
-            assert '"user_request": "create a file"' in output
-            if results[-1].proposed_plan is not None:
-                assert "[planner:execution_plan]" in output
-                assert "Objective: Inspect then write" in output
-                assert "inspect. Inspect" in output
-                assert "tool: list_files" in output
-                assert "depends_on: []" in output
-                assert "write. Write" in output
-                assert "tool: write_file" in output
-                assert "depends_on: ['inspect']" in output
-            if provider.messages and not error:
-                assert "[planner:prompt][system]" in output
-                assert "[planner:prompt][human]" in output
-                assert "[planner:raw]" in output
-    assert results[0] == results[1]
-    assert calls[0] == calls[1]
+PROPOSAL = {
+    "result": "PLAN_PROPOSED",
+    "objective": "Inspect",
+    "steps": [{
+        "step_id": "inspect",
+        "title": "Inspect",
+        "description": "Inspect workspace",
+        "primary_tool": "list_files",
+        "dependencies": [],
+    }],
+}
 
 
-@pytest.mark.parametrize("route,confidence", [("action", .95), ("action", .2)])
-def test_adapter_flag_router_and_model_parity(capsys, route, confidence):
-    state = authorize({"messages": [HumanMessage(content="create a file")]})
-    results, calls = [], []
-    for enabled in (False, True):
-        llm, rag = DummyPlannerLLM(VALID, route=route, confidence=confidence), DummyRAG()
-        node = create_planner_node(planner_llm=llm, router_llm=llm,
-            rag_service=rag, rag_top_k=4, tools_set={"list_files", "write_file"},
-            show_raw_llm=enabled)
-        results.append(node(state))
-        calls.append((llm.routes, llm.invocations, rag.calls))
-        output = capsys.readouterr().out
-        assert bool(output) == enabled
-        if enabled:
-            assert "[planner:router][structured]" in output
-            assert '"route": "action"' in output
-        assert len(llm.routes) == 1
-        assert len(llm.invocations) == 1
-    assert results[0] == results[1]
-    assert calls[0] == calls[1]
+class Structured:
+    def __init__(self, value):
+        self.value = value
+        self.calls = []
+
+    def invoke(self, messages):
+        self.calls.append(messages)
+        return self.value
 
 
-def test_redaction_only_changes_display(capsys):
-    value = 'password="hidden-password" api_key=hidden-key Authorization: Bearer hidden-token https://user:pass@example.com'
-    log_planner("raw", value)
-    output = capsys.readouterr().out
-    for secret in ("hidden-password", "hidden-key", "hidden-token", "user:pass"):
-        assert secret not in output
-    assert "[REDACTED]" in output
-    assert "hidden-password" in value
+class LLM:
+    def __init__(self, value):
+        self.structured = Structured(value)
+
+    def with_structured_output(self, _schema, **_kwargs):
+        return self.structured
 
 
-def test_broken_stdout_does_not_change_result(monkeypatch):
-    planner = service(FakeProvider())
-    expected = planner.run(planner_input())
-    planner.show_raw_llm = True
-    def broken(*args, **kwargs):
-        raise OSError("closed stdout")
-    monkeypatch.setattr(builtins, "print", broken)
-    assert planner.run(planner_input()) == expected
+def _records(monkeypatch, name):
+    path = Path(".tmp") / name
+    path.parent.mkdir(exist_ok=True)
+    if path.exists():
+        path.unlink()
+    monkeypatch.setenv("CORTEX_RAW_LLM_FILE", str(path))
+    return path
 
 
-def test_execution_plan_has_one_detailed_log_without_duplicate_numbering(capsys):
-    provider = FakeProvider({"result":"PLAN_PROPOSED", "objective":"list files", "steps":[
-        {"step_id":"1", "title":"List Workspace Files", "description":"List files",
-         "primary_tool":"list_files", "dependencies":[]}]})
-    planner = service(provider)
-    planner.show_raw_llm = True
-    result = planner.run(planner_input())
-    render_node_update(NodeUpdate(from_node="controller", to_node="planner",
-                                  planner_result=result))
-    output = capsys.readouterr().out
-    assert output.count("[planner:execution_plan]") == 1
-    assert "1. List Workspace Files" in output
-    assert "1. 1: List Workspace Files" not in output
-    assert "tool: list_files" in output
-    assert "depends_on: []" in output
+def test_router_writes_one_exchange_record(monkeypatch, capsys):
+    raw = AIMessage(
+        content='{"route":"info"}',
+        response_metadata={"model": "router", "done_reason": "stop"},
+        usage_metadata={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+    )
+    llm = LLM({"raw": raw, "parsed": type("Route", (), {"route": "info"})(),
+               "parsing_error": None})
+    path = _records(monkeypatch, "planner-route.jsonl")
 
+    decision = planner_routing_decision("list files", router_llm=llm, show_raw_llm=True)
+
+    assert decision.route == "info"
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 1
+    assert (records[0]["worker"], records[0]["operation"]) == ("planner", "route")
+    assert [item["role"] for item in records[0]["messages"]] == ["system", "human"]
+    assert records[0]["response"]["model"] == "router"
+    assert records[0]["usage"]["total_tokens"] == 5
+    assert "[raw-llm:planner:route]" in capsys.readouterr().out
+
+
+def test_planner_provider_writes_one_plan_exchange(monkeypatch, capsys):
+    raw = AIMessage(content=json.dumps(PROPOSAL), response_metadata={"model": "planner"})
+    llm = LLM({
+        "raw": raw,
+        "parsed": PlannerProposal.model_validate(PROPOSAL),
+        "parsing_error": None,
+    })
+    path = _records(monkeypatch, "planner-plan.jsonl")
+    provider = LangChainPlannerProvider(planner_llm=llm, show_raw_llm=False)
+    from core.planner import PlannerMessage
+
+    result = provider.generate((
+        PlannerMessage("system", "Plan safely", "exec-1"),
+        PlannerMessage("human", "inspect", "exec-1"),
+    ))
+
+    assert result.objective == "Inspect"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["execution_id"] == "exec-1"
+    assert (record["worker"], record["operation"]) == ("planner", "plan")
+    assert capsys.readouterr().out == ""

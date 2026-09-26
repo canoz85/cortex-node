@@ -7,7 +7,6 @@ from typing import Protocol
 import json
 import re
 
-from core.planner_debug import log_planner, log_planner_request, log_planner_result
 from core.planner_contract import PlannerInvalidOutputError, PlannerProposal
 from core.planner_normalization import normalize_planner_proposal, planner_failure
 from core.protocol.models import PlanningRequest, PlannerResult
@@ -132,6 +131,7 @@ COMFYUI_PLANNING_GUIDANCE = """CAPABILITY-SPECIFIC GUIDANCE — COMFYUI GENERATI
 class PlannerMessage:
     role: str
     content: str
+    execution_id: str | None = None
 
 @dataclass(frozen=True)
 class PlannerRoute:
@@ -176,6 +176,8 @@ class PlannerService:
         self.router = router
         self.provider = provider
         self.mutating_tools = frozenset(mutating_tools)
+        if hasattr(provider, "show_raw_llm"):
+            provider.show_raw_llm = show_raw_llm
 
     def run(
         self,
@@ -195,12 +197,7 @@ class PlannerService:
         execution_id = planner_input.identity.execution_id
 
         def finish(result: PlannerResult) -> PlannerResult:
-            log_planner_result(
-                result,
-                enabled=self.show_raw_llm,
-                execution_id=execution_id,
-            )
-            return result   
+            return result
 
         user_request = planner_input.context.user_request
 
@@ -273,28 +270,18 @@ class PlannerService:
             )
 
         messages = (
-            PlannerMessage("system", prompt),
+            PlannerMessage("system", prompt, execution_id),
             *(
-                PlannerMessage("system", text)
+                PlannerMessage("system", text, execution_id)
                 for text in retrieval
             ),
             PlannerMessage(
-                "system",
-                planning_request_context(planner_input),
+                "system", planning_request_context(planner_input), execution_id,
             ),
             PlannerMessage(
-                "human",
-                user_request,
+                "human", user_request, execution_id,
             ),
         )
-
-        for message in messages:
-            log_planner(
-                f"prompt][{message.role}",
-                message.content,
-                enabled=self.show_raw_llm,
-                execution_id=execution_id,
-            )
 
         try:
             content = self.provider.generate(messages)
@@ -322,19 +309,6 @@ class PlannerService:
                     ),
                 )
             )
-
-        # raw = (
-        #     content.model_dump(mode="json")
-        #     if isinstance(content, PlannerProposal)
-        #     else content
-        # )
-
-        # log_planner(
-        #     "raw",
-        #     raw,
-        #     enabled=self.show_raw_llm,
-        #     execution_id=execution_id,
-        # )
 
         result = normalize_planner_proposal(
             content,

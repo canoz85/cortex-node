@@ -231,7 +231,6 @@ class ExecutionDriver:
         controller_input: ControllerInput,
     ) -> FinalizationResult:
         allowed_workers = {
-            ControllerDecisionType.DISPATCH_SUMMARY: (WorkerRole.SUMMARY,),
             ControllerDecisionType.TERMINATE: (None, WorkerRole.CONTROLLER),
             ControllerDecisionType.CANCEL: (WorkerRole.CONTROLLER,),
         }

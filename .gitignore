@@ -28,7 +28,9 @@ dist/
 *.local
 .cortex_session.json
 
+
 # Logs and runtime files
+.tmp
 *.log
 *.pid
 .coverage

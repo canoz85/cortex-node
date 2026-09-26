@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict
 from typing_extensions import Literal
 
 from core.logging_utils import get_logger
-from core.planner_debug import log_planner, summarize_raw_llm
+from core.debug import log_llm_exchange
 
 
 PLANNER_ROUTER_PROMPT = """Classify the user's request by execution mode only.
@@ -74,40 +74,23 @@ def _llm_route_decision(
             include_raw=True,
         )
 
-        log_planner(
-            "router][system",
-            PLANNER_ROUTER_PROMPT,
-            enabled=show_raw_llm,
-        )
-
-        log_planner(
-            "router][human",
-            user_text,
-            enabled=show_raw_llm,
-        )
-
-        result = structured_router.invoke(
-            [
-                SystemMessage(content=PLANNER_ROUTER_PROMPT),
-                HumanMessage(content=user_text),
-            ]
-        )
-
-        log_planner(
-            "router][raw",
-            summarize_raw_llm(result.get("raw")),
+        messages = [
+            SystemMessage(content=PLANNER_ROUTER_PROMPT),
+            HumanMessage(content=user_text),
+        ]
+        result = structured_router.invoke(messages)
+        log_llm_exchange(
+            worker="planner",
+            operation="route",
+            messages=messages,
+            response=result.get("raw"),
+            execution_id=None,
             enabled=show_raw_llm,
         )
 
         parsing_error = result.get("parsing_error")
 
         if parsing_error is not None:
-            log_planner(
-                "router][parsing_error",
-                str(parsing_error),
-                enabled=show_raw_llm,
-            )
-
             if propagate_errors:
                 raise parsing_error
 

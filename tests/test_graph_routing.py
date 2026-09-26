@@ -17,13 +17,13 @@ from core.protocol.models import ControllerDecision, ExecutionCursor
 
 
 def _decision(decision_type: ControllerDecisionType) -> ControllerDecision:
-    if decision_type == ControllerDecisionType.DISPATCH_SUMMARY:
+    if decision_type == ControllerDecisionType.TERMINATE:
         return ControllerDecision(
             decision_type=decision_type,
             execution_status=ExecutionStatus.COMPLETED,
             cursor=ExecutionCursor(
                 phase=ExecutionPhase.COMPLETED,
-                current_worker=WorkerRole.SUMMARY,
+                current_worker=WorkerRole.CONTROLLER,
             ),
             terminal=True,
         )
@@ -37,16 +37,6 @@ def _decision(decision_type: ControllerDecisionType) -> ControllerDecision:
             ),
             terminal=True,
         )
-    if decision_type == ControllerDecisionType.TERMINATE:
-        return ControllerDecision(
-            decision_type=decision_type,
-            execution_status=ExecutionStatus.FAILED,
-            cursor=ExecutionCursor(
-                phase=ExecutionPhase.FAILED,
-                current_worker=WorkerRole.CONTROLLER,
-            ),
-            terminal=True,
-        )
     return ControllerDecision(decision_type=decision_type)
 
 
@@ -56,7 +46,6 @@ def _decision(decision_type: ControllerDecisionType) -> ControllerDecision:
         (ControllerDecisionType.DISPATCH_PLANNER, "planner"),
         (ControllerDecisionType.DISPATCH_BRAIN, "brain"),
         (ControllerDecisionType.DISPATCH_TOOL_RUNTIME, "tools"),
-        (ControllerDecisionType.DISPATCH_SUMMARY, END),
         (ControllerDecisionType.AWAIT_ASYNC_JOB, END),
         (ControllerDecisionType.PAUSE, END),
         (ControllerDecisionType.CANCEL, END),

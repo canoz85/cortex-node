@@ -24,6 +24,7 @@ from .models import (
     ControllerDecision,
     ControllerInput,
     ExecutionCursor,
+    ExactCollection,
     ExecutionPlan,
     ExecutionStep,
     PlannerResult,
@@ -248,7 +249,7 @@ class CortexController:
 
         next_step = self._find_next_executable_step(controller_input.active_plan)
         if next_step is None:
-            return self._dispatch_summary(controller_input.cursor, "Plan completed.")
+            return self._complete_execution(controller_input.cursor, "Plan completed.")
 
         return self._dispatch_brain(
             cursor=controller_input.cursor,
@@ -276,7 +277,7 @@ class CortexController:
                     )
                     if content and content.strip() else None
                 )
-                return self._dispatch_summary(
+                return self._complete_execution(
                     controller_input.cursor, "no_plan_required",
                     accepted_direct_response=accepted,
                 )
@@ -325,7 +326,7 @@ class CortexController:
                     )
 
                 if next_step is None:
-                    return self._dispatch_summary(
+                    return self._complete_execution(
                         controller_input.cursor,
                         "Plan contains no executable steps.",
                     )
@@ -587,6 +588,10 @@ class CortexController:
                 or "Step completed.",
                 tool_request_ids=tuple(record.result.request_id for record in records),
                 evidence_id=evidence_identity(records),
+                exact_collection=self._bind_exact_collection(
+                    semantic.exact_collection if semantic is not None else None,
+                    records,
+                ),
             )
             brain_result = brain_result.model_copy(update={"completion_evidence": bound})
             controller_input = controller_input.model_copy(update={"brain_result": brain_result})
@@ -725,7 +730,7 @@ class CortexController:
                     )
                     completed_step_id = active_step.step_id
 
-                return self._dispatch_summary(
+                return self._complete_execution(
                     controller_input.cursor,
                     "final_answer",
                     accepted_plan=accepted_plan,
@@ -751,6 +756,35 @@ class CortexController:
                 return self._dispatch_brain(cursor=controller_input.cursor, reason="continue")
 
         raise ValueError(f"Unsupported brain outcome: {brain_result.outcome}")
+
+    @staticmethod
+    def _bind_exact_collection(proposal, records) -> ExactCollection | None:
+        if proposal is None:
+            return None
+        visible_records = records[-24:]
+        if proposal.source_record_index >= len(visible_records):
+            raise ValueError("exact collection source record is unavailable")
+        record = visible_records[proposal.source_record_index]
+        if not record.result.success:
+            raise ValueError("exact collection source is not accepted tool evidence")
+
+        value = record.result.data
+        for part in proposal.data_path:
+            if isinstance(part, int) and not isinstance(part, bool):
+                if not isinstance(value, (list, tuple)) or not (-len(value) <= part < len(value)):
+                    raise ValueError("exact collection data path is invalid")
+                value = value[part]
+            else:
+                if not isinstance(value, dict) or part not in value:
+                    raise ValueError("exact collection data path is invalid")
+                value = value[part]
+
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("exact collection source must resolve to a collection")
+        return proposal.model_copy(update={
+            "source_request_id": record.result.request_id,
+            "items": tuple(value),
+        })
 
     def _decide_from_tool(
         self,
@@ -1227,7 +1261,7 @@ class CortexController:
         )
 
 
-    def _dispatch_summary(
+    def _complete_execution(
         self,
         cursor: ExecutionCursor,
         reason: str,
@@ -1239,7 +1273,7 @@ class CortexController:
         completed_cursor = cursor.model_copy(
             update={
                 "phase": ExecutionPhase.COMPLETED,
-                "current_worker": WorkerRole.SUMMARY,
+                "current_worker": WorkerRole.CONTROLLER,
                 "step_id": None,
                 "step_attempt": None,
             }
@@ -1247,8 +1281,8 @@ class CortexController:
         return ControllerDecision(
             accepted_plan=accepted_plan,
             accepted_direct_response=accepted_direct_response,
-            decision_type=ControllerDecisionType.DISPATCH_SUMMARY,
-            next_worker=WorkerRole.SUMMARY,
+            decision_type=ControllerDecisionType.TERMINATE,
+            next_worker=WorkerRole.CONTROLLER,
             reason=reason,
             execution_status=ExecutionStatus.COMPLETED,
             cursor=completed_cursor,

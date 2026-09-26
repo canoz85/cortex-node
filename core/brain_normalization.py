@@ -15,7 +15,7 @@ from pydantic import BaseModel, ValidationError
 
 from core.protocol.enums import BrainOutcomeKind as Kind, StepStatus
 from core.protocol.models import (
-    BrainInput, BrainOutcome, BrainUsage, ReplanRequest,
+    BrainInput, BrainOutcome, BrainUsage, ExactCollection, ReplanRequest,
     StepCompletionEvidence, ToolRequest,
 )
 
@@ -52,6 +52,34 @@ def _text(value, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise InvalidBrainOutput(f"missing_or_invalid_{field}")
     return value
+
+
+def _exact_collection(value) -> ExactCollection | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise InvalidBrainOutput("invalid_exact_collection")
+    _only_fields(value, {"source_record_index", "data_path", "label"})
+    source_record_index = value.get("source_record_index")
+    if isinstance(source_record_index, bool) or not isinstance(source_record_index, int):
+        raise InvalidBrainOutput("invalid_exact_collection_source_record_index")
+    path = value.get("data_path", [])
+    if (
+        not isinstance(path, list)
+        or any(
+            isinstance(part, bool) or not isinstance(part, (str, int))
+            for part in path
+        )
+    ):
+        raise InvalidBrainOutput("invalid_exact_collection_data_path")
+    label = value.get("label", "Results")
+    if not isinstance(label, str) or not label.strip():
+        raise InvalidBrainOutput("invalid_exact_collection_label")
+    return ExactCollection(
+        source_record_index=source_record_index,
+        data_path=tuple(path),
+        label=label.strip(),
+    )
 
 
 def _step_id(payload: dict, brain_input: BrainInput) -> str:
@@ -173,12 +201,14 @@ def _native_outcome(
 
     step_id = brain_input.active_step.step_id
     if name == "brain_step_completed":
-        _only_fields(arguments, {"message"})
+        _only_fields(arguments, {"message", "exact_collection"})
         summary = _text(arguments.get("message"), "message")
+        exact_collection = _exact_collection(arguments.get("exact_collection"))
         return BrainOutcome(
             outcome=Kind.STEP_COMPLETED, step_id=step_id, message=summary,
             completion_evidence=StepCompletionEvidence(
                 step_id=step_id, summary=summary,
+                exact_collection=exact_collection,
             ),
             proposed_step_status=StepStatus.COMPLETED,
         )
@@ -240,12 +270,16 @@ def _structured(
     if kind == Kind.FINAL_ANSWER_READY:
         raise InvalidBrainOutput("brain_final_answer_unsupported")
     if kind == Kind.STEP_COMPLETED:
-        _only_fields(payload, {"kind", "step_id", "message"})
+        _only_fields(payload, {"kind", "step_id", "message", "exact_collection"})
         step_id = _step_id(payload, brain_input)
         summary = _text(payload.get("message"), "message")
         return BrainOutcome(
             outcome=kind, step_id=step_id, message=summary,
-            completion_evidence=StepCompletionEvidence(step_id=step_id, summary=summary),
+            completion_evidence=StepCompletionEvidence(
+                step_id=step_id,
+                summary=summary,
+                exact_collection=_exact_collection(payload.get("exact_collection")),
+            ),
             proposed_step_status=StepStatus.COMPLETED,
         )
     if kind == Kind.REPLAN_REQUESTED:

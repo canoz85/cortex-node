@@ -186,7 +186,7 @@ def test_new_revision_resolves_again_and_citations_are_unchanged():
     assert ctx.brain_result.completion_evidence.tool_request_ids == ()
     assert set(StepCompletionEvidence.model_fields) == {
         "execution_id", "plan_id", "plan_revision", "step_id", "summary",
-        "tool_request_ids", "evidence_id",
+        "tool_request_ids", "evidence_id", "exact_collection",
     }
 
 

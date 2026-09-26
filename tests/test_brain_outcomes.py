@@ -76,6 +76,46 @@ def test_every_model_outcome_kind(payload, kind):
         assert result.completion_evidence == StepCompletionEvidence(step_id="s1", summary="All files read")
 
 
+def test_exact_collection_reference_is_bound_from_structured_tool_evidence():
+    context = brain_input()
+    outcome = normalize(AIMessage(content="", tool_calls=[{
+        "name": "brain_step_completed",
+        "id": "complete-1",
+        "args": {
+            "message": "Workspace files collected.",
+            "exact_collection": {
+                "source_record_index": 0,
+                "data_path": ["entries"],
+                "label": "Files",
+            },
+        },
+    }]))
+    record = ToolExecutionRecord(
+        execution_id=context.identity.execution_id,
+        plan_id=context.active_plan.plan_id,
+        plan_revision=context.active_plan.revision,
+        step_id=context.active_step.step_id,
+        tool_name="catalog_items",
+        result=ToolResult(
+            request_id="list-1",
+            success=True,
+            message="Catalogued.",
+            data={"entries": ["finalizer-raw.json", "API-ID:AbC-7"]},
+        ),
+    )
+    value = controller_input(context, outcome).model_copy(update={
+        "tool_execution_history": (record,),
+    })
+
+    decision = CortexController(24).decide(value)
+
+    exact = decision.completion_evidence.exact_collection
+    assert exact.items == ("finalizer-raw.json", "API-ID:AbC-7")
+    assert exact.source_request_id == "list-1"
+    assert exact.source_record_index == 0
+    assert exact.data_path == ("entries",)
+
+
 @pytest.mark.parametrize("raw", [
     AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"path": "a.py"}, "id": "provider-1"}]),
     {"content": "", "tool_calls": [{"id": "provider-1", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"a.py"}'}}]},
@@ -245,6 +285,7 @@ def test_only_visible_current_step_records_receive_refs():
     payload = evidence_prompt(context)
     assert len(payload["current_attempts"]) == 24
     assert all("evidence_ref" not in record and "request_id" not in record for record in payload["current_attempts"])
+    assert [record["record_index"] for record in payload["current_attempts"]] == list(range(24))
 
 
 @pytest.mark.parametrize("kind", list(Kind))
@@ -261,7 +302,7 @@ def test_controller_handles_every_typed_outcome(kind):
         Kind.REPLAN_REQUESTED: Decision.DISPATCH_PLANNER,
         Kind.STEP_COMPLETED: Decision.DISPATCH_BRAIN,
         Kind.STEP_FAILED: Decision.DISPATCH_BRAIN,
-        Kind.FINAL_ANSWER_READY: Decision.DISPATCH_SUMMARY,
+        Kind.FINAL_ANSWER_READY: Decision.TERMINATE,
         Kind.INVALID_OUTPUT: Decision.DISPATCH_BRAIN,
         Kind.PROVIDER_FAILURE: Decision.DISPATCH_BRAIN,
     }
@@ -430,6 +471,32 @@ def test_native_compliance_uses_bound_model_and_only_native_response(first_text,
         assert "currently bound executable or lifecycle tools" in instruction
         assert "evidence_refs were invalid" not in instruction
         assert first_text not in instruction
+
+
+def test_brain_logs_one_exchange_for_each_actual_retry_invocation(monkeypatch):
+    path = Path(".tmp/brain-exchanges.jsonl")
+    path.parent.mkdir(exist_ok=True)
+    if path.exists():
+        path.unlink()
+    monkeypatch.setenv("CORTEX_RAW_LLM_FILE", str(path))
+    native = native_action("brain_step_completed", {"message": "Done"})
+    model = SequenceModel(AIMessage(content="invalid prose"), native)
+    provider = LangChainBrainProvider(
+        brain_llm=model,
+        executable_tools=executable_tools("read_file"),
+        show_raw_llm=False,
+    )
+
+    result = provider.generate(
+        brain_input(), (BrainMessage(role="system", content="Active step"),),
+        tools_enabled=True,
+    )
+
+    assert result.kind == Kind.STEP_COMPLETED
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 2
+    assert all((item["worker"], item["operation"]) == ("brain", "step") for item in records)
+    assert len(records[1]["messages"]) == len(records[0]["messages"]) + 2
 
 
 @pytest.mark.parametrize("name, arguments", [
@@ -637,6 +704,7 @@ def test_failure_escalation_context_is_explicit_compact_and_deterministic():
         "success": False,
         "error": {"code": "FILE_FILE_NOT_FOUND", "message": "File not found"},
         "signature": "read:missing.txt", "matching_failure_count": 1,
+        "record_index": 0,
     }
     assert evidence["current_step_failure_count"] == 1
 

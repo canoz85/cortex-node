@@ -15,6 +15,8 @@ from core.finalizer_provider import (
 from core.protocol.enums import ExecutionStatus
 from core.protocol.models import (
     AcceptedStepResult,
+    AcceptedDirectResponse,
+    ExactCollection,
     FinalizationRequest,
     StepCompletionEvidence,
     ToolExecutionRecord,
@@ -62,6 +64,25 @@ def accepted_result(
         summary=semantic_content,
         tool_request_ids=tool_request_ids,
         evidence_id=f"evidence-{step}-{revision}",
+    ))
+
+
+def exact_result(items, *, label="Files"):
+    return AcceptedStepResult(completion_evidence=StepCompletionEvidence(
+        execution_id=IDENTITY.execution_id,
+        plan_id="plan-1",
+        plan_revision=2,
+        step_id="step-1",
+        summary="Exact collection accepted.",
+        tool_request_ids=("list-1",),
+        evidence_id="evidence-exact",
+        exact_collection=ExactCollection(
+            source_record_index=0,
+            source_request_id="list-1",
+            data_path=("entries",),
+            label=label,
+            items=tuple(items),
+        ),
     ))
 
 
@@ -163,6 +184,90 @@ def test_no_accepted_results_preserves_existing_model_projection_and_rendering()
     assert FINALIZER_SYSTEM_PROMPT == calls[0][0].content
 
 
+def test_system_prompt_preserves_exact_accepted_collections():
+    prompt = " ".join(FINALIZER_SYSTEM_PROMPT.split())
+
+    assert "exact factual collection" in prompt
+    assert "preserve those items exactly" in prompt
+    assert "Do not add, remove, rename, substitute, infer" in prompt
+    assert "without changing its factual members" in prompt
+
+
+def test_system_prompt_prohibits_internal_correction_commentary():
+    prompt = " ".join(FINALIZER_SYSTEM_PROMPT.split())
+
+    assert "Do not include internal reasoning, self-corrections" in prompt
+    assert '"wait", "checking", or "actually"' in prompt
+    assert "Return only the polished user-facing answer" in prompt
+
+
+def test_exact_filename_collection_bypasses_model_and_preserves_members():
+    model = Model(AIMessage(content="invented.py and final_raw.json"))
+    req = request(accepted_results=(exact_result((
+        "finalizer-messages.json",
+        "finalizer-raw.json",
+    )),))
+    summary = Finalizer().finalize(req).execution_summary
+
+    answer = LangChainFinalAnswerRenderer(llm=model).render(req, summary)
+
+    assert answer == (
+        "Files:\n"
+        "- finalizer-messages.json\n"
+        "- finalizer-raw.json"
+    )
+    assert "final_raw.json" not in answer
+    assert "invented.py" not in answer
+    assert model.calls == []
+
+
+def test_exact_identifier_and_path_members_preserve_case_and_punctuation():
+    model = Model(AIMessage(content="must not run"))
+    members = ("Build-ID:AbC-007", "src/API.v2/Finalizer-RAW.json")
+    req = request(accepted_results=(exact_result(members, label="Identifiers"),))
+    summary = Finalizer().finalize(req).execution_summary
+
+    answer = LangChainFinalAnswerRenderer(llm=model).render(req, summary)
+
+    assert answer == (
+        "Identifiers:\n"
+        "- Build-ID:AbC-007\n"
+        "- src/API.v2/Finalizer-RAW.json"
+    )
+    assert model.calls == []
+
+
+def test_normal_prose_still_uses_model_renderer():
+    result, calls = render(
+        request(accepted_results=(accepted_result("step-1", "Accepted prose."),)),
+        AIMessage(content="Polished prose."),
+    )
+
+    assert result.final_answer == "Polished prose."
+    assert len(calls) == 1
+
+
+def test_accepted_direct_response_bypasses_model_renderer():
+    model = Model(AIMessage(content="must not run"))
+    req = FinalizationRequest(
+        identity=IDENTITY,
+        status=ExecutionStatus.COMPLETED,
+        context=CONTEXT,
+        accepted_direct_response=AcceptedDirectResponse(
+            execution_id=IDENTITY.execution_id,
+            request_id="direct-1",
+            content="Exact direct response.",
+        ),
+        direct_response=True,
+    )
+    summary = Finalizer().finalize(req).execution_summary
+
+    answer = LangChainFinalAnswerRenderer(llm=model).render(req, summary)
+
+    assert answer == "Exact direct response."
+    assert model.calls == []
+
+
 def test_oversized_duplicate_evidence_is_bounded_and_marked_before_model_invocation():
     req = request((record("step-1", {"status": "modified"}),
                    record("step-2", {"diff": "HEAD" + "x" * 150000 + "TAIL"}, "DUPLICATE" * 30000)))
@@ -218,16 +323,13 @@ def test_malformed_or_control_output_has_typed_render_error_and_preserves_summar
     assert len(calls) == 1
 
 
-def test_provider_exception_is_observable_without_corrupting_status(capsys):
+def test_provider_exception_creates_no_fake_exchange_and_preserves_status(capsys):
     result, calls = render(request(), RuntimeError("provider unavailable"), enabled=True)
     assert result.final_answer_error == "RuntimeError: provider unavailable"
     assert result.execution_summary.status == ExecutionStatus.COMPLETED
     assert "Completed steps: step-1, step-2" in result.execution_summary.summary_text
     output = capsys.readouterr().out
-    assert "[finalizer:error]" in output
-    assert '"stage": "provider"' in output
-    assert "RuntimeError" in output and "provider unavailable" in output
-    assert "[finalizer:normalized]" in output
+    assert output == ""
     assert len(calls) == 1
 
 
@@ -241,8 +343,11 @@ def test_debug_flag_controls_diagnostics_without_changing_messages_or_result(cap
     output = capsys.readouterr().out
     assert bool(output) == enabled
     if enabled:
-        for marker in ("request", "prompt", "raw", "normalized"):
-            assert f"[finalizer:{marker}]" in output
+        assert "[raw-llm:finalizer:render]" in output
+        assert '"worker": "finalizer"' in output
+        assert '"operation": "render"' in output
+        assert '"messages": [' in output
+        assert '"response": {' in output
 
 
 def test_renderer_failure_applied_by_adapter_keeps_completed_execution():

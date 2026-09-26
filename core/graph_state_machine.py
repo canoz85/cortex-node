@@ -36,8 +36,7 @@ def map_controller_decision(
             return "tools"
 
         case (
-            ControllerDecisionType.DISPATCH_SUMMARY
-            | ControllerDecisionType.AWAIT_ASYNC_JOB
+            ControllerDecisionType.AWAIT_ASYNC_JOB
             | ControllerDecisionType.PAUSE
             | ControllerDecisionType.CANCEL
             | ControllerDecisionType.TERMINATE

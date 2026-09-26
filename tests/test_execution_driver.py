@@ -191,7 +191,7 @@ class FinalizerWorker:
         self.delegate = FinalizerService()
 
     def finalize(self, request):
-        self.trace.invoked("finalizer", ControllerDecisionType.DISPATCH_SUMMARY)
+        self.trace.invoked("finalizer", ControllerDecisionType.TERMINATE)
         return self.delegate.finalize(request)
 def test_complete_non_graph_lifecycle_is_controller_authorized():
     trace = AuthorizationTrace()
@@ -226,7 +226,7 @@ def test_complete_non_graph_lifecycle_is_controller_authorized():
         ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
         ControllerDecisionType.DISPATCH_BRAIN,
         ControllerDecisionType.DISPATCH_BRAIN,
-        ControllerDecisionType.DISPATCH_SUMMARY,
+        ControllerDecisionType.TERMINATE,
     ]
     assert trace.invocations == [
         ("planner", ControllerDecisionType.DISPATCH_PLANNER),
@@ -234,7 +234,7 @@ def test_complete_non_graph_lifecycle_is_controller_authorized():
         ("tool", ControllerDecisionType.DISPATCH_TOOL_RUNTIME),
         ("brain", ControllerDecisionType.DISPATCH_BRAIN),
         ("brain", ControllerDecisionType.DISPATCH_BRAIN),
-        ("finalizer", ControllerDecisionType.DISPATCH_SUMMARY),
+        ("finalizer", ControllerDecisionType.TERMINATE),
     ]
     assert iterations == [None, 1, 1, 2, 3, 3]
     assert trace.current is None
@@ -402,13 +402,13 @@ def capture_terminal_request(completion_provenance=(), *, brain_result=None):
         )
     )
     decision = ControllerDecision(
-        decision_type=ControllerDecisionType.DISPATCH_SUMMARY,
-        next_worker=WorkerRole.SUMMARY,
+        decision_type=ControllerDecisionType.TERMINATE,
+        next_worker=WorkerRole.CONTROLLER,
         execution_status=ExecutionStatus.COMPLETED,
         cursor=state.protocol_visible.cursor.model_copy(
             update={
                 "phase": ExecutionPhase.COMPLETED,
-                "current_worker": WorkerRole.SUMMARY,
+                "current_worker": WorkerRole.CONTROLLER,
             }
         ),
         terminal=True,
@@ -545,8 +545,8 @@ def test_unknown_or_unsupported_dispatch_fails_closed():
 def test_finalizer_cannot_run_without_terminal_authorization():
     state = initial_state()
     decision = ControllerDecision(
-        decision_type=ControllerDecisionType.DISPATCH_SUMMARY,
-        next_worker=WorkerRole.SUMMARY,
+        decision_type=ControllerDecisionType.TERMINATE,
+        next_worker=WorkerRole.CONTROLLER,
         cursor=state.protocol_visible.cursor,
     )
     driver, _, ports = fixed_driver(state, decision)

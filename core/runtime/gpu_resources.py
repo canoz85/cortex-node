@@ -53,7 +53,6 @@ class GpuResourcePolicy:
         "planner",
         "brain",
         "tools",
-        "summarize_memory",
     })
 
     def __post_init__(self) -> None:

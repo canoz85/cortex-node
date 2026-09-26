@@ -23,7 +23,10 @@ def create_planner_node(
     planner_service: PlannerService | None = None,
 ):
     service = planner_service or PlannerService(
-        provider=LangChainPlannerProvider(planner_llm=planner_llm),
+        provider=LangChainPlannerProvider(
+            planner_llm=planner_llm,
+            show_raw_llm=show_raw_llm,
+        ),
         router=LangChainPlannerRouter(router_llm=router_llm, show_raw_llm=show_raw_llm),
         mutating_tools=MUTATING_TOOLS,
         show_raw_llm=show_raw_llm,

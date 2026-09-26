@@ -50,6 +50,9 @@ active step requires summarizing inspected items, include the summaries themselv
 than only saying that the items were summarized.
 The completion message is the Controller-visible semantic result of the step.
 Completion evidence separately establishes the provenance supporting that result.
+When that result is an exact collection already present in structured tool data,
+reference its tool request and data path as exact_collection instead of copying or
+rewriting its members. The Controller binds the exact members from tool evidence.
 Return REPLAN_REQUESTED when the active strategy or assumptions are no longer viable, but the overall
 user objective may still be achievable and correct continuation requires changing the accepted plan.
 This asks the Controller to authorize Planner revision. It does not require repeated identical failures.

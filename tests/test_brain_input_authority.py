@@ -198,6 +198,7 @@ def test_successful_read_is_grounded_before_brain_can_repeat_the_same_call():
             "success": True,
             "evidence_complete": True,
             "evidence": {"path": ".cortex_session.json", "content": "session evidence"},
+            "record_index": 0,
         }
         assert "If complete evidence satisfies the step, call brain_step_completed." in rendered
         assert "Do not repeat a successful tool call with identical arguments" in rendered

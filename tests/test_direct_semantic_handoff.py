@@ -122,7 +122,7 @@ def test_memory_backed_direct_semantics_are_accepted_bound_and_presented():
         first.execution_state, "What is my preferred signature?", first.worker_result,
     ))
     accepted = second.execution_state.protocol_visible.accepted_direct_response
-    assert second.decision.decision_type == ControllerDecisionType.DISPATCH_SUMMARY
+    assert second.decision.decision_type == ControllerDecisionType.TERMINATE
     assert accepted.content == "Your preferred signature is Amber."
     assert accepted.request_id == first.decision.planning_request.request_id
     assert accepted.execution_id == IDENTITY.execution_id

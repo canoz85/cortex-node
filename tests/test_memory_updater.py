@@ -1,6 +1,8 @@
 """Slice 5 structured proposals, source binding, and safe compaction."""
 
 from types import SimpleNamespace
+import json
+from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -343,6 +345,40 @@ def test_provider_uses_one_structured_call_with_curated_payload():
     content = llm.structured.calls[0][-1].content
     assert "Benim adım Can." in content
     assert "rolling_summary" not in content and "tool_execution_history" not in content
+
+
+def test_memory_provider_logs_only_its_actual_exchange(monkeypatch, capsys):
+    path = Path(".tmp/memory-exchange.jsonl")
+    path.parent.mkdir(exist_ok=True)
+    if path.exists():
+        path.unlink()
+    monkeypatch.setenv("CORTEX_RAW_LLM_FILE", str(path))
+    raw = AIMessage(
+        content='{"facts":[]}',
+        response_metadata={"model": "memory-model", "done_reason": "stop"},
+    )
+
+    class Structured:
+        def invoke(self, messages):
+            return {"raw": raw, "parsed": MemoryProposal(), "parsing_error": None}
+
+    class LLM:
+        def with_structured_output(self, schema, method, include_raw=False):
+            assert schema is MemoryProposal and method == "json_schema" and include_raw
+            return Structured()
+
+    request = build_memory_update_request(terminal(), ConversationMemory())
+    result = LangChainMemoryProposalProvider(
+        LLM(), show_raw_llm=False,
+    ).generate(request)
+
+    assert result == MemoryProposal()
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["execution_id"] == request.execution_id
+    assert (record["worker"], record["operation"]) == ("memory", "update")
+    assert len(record["messages"]) == 2
+    assert record["response"]["model"] == "memory-model"
+    assert capsys.readouterr().out == ""
 
 
 @pytest.mark.parametrize(("summary", "proposal"), [
@@ -734,10 +770,10 @@ def test_async_waiting_polls_do_not_invoke_updater_before_terminal_resume(tmp_pa
                 assert updater.calls == 0
                 return iter([{"controller": {"controller_decision": waiting}}])
             cursor = ExecutionCursor(
-                phase=ExecutionPhase.COMPLETED, current_worker=WorkerRole.SUMMARY,
+                phase=ExecutionPhase.COMPLETED, current_worker=WorkerRole.CONTROLLER,
             )
             decision = ControllerDecision(
-                decision_type=ControllerDecisionType.DISPATCH_SUMMARY,
+                decision_type=ControllerDecisionType.TERMINATE,
                 execution_status=ExecutionStatus.COMPLETED,
                 cursor=cursor, terminal=True,
             )

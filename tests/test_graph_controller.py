@@ -177,7 +177,7 @@ def test_finalizer_failure_is_observable_and_never_falls_back_to_brain_answer():
     assert "shadow unavailable" in update["finalization_error"]
     assert "finalization_result" not in update
     assert update["execution_state"].protocol_visible.status == ExecutionStatus.COMPLETED
-    assert update["controller_decision"].decision_type == ControllerDecisionType.DISPATCH_SUMMARY
+    assert update["controller_decision"].decision_type == ControllerDecisionType.TERMINATE
     assert route_after_controller(update) == "__end__"
 
 

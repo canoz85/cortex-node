@@ -99,7 +99,7 @@ def test_direct_response_context_is_explicit_and_final_answer_completes():
             outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=request.request_id,
         ),
     ))
-    assert completed.decision_type == ControllerDecisionType.DISPATCH_SUMMARY
+    assert completed.decision_type == ControllerDecisionType.TERMINATE
     assert completed.execution_status == ExecutionStatus.COMPLETED
     assert completed.accepted_plan is None and completed.terminal
 
@@ -124,7 +124,7 @@ def test_final_answer_after_completed_plan_does_not_require_active_step():
         )
     )
 
-    assert completed.decision_type == ControllerDecisionType.DISPATCH_SUMMARY
+    assert completed.decision_type == ControllerDecisionType.TERMINATE
     assert completed.execution_status == ExecutionStatus.COMPLETED
     assert completed.completed_step_id is None
     assert completed.cursor is not None
@@ -141,7 +141,7 @@ def test_no_plan_required_does_not_create_a_brain_direct_response_marker():
             outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=request.request_id,
         ),
     ))
-    assert decision.decision_type == ControllerDecisionType.DISPATCH_SUMMARY
+    assert decision.decision_type == ControllerDecisionType.TERMINATE
     assert decision.direct_response is False
 
 

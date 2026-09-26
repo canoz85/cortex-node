@@ -73,15 +73,6 @@ def create_controller_node(
 
         execution_state = turn.execution_state
 
-        print("\n=== AFTER APPLY ===")
-        # print("cursor:", execution_state.protocol_visible.cursor)
-        print("active_step:", execution_state.protocol_visible.active_step)
-        print(
-            "completed:",
-            execution_state.protocol_visible.completed_step_ids,
-        )
-        print("========================\n")
-
         update = {
             "execution_state": execution_state,
             "controller_decision": decision,

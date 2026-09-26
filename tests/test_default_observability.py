@@ -208,7 +208,7 @@ def test_default_tool_result_has_safe_generic_fallback(capsys):
     assert "payload must not be logged" not in output
 
 
-def test_default_renders_controller_accepted_brain_completion(capsys):
+def test_default_suppresses_controller_accepted_brain_completion(capsys):
     completion = StepCompletionEvidence(
         execution_id=IDENTITY.execution_id,
         plan_id="accepted-plan",
@@ -218,18 +218,31 @@ def test_default_renders_controller_accepted_brain_completion(capsys):
         evidence_id="evidence-1",
     )
 
-    render({
+    value = {
         "controller_decision": ControllerDecision(
             decision_type=ControllerDecisionType.DISPATCH_BRAIN,
             next_worker=WorkerRole.BRAIN,
             completed_step_id="list",
             completion_evidence=completion,
         ),
-    })
+    }
+
+    render(value)
 
     output = capsys.readouterr().out
-    assert "[brain]" in output
-    assert "File list retrieved successfully." in output
+    assert "[brain]" not in output
+    assert "File list retrieved successfully." not in output
+
+    update = extract_node_update(
+        from_node="brain", to_node="controller", value=value
+    )
+    assert update.accepted_completion_message == "File list retrieved successfully."
+
+    render_node_update(update, verbose=True)
+    verbose_output = capsys.readouterr().out
+    assert "[controller]" in verbose_output
+    assert "Step completed: list" in verbose_output
+    assert "File list retrieved successfully." not in verbose_output
 
 
 def test_default_preserves_finalizer_attribution(capsys):
@@ -251,3 +264,40 @@ def test_default_preserves_finalizer_attribution(capsys):
     output = capsys.readouterr().out
     assert "[finalizer]" in output
     assert answer in output
+
+
+def test_controller_transitions_are_verbose_only_and_semantic(capsys):
+    accepted_plan = plan()
+    request = ToolRequest(
+        request_id="read-1",
+        tool_name="read_file",
+        arguments={"path": "private.py"},
+    )
+    value = {
+        "controller_decision": ControllerDecision(
+            decision_type=ControllerDecisionType.DISPATCH_BRAIN,
+            next_worker=WorkerRole.BRAIN,
+            reason="Plan accepted.",
+            accepted_plan=accepted_plan,
+            next_step_id="list",
+        ),
+        "brain_result": BrainOutcome(
+            outcome=BrainOutcomeKind.TOOL_REQUESTED,
+            step_id="list",
+            tool_request=request,
+        ),
+    }
+    update = extract_node_update(
+        from_node="planner", to_node="controller", value=value
+    )
+
+    render_node_update(update)
+    normal = capsys.readouterr().out
+    assert "[controller]" not in normal
+
+    render_node_update(update, verbose=True)
+    verbose = capsys.readouterr().out
+    assert "[controller]" in verbose
+    assert "Plan ready" in verbose
+    assert "Tool requested: read_file" in verbose
+    assert "ExecutionState" not in verbose

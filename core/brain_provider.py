@@ -11,7 +11,7 @@ from core.brain_normalization import normalize_brain_output, normalize_brain_usa
 from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import BrainInput, BrainOutcome
 
-from core.debug import save_raw_llm
+from core.debug import log_llm_exchange
 
 
 logger = logging.getLogger(__name__)
@@ -25,9 +25,9 @@ def _ensure_native_call(
     _log_native_call_attempt(raw, 1)
 
     if getattr(raw, "tool_calls", None):
-        return raw
+        return raw, provider_messages
 
-    corrected = llm.invoke([
+    corrected_messages = [
         *provider_messages,
         *([AIMessage(content=raw.content)] if isinstance(raw, AIMessage) else []),
         SystemMessage(content=(
@@ -40,10 +40,11 @@ def _ensure_native_call(
             "with its required arguments and leave content empty. "
             "Keep the same active-step decision; correct only the response protocol."
         )),
-    ])
+    ]
+    corrected = llm.invoke(corrected_messages)
 
     _log_native_call_attempt(corrected, 2)
-    return corrected
+    return corrected, corrected_messages
 
 def _log_native_call_attempt(raw, attempt: int) -> None:
     calls = getattr(raw, "tool_calls", None)
@@ -51,71 +52,12 @@ def _log_native_call_attempt(raw, attempt: int) -> None:
         call["name"] for call in calls
         if isinstance(call, dict) and isinstance(call.get("name"), str)
     ] if isinstance(calls, (list, tuple)) else []
-    logger.info(
+    logger.debug(
         "Brain native-call compliance: attempt=%s native_tool_calls_present=%s "
         "tool_call_names=%s retry_triggered=%s retry_exhausted=%s",
         attempt, bool(calls), names,
         attempt == 1 and not calls, attempt == 2 and not calls,
     )
-
-def _summarize_response(raw) -> dict:
-    response_metadata = getattr(raw, "response_metadata", {}) or {}
-    usage_metadata = getattr(raw, "usage_metadata", {}) or {}
-
-    return {
-        "content": getattr(raw, "content", ""),
-        "tool_calls": getattr(raw, "tool_calls", []) or [],
-        "model": response_metadata.get("model")
-            or response_metadata.get("model_name"),
-        "done_reason": response_metadata.get("done_reason"),
-        "usage": {
-            "input_tokens": usage_metadata.get("input_tokens"),
-            "output_tokens": usage_metadata.get("output_tokens"),
-            "total_tokens": usage_metadata.get("total_tokens"),
-        },
-    }
-
-def _log_brain_exchange(
-    *,
-    messages,
-    raw,
-    execution_id: str,
-    show_raw_llm: bool,
-) -> None:
-    for message in messages:
-        role = (
-            "human"
-            if isinstance(message, HumanMessage)
-            else "system"
-        )
-
-        save_raw_llm(
-            "brain",
-            f"message:{role}",
-            message.content,
-            execution_id=execution_id,
-        )
-
-    save_raw_llm(
-        "brain",
-        "response",
-        _summarize_response(raw),
-        execution_id=execution_id,
-    )
-
-    if not show_raw_llm:
-        return
-
-    for message in messages:
-        role = (
-            "human"
-            if isinstance(message, HumanMessage)
-            else "system"
-        )
-        print(f"[raw-llm][{role}]\n{message.content}")
-
-    print(f"[raw-llm][response]\n{raw}")
-
 
 LIFECYCLE_ACTION_SCHEMAS = (
     {
@@ -135,6 +77,32 @@ LIFECYCLE_ACTION_SCHEMAS = (
                             "requested result when the step produces one; do not merely state "
                             "that the step was completed."
                         ),
+                    },
+                    "exact_collection": {
+                        "type": "object",
+                        "description": (
+                            "When the accepted result is an exact list, table, path set, "
+                            "identifier set, or other collection already present in one "
+                            "tool result's structured data, reference it here. Do not copy "
+                            "the members into this object."
+                        ),
+                        "properties": {
+                            "source_record_index": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": "Index in the displayed current_attempts array.",
+                            },
+                            "data_path": {
+                                "type": "array",
+                                "items": {"anyOf": [
+                                    {"type": "string"},
+                                    {"type": "integer"},
+                                ]},
+                            },
+                            "label": {"type": "string"},
+                        },
+                        "required": ["source_record_index", "data_path"],
+                        "additionalProperties": False,
                     },
                 },
                 "required": ["message"],
@@ -285,10 +253,21 @@ class LangChainBrainProvider:
                 if native_tools_enabled else self.brain_llm
             )
             raw = llm.invoke(provider_messages)
+            log_llm_exchange(
+                worker="brain", operation="step", messages=provider_messages,
+                response=raw, execution_id=brain_input.identity.execution_id,
+                enabled=self.show_raw_llm,
+            )
             if native_tools_enabled:
-                raw = _ensure_native_call(
+                raw, retry_messages = _ensure_native_call(
                     llm=llm, provider_messages=provider_messages, raw=raw,
                 )
+                if retry_messages is not provider_messages:
+                    log_llm_exchange(
+                        worker="brain", operation="step", messages=retry_messages,
+                        response=raw, execution_id=brain_input.identity.execution_id,
+                        enabled=self.show_raw_llm,
+                    )
         except Exception as exc:
             # Provider/structured-output errors are values at the service boundary.
             # Exception retries remain a Controller decision.
@@ -298,13 +277,6 @@ class LangChainBrainProvider:
                 error_code=type(exc).__name__,
                 message=f"Brain provider failed ({type(exc).__name__}).",
             )
-
-        _log_brain_exchange(
-            messages=provider_messages,
-            raw=raw,
-            execution_id=brain_input.identity.execution_id,
-            show_raw_llm=self.show_raw_llm,
-        )
 
         outcome = normalize_brain_output(
             raw, brain_input, set(self.executable_tools) & authorized_tool_names,

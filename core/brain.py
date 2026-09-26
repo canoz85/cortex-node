@@ -381,6 +381,10 @@ def _build_step_progress_messages(
         else:
             prior_failures.append(failure_record(record))
 
+    visible_current_attempts = current_attempts[-max_current_records:]
+    for index, attempt in enumerate(visible_current_attempts):
+        attempt["record_index"] = index
+
     payload = {
         "schema": 1,
         "active_step": (
@@ -391,7 +395,7 @@ def _build_step_progress_messages(
             if active_step is not None
             else None
         ),
-        "current_attempts": current_attempts[-max_current_records:],
+        "current_attempts": visible_current_attempts,
         "current_step_failure_count": sum(
             1 for record in history
             if record.step_id == active_step_id and not record.result.success

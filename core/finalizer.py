@@ -2,7 +2,7 @@
 
 from typing import Protocol
 
-from core.finalizer_debug import log_finalizer
+from core.finalizer_exact import render_exact_collections
 from core.protocol.enums import StepStatus
 from core.protocol.models import (
     ExecutionSummary,
@@ -74,6 +74,9 @@ class SummaryFinalAnswerRenderer:
     ) -> str:
         if request.accepted_direct_response is not None:
             return request.accepted_direct_response.content
+        exact = render_exact_collections(request)
+        if exact is not None:
+            return exact
         return summary.summary_text
 
 
@@ -91,26 +94,16 @@ class Finalizer:
         self._summary_builder = summary_builder or ExecutionSummaryBuilder()
         self._answer_renderer = answer_renderer or SummaryFinalAnswerRenderer()
         self.show_raw_llm = show_raw_llm
+        if hasattr(self._answer_renderer, "show_raw_llm"):
+            self._answer_renderer.show_raw_llm = show_raw_llm
 
     def finalize(self, request: FinalizationRequest) -> FinalizationResult:
         summary = self._summary_builder.build(request)
-        if self.show_raw_llm:
-            log_finalizer("request", {
-                "identity": request.identity.model_dump(mode="json"),
-                "status": request.status.value,
-                "accepted_plan": request.accepted_plan.model_dump(mode="json") if request.accepted_plan else None,
-                "completed_step_ids": summary.completed_step_ids,
-                "failed_step_ids": summary.failed_step_ids,
-                "terminal_reason": request.terminal_reason,
-                "tool_execution_history": [record.model_dump(mode="json") for record in request.tool_execution_history],
-            }, execution_id=summary.execution_id)
         try:
             final_answer = self._answer_renderer.render(request, summary).strip()
             if not final_answer:
                 raise ValueError("Final answer renderer returned empty content")
         except Exception as exc:
-            log_finalizer("error", {"stage": "render", "type": type(exc).__name__, "message": str(exc)},
-                          enabled=self.show_raw_llm, execution_id=summary.execution_id)
             result = FinalizationResult(
                 execution_summary=summary,
                 final_answer=self._RENDER_FAILURE_ANSWER,
@@ -118,6 +111,4 @@ class Finalizer:
             )
         else:
             result = FinalizationResult(execution_summary=summary, final_answer=final_answer)
-        if self.show_raw_llm:
-            log_finalizer("normalized", result.model_dump(mode="json"), execution_id=summary.execution_id)
         return result
