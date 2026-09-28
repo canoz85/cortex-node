@@ -12,6 +12,7 @@ from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import BrainInput, BrainOutcome
 
 from core.debug import log_llm_exchange
+from core.logging.live_status import add_response_usage, begin_provider_invocation
 
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,9 @@ def _ensure_native_call(
             "Keep the same active-step decision; correct only the response protocol."
         )),
     ]
+    begin_provider_invocation(worker="brain")
     corrected = llm.invoke(corrected_messages)
+    add_response_usage(corrected, worker="brain")
 
     _log_native_call_attempt(corrected, 2)
     return corrected, corrected_messages
@@ -252,7 +255,9 @@ class LangChainBrainProvider:
                 self.brain_llm.bind_tools(native_brain_tools(authorized_tools))
                 if native_tools_enabled else self.brain_llm
             )
+            begin_provider_invocation(worker="brain")
             raw = llm.invoke(provider_messages)
+            add_response_usage(raw, worker="brain")
             log_llm_exchange(
                 worker="brain", operation="step", messages=provider_messages,
                 response=raw, execution_id=brain_input.identity.execution_id,

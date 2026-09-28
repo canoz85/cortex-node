@@ -16,6 +16,7 @@ from core.graph_brain import create_brain_node
 from core.brain_normalization import normalize_brain_output, normalize_brain_usage
 from core.brain_provider import LIFECYCLE_ACTION_SCHEMAS, LangChainBrainProvider
 from core.graph_constants import SYSTEM_PROMPT_TEMPLATE, CASUAL_SYSTEM_PROMPT_TEMPLATE
+from core.logging.live_status import LiveStatus
 from core.protocol.controller import CortexController
 from core.protocol.enums import BrainOutcomeKind as Kind, ControllerDecisionType as Decision, ExecutionPhase, ExecutionStatus, StepStatus
 from core.protocol.models import (
@@ -497,6 +498,32 @@ def test_brain_logs_one_exchange_for_each_actual_retry_invocation(monkeypatch):
     assert len(records) == 2
     assert all((item["worker"], item["operation"]) == ("brain", "step") for item in records)
     assert len(records[1]["messages"]) == len(records[0]["messages"]) + 2
+
+
+def test_brain_live_step_counts_each_actual_provider_invocation():
+    model = SequenceModel(
+        AIMessage(content="invalid prose"),
+        native_action("brain_step_completed", {"message": "Done"}),
+    )
+    provider = LangChainBrainProvider(
+        brain_llm=model,
+        executable_tools=executable_tools("read_file"),
+    )
+    status = LiveStatus(enabled=False)
+    status.start("planner")
+    try:
+        result = provider.generate(
+            brain_input(),
+            (BrainMessage(role="system", content="Active step"),),
+            tools_enabled=True,
+        )
+        assert result.kind == Kind.STEP_COMPLETED
+        assert len(model.calls) == 2
+        assert status.provider_invocations_by_worker["brain"] == 2
+        assert (status.stage, status.detail) == ("brain", "step 2")
+        assert status.usage_by_worker["brain"]["calls"] == 2
+    finally:
+        status.stop()
 
 
 @pytest.mark.parametrize("name, arguments", [

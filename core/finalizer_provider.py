@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from core.debug import log_llm_exchange
 from core.finalizer_exact import render_exact_collections
 from core.protocol.models import ExecutionSummary, FinalizationRequest
+from core.logging.live_status import add_response_usage, current_live_status
 
 
 FINALIZER_SYSTEM_PROMPT = """You are CortexNode's final-answer renderer.
@@ -162,6 +163,10 @@ class LangChainFinalAnswerRenderer:
         request: FinalizationRequest,
         summary: ExecutionSummary,
     ) -> str:
+        status = current_live_status()
+        if status is not None:
+            status.update("finalizer")
+
         if request.accepted_direct_response is not None:
             return request.accepted_direct_response.content
 
@@ -196,6 +201,7 @@ class LangChainFinalAnswerRenderer:
 
         try:
             response = self._llm.invoke(messages)
+            add_response_usage(response, worker="finalizer")
             log_llm_exchange(
                 worker="finalizer",
                 operation="render",

@@ -6,6 +6,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.conversation_memory_updater import MemoryProposal, MemoryUpdateRequest
 from core.debug import log_llm_exchange
+from core.logging.live_status import add_response_usage
 
 
 _SYSTEM_PROMPT = """Extract only durable memory supported by the supplied evidence.
@@ -58,6 +59,7 @@ class LangChainMemoryProposalProvider:
             HumanMessage(content=json.dumps(request.model_dump(mode="json"), ensure_ascii=False)),
         ]
         exchange = structured.invoke(messages)
+        add_response_usage(exchange, worker="memory")
         if isinstance(exchange, dict) and "raw" in exchange and "parsed" in exchange:
             raw = exchange.get("raw")
             result = exchange.get("parsed")

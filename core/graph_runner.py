@@ -15,6 +15,7 @@ from core.graph_messages import (
 )
 from core.logging.node_update import extract_node_update
 from core.logging.renderer import render_node_update
+from core.logging.live_status import LiveStatus
 from core.logging_utils import get_logger, log_event
 from core.memory.terminal import AcceptedCompletion, CompletedTurnEvidence
 from core.memory import TurnStatus
@@ -102,10 +103,14 @@ def run_prompt(
     turn_index: int = 1,
     planner_memory_context: PlannerMemoryContext | None = None,
     verbose: bool = False,
+    live_status: LiveStatus | None = None,
 ) -> tuple[list, str]:
     prior_messages = list(bounded_recent_conversation(conversational_messages(history or [])))
     run_id = run_id or uuid.uuid4().hex[:12]
     started_at = perf_counter()
+    owns_live_status = live_status is None
+    live_status = live_status or LiveStatus()
+    live_status.start("planner")
 
     log_event(
         logger,
@@ -157,57 +162,64 @@ def run_prompt(
         else app.stream(initial_state)
     )
 
-    while True:
-        latest_controller_decision: ControllerDecision | None = None
+    try:
+        while True:
+            latest_controller_decision: ControllerDecision | None = None
 
-        for event in events:
-            for node_name, value in event.items():
-                if not isinstance(value, dict):
-                    continue
+            for event in events:
+                for node_name, value in event.items():
+                    if not isinstance(value, dict):
+                        continue
 
-                decision = value.get("controller_decision")
-                if isinstance(decision, ControllerDecision):
-                    latest_controller_decision = decision
-                    event_state = value.get("execution_state")
-                    if decision.terminal and isinstance(event_state, ExecutionState):
-                        terminal_decision = decision
-                        terminal_state = event_state
+                    decision = value.get("controller_decision")
+                    if isinstance(decision, ControllerDecision):
+                        latest_controller_decision = decision
+                        event_state = value.get("execution_state")
+                        if decision.terminal and isinstance(event_state, ExecutionState):
+                            terminal_decision = decision
+                            terminal_state = event_state
 
-                finalization_result = value.get("finalization_result")
-                if isinstance(finalization_result, FinalizationResult):
-                    conversation_history.append(_accepted_finalizer_message(finalization_result))
-                    terminal_finalization = finalization_result
+                    finalization_result = value.get("finalization_result")
+                    if isinstance(finalization_result, FinalizationResult):
+                        conversation_history.append(_accepted_finalizer_message(finalization_result))
+                        terminal_finalization = finalization_result
 
-                node_update = extract_node_update(
-                    from_node=from_node,
-                    to_node=node_name,
-                    value=value,
-                )
+                    node_update = extract_node_update(
+                        from_node=from_node,
+                        to_node=node_name,
+                        value=value,
+                    )
 
-                if node_update is None:
-                    continue
+                    if node_update is None:
+                        continue
 
-                metrics.node_updates += 1
+                    metrics.node_updates += 1
 
-                render_node_update(node_update, verbose=verbose)
+                    render_node_update(node_update, verbose=verbose)
 
-                from_node = node_name
+                    from_node = node_name
 
-        if (
-            async_runtime is None
-            or latest_controller_decision is None
-            or latest_controller_decision.decision_type
-            != ControllerDecisionType.AWAIT_ASYNC_JOB
-        ):
-            break
+            if (
+                async_runtime is None
+                or latest_controller_decision is None
+                or latest_controller_decision.decision_type
+                != ControllerDecisionType.AWAIT_ASYNC_JOB
+            ):
+                break
 
-        events = async_runtime.wake_and_resume(
-            config=graph_config,
-            wake=AsyncExecutionWake(
-                execution_id=execution_state.protocol_visible.identity.execution_id,
-                async_job_id=latest_controller_decision.async_job_id,
-            ),
-        )
+            events = async_runtime.wake_and_resume(
+                config=graph_config,
+                wake=AsyncExecutionWake(
+                    execution_id=execution_state.protocol_visible.identity.execution_id,
+                    async_job_id=latest_controller_decision.async_job_id,
+                ),
+            )
+    except Exception:
+        live_status.stop()
+        raise
+    finally:
+        if owns_live_status:
+            live_status.stop()
 
     if show_summary and metrics.latest_summary.strip():
         print(f"\n{ANSI_BLUE}[summary]{ANSI_RESET}")

@@ -7,6 +7,8 @@ from pydantic import ValidationError
 from core.planner import PlannerMessage
 from core.planner_contract import PlannerInvalidOutputError, PlannerProposal
 from core.debug import log_llm_exchange
+from core.logging.live_status import add_response_usage
+from core.logging.live_status import current_live_status
 
 
 class LangChainPlannerProvider:
@@ -18,6 +20,9 @@ class LangChainPlannerProvider:
         self,
         messages: tuple[PlannerMessage, ...],
     ) -> PlannerProposal:
+        status = current_live_status()
+        if status is not None:
+            status.update("planner", "planning")
         provider_messages = [
             (
                 HumanMessage(content=message.content)
@@ -38,6 +43,7 @@ class LangChainPlannerProvider:
                     PlannerProposal, method="json_schema",
                 )
             exchange = structured.invoke(provider_messages)
+            add_response_usage(exchange, worker="planner")
             is_envelope = (
                 isinstance(exchange, dict)
                 and "raw" in exchange

@@ -234,6 +234,20 @@ def _build_tool_transport_state(state: AgentState) -> AgentState:
 def _wrap_tool_node_for_protocol_request_id(tool_node: Any) -> StateNodeCallable:
     def _tool_node_adapter(state: AgentState) -> Any:
         transport_state = _build_tool_transport_state(state)
+        from core.logging.live_status import current_live_status
+        status = current_live_status()
+        if status is not None:
+            request = state.get("execution_state")
+            request = getattr(getattr(request, "protocol_visible", None), "pending_tool_request", None)
+            name = getattr(request, "tool_name", None) or "tool"
+            arguments = getattr(request, "arguments", {}) or {}
+            detail = ""
+            for key in ("path", "file", "filename"):
+                value = arguments.get(key) if isinstance(arguments, dict) else None
+                if isinstance(value, str) and value:
+                    detail = value[:60]
+                    break
+            status.update(name, detail)
         return _invoke_state_node(tool_node, transport_state)
 
     return _tool_node_adapter

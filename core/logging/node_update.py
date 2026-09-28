@@ -15,7 +15,7 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage, ToolMessage
 
-from core.protocol.enums import BrainOutcome, ControllerDecisionType
+from core.protocol.enums import BrainOutcome, ControllerDecisionType, PlannerOutcome
 from core.protocol.models import (
     ControllerDecision,
     ExecutionPlan,
@@ -75,12 +75,15 @@ class NodeUpdate:
         return base
     
     planner_result: PlannerResult | None = None
+    planner_failure_retryable: bool = False
+    planner_retry_detail: str = ""
     accepted_plan: ExecutionPlan | None = None
     brain_result: BrainResult | None = None
     accepted_completion_message: str = ""
     tool_result: ToolResult | None = None
     tool_name: str | None = None
     finalization_result: FinalizationResult | None = None
+    active_step_id: str = ""
 
     ai_message: BaseMessage | None = None
 
@@ -152,7 +155,22 @@ def extract_node_update(
     accepted_plan = None
     accepted_completion_message = ""
     controller_events: list[str] = []
+    planner_failure_retryable = False
+    planner_retry_detail = ""
     if isinstance(controller_decision, ControllerDecision):
+        planning_request = controller_decision.planning_request
+        if (
+            isinstance(planner_result, PlannerResult)
+            and planner_result.outcome == PlannerOutcome.FAILED
+            and planning_request is not None
+            and planning_request.attempt < planning_request.max_attempts
+        ):
+            planner_failure_retryable = True
+            planner_retry_detail = (
+                "retrying router"
+                if planner_result.message.startswith("Planner router failed")
+                else f"retry {planning_request.attempt + 1}/{planning_request.max_attempts}"
+            )
         if (
             controller_decision.reason == "Plan accepted."
             and controller_decision.accepted_plan is not None
@@ -186,12 +204,17 @@ def extract_node_update(
             controller_events.append("Execution completed")
 
     has_summary_update = "rolling_summary" in value
+    active_step = getattr(
+        getattr(execution_state, "protocol_visible", None), "active_step", None
+    )
 
     return NodeUpdate(
         from_node=from_node,
         to_node=to_node,
         controller_events=tuple(controller_events),
         planner_result=planner_result,
+        planner_failure_retryable=planner_failure_retryable,
+        planner_retry_detail=planner_retry_detail,
         accepted_plan=accepted_plan,
         brain_result=brain_result,
         accepted_completion_message=accepted_completion_message,
@@ -202,6 +225,7 @@ def extract_node_update(
             if isinstance(finalization_result, FinalizationResult)
             else None
         ),
+        active_step_id=str(getattr(active_step, "step_id", "") or ""),
         ai_message=ai_message,
         rolling_summary=str(value.get("rolling_summary") or ""),
         has_summary_update=has_summary_update,

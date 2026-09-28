@@ -7,6 +7,8 @@ from typing_extensions import Literal
 
 from core.logging_utils import get_logger
 from core.debug import log_llm_exchange
+from core.logging.live_status import add_response_usage
+from core.logging.live_status import current_live_status
 
 
 PLANNER_ROUTER_PROMPT = """Classify the user's request by execution mode only.
@@ -68,6 +70,9 @@ def _llm_route_decision(
     show_raw_llm: bool = False,
 ) -> RoutingDecision | None:
     try:
+        status = current_live_status()
+        if status is not None:
+            status.update("planner", "routing")
         structured_router = llm.with_structured_output(
             RouterDecisionSchema,
             method="json_schema",
@@ -79,6 +84,7 @@ def _llm_route_decision(
             HumanMessage(content=user_text),
         ]
         result = structured_router.invoke(messages)
+        add_response_usage(result, worker="planner")
         log_llm_exchange(
             worker="planner",
             operation="route",

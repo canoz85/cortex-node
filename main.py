@@ -18,7 +18,8 @@ from core.graph_messages import (
 )
 from core.planner_memory import project_planner_memory
 from core.logging_utils import configure_logging, get_logger
-from core.logging.renderer import render_system_message
+from core.logging.renderer import render_system_message, render_usage_summary
+from core.logging.live_status import LiveStatus
 
 from core.graph import build_app, run_prompt
 from core.runtime.gpu_resources import GpuResourceMode, GpuResourcePolicy
@@ -27,7 +28,7 @@ from core.runtime.gpu_resources import GpuResourceMode, GpuResourcePolicy
 DEFAULT_SETTINGS = {
     "workspace": "workspace",
     "knowledge_dir": "knowledge",
-    "model": "gemma4:26b", #"gemma4:26b", #"qwen2.5-coder:14b", #
+    "model": "qwen3.8:27b", #"gemma4:26b", #"qwen2.5-coder:14b", #
     "model_planner": "gpt-oss:20b", # qwen2.5:7b
     "embedding_model": "nomic-embed-text",
     "rag_top_k": 4,
@@ -367,6 +368,7 @@ def save_session(
     session_path: str,
     session: ApplicationSession,
     debug: dict | None = None,
+    live_status: LiveStatus | None = None,
 ):
     """Save conversation state and optional runtime debug information."""
 
@@ -401,9 +403,13 @@ def save_session(
                 default=str,
             )
 
+        if live_status is not None:
+            live_status.stop()
         render_system_message("Session saved.")
 
     except Exception as e:
+        if live_status is not None:
+            live_status.stop()
         print(
             f"\n[Warning] Failed to save session state: {e}",
             file=sys.stderr,
@@ -472,7 +478,7 @@ def main():
         logger.warning("Optional memory updater unavailable: %s", type(exc).__name__)
         memory_updater = None
 
-    def complete_turn(user_prompt: str) -> str:
+    def _complete_turn(user_prompt: str, live_status: LiveStatus) -> str:
         nonlocal session
         terminal_evidence = []
         history, legacy_summary = run_prompt(
@@ -488,7 +494,9 @@ def main():
                 current_turn_index=session.completed_turn_count + 1,
             ),
             verbose=bool(settings["verbose"]),
+            live_status=live_status,
         )
+        live_status.update("memory", "saving session")
         memory = session.conversation_memory
         completed_count = session.completed_turn_count
         maintenance_start = session.maintenance_start_turn
@@ -554,7 +562,8 @@ def main():
             maintenance_end_turn=maintenance_end,
             last_enrichment_status=enrichment_status,
         )
-        save_session(settings["session_file"], session)
+        save_session(settings["session_file"], session, live_status=live_status)
+        render_usage_summary(live_status)
         for message in reversed(history):
             if (
                 getattr(message, "type", "") == "ai"
@@ -563,6 +572,14 @@ def main():
             ):
                 return str(message.content)
         raise RuntimeError("run_prompt completed without an accepted final answer")
+
+    def complete_turn(user_prompt: str) -> str:
+        live_status = LiveStatus()
+        live_status.start("planner")
+        try:
+            return _complete_turn(user_prompt, live_status)
+        finally:
+            live_status.stop()
 
     try:
 

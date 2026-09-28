@@ -200,6 +200,16 @@ class ExecutionDriver:
                         and request.tool_name not in plan.available_tools):
                     raise WorkerDispatchError("Tool is outside accepted plan capabilities")
                 selected_tool_runtime = tool_runtime or self._tool_runtime
+                from core.logging.live_status import current_live_status
+                status = current_live_status()
+                if status is not None:
+                    detail = ""
+                    for key in ("path", "file", "filename"):
+                        value = request.arguments.get(key)
+                        if isinstance(value, str) and value:
+                            detail = value[:60]
+                            break
+                    status.update(request.tool_name, detail)
                 execute_authorized = getattr(
                     selected_tool_runtime, "execute_authorized", None
                 )
@@ -267,6 +277,10 @@ class ExecutionDriver:
             direct_response=direct_response,
             cancellation_source=protocol.cancellation_source,
         )
+        from core.logging.live_status import current_live_status
+        status = current_live_status()
+        if status is not None:
+            status.update("finalizer")
         result = self._finalizer.finalize(request)
         if not isinstance(result, FinalizationResult):
             raise WorkerDispatchError("Finalizer returned an invalid result type")

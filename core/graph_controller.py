@@ -118,12 +118,6 @@ def create_controller_node(
                 update["finalization_error"] = result.final_answer_error or ""
                 update["final_answer"] = result.final_answer
                 update["messages"] = [AIMessage(content=result.final_answer)]
-                # print(
-                #     "[finalizer] "
-                #     f"execution_id={controller_input.identity.execution_id} "
-                #     f"status={execution_state.protocol_visible.status.value} "
-                #     f"summary={result.execution_summary.model_dump(mode='json')}"
-                # )
             else:
                 error_text = (
                     f"{type(error).__name__}: {error}"
@@ -134,10 +128,6 @@ def create_controller_node(
                 update["finalization_error"] = error_text
                 update["final_answer"] = final_answer
                 update["messages"] = [AIMessage(content=final_answer)]
-                # print(
-                #     "[finalizer] "
-                #     f"execution_id={controller_input.identity.execution_id} error={error_text}"
-                # )
 
         return update
 

@@ -10,6 +10,7 @@ from core.protocol.bridge import build_planner_input
 from core.protocol.models import PlannerMemoryContext
 from core.runtime.execution_driver import WorkerDispatchError
 from core.state import AgentState
+from core.logging.live_status import current_live_status
 
 
 def create_planner_node(
@@ -34,6 +35,23 @@ def create_planner_node(
 
     def planner_node(state: AgentState):
         authorized_request = require_planner_authorization(state)
+        status = current_live_status()
+        if status is not None:
+            prior_result = state.get("planner_result")
+            router_retry = (
+                authorized_request.attempt > 1
+                and getattr(prior_result, "message", "").startswith(
+                    "Planner router failed"
+                )
+            )
+            status.update(
+                "planner",
+                (
+                    f"router retry {authorized_request.attempt}/{authorized_request.max_attempts}"
+                    if router_retry
+                    else ""
+                ),
+            )
         planner_input = build_planner_input(state)
 
         if planner_input != authorized_request:

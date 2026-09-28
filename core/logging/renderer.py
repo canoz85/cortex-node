@@ -17,16 +17,33 @@ from .formatter import (
     format_tool_call_preview,
     format_tool_result,
 )
+from .live_status import current_live_status
+from .live_status import LiveStatus
 
 
 def render_node_update(node_update: NodeUpdate, *, verbose: bool = False) -> None:
     """Render a normalized node update."""
+    status = current_live_status()
+    if status is not None:
+        with status.permanent_output(redraw=False):
+            _render_node_update(node_update, verbose=verbose)
+        changed = _update_live_status(node_update, verbose=verbose)
+        if not changed:
+            status.redraw()
+        return
+    _render_node_update(node_update, verbose=verbose)
+
+
+def _render_node_update(node_update: NodeUpdate, *, verbose: bool = False) -> None:
 
     if node_update.accepted_plan is not None:
         _render_controller_event(node_update, "Plan ready", verbose=verbose)
-        _render_accepted_plan(node_update)
+        # _render_accepted_plan(node_update)
     elif node_update.planner_result is not None:
-        _render_planner(node_update)
+        if node_update.planner_failure_retryable:
+            pass
+        else:
+            _render_planner(node_update)
 
     if node_update.tool_result is not None:
         _render_tool_result(node_update)
@@ -73,10 +90,77 @@ def render_node_update(node_update: NodeUpdate, *, verbose: bool = False) -> Non
         _render_ai_text(node_update)
 
 
+def _update_live_status(node_update: NodeUpdate, *, verbose: bool) -> bool:
+    """Map normalized semantic events to concise temporary progress text."""
+
+    status = current_live_status()
+    if status is None:
+        return False
+
+    if node_update.planner_failure_retryable:
+        status.update("planner", node_update.planner_retry_detail)
+    elif node_update.finalization_result is not None:
+        status.update("finalizer")
+    elif node_update.brain_result is not None:
+        request = node_update.brain_result.tool_request
+        if request is None:
+            return False
+        status.update(request.tool_name)
+    elif node_update.planner_result is not None:
+        status.update("planner", "planning")
+    else:
+        semantic_changed = False
+        if not verbose or not node_update.controller_events:
+            return semantic_changed
+        event = node_update.controller_events[-1]
+        detail = _controller_status_detail(event)
+        if detail is None:
+            return semantic_changed
+        status.update("controller", detail)
+        return True
+
+    if not verbose or not node_update.controller_events:
+        return True
+
+    event = node_update.controller_events[-1]
+    detail = _controller_status_detail(event)
+    if detail is None:
+        return True
+    status.update("controller", detail)
+    return True
+
+
+def _controller_status_detail(event: str) -> str | None:
+    if event == "Plan ready":
+        return "plan ready"
+    elif event.startswith("Tool requested"):
+        return "dispatching tool"
+    elif event.startswith("Tool completed"):
+        return "evaluating evidence"
+    elif event.startswith("Step completed"):
+        return "step completed"
+    elif event == "Execution completed":
+        return "execution completed"
+    return None
+
+
 def render_system_message(message: str) -> None:
     """Render user-visible application/session status consistently."""
-    print("\n[system]")
-    print(message)
+    status = current_live_status()
+    if status is not None:
+        with status.permanent_output():
+            print("\n[system]")
+            print(message)
+    else:
+        print("\n[system]")
+        print(message)
+
+
+def render_usage_summary(status: LiveStatus) -> None:
+    """Render a completed turn's provider usage when at least one call occurred."""
+    summary = status.format_usage_summary()
+    if summary:
+        print(f"\n[usage] {summary}")
 
 
 def _render_controller_events(
@@ -111,17 +195,19 @@ def _render_planner(node_update: NodeUpdate) -> None:
 
     planner = node_update.planner_result
 
-    # Successful plans are rendered once by the authoritative detailed Planner
-    # debug logger. Keep console rendering here for non-plan outcomes only.
-    if planner.proposed_plan is not None:
-        return
+    # # Successful plans are rendered once by the authoritative detailed Planner
+    # # debug logger. Keep console rendering here for non-plan outcomes only.
+    # if planner.proposed_plan is not None:
+    #     return
 
     header = "[planner]"
     if planner.outcome:
         header = f"[planner:{planner.outcome.value}]"
 
     print(f"\n{ANSI_GREEN}{header}{ANSI_RESET}")
-    print(format_planner_plan(planner))
+    # print(format_planner_plan(planner))
+    print(format_accepted_plan(planner.proposed_plan))
+
     print()
 
 
