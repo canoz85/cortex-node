@@ -86,6 +86,35 @@ def _default_tool_list_factory(
     ]
 
 
+def _build_tools(
+    tool_list_factory: ToolListFactory,
+    workspace_root: str,
+    knowledge_root: str,
+    rag_service: WorkspaceRAG,
+    model: str,
+    *,
+    resource_coordinator: GpuResourceCoordinator | None = None,
+) -> list[Any]:
+    if tool_list_factory is _default_tool_list_factory:
+        return _default_tool_list_factory(
+            workspace_root,
+            knowledge_root,
+            rag_service,
+            model,
+            resource_coordinator=resource_coordinator,
+        )
+
+    return tool_list_factory(workspace_root, knowledge_root, rag_service, model)
+
+
+def _tool_names(tools: list[Any]) -> frozenset[str]:
+    return frozenset(
+        tool.name
+        for tool in tools
+        if isinstance(getattr(tool, "name", None), str) and tool.name
+    )
+
+
 def _default_chat_model_factory(model: str, temperature: float) -> Any:
     return ChatOllama(model=model, temperature=temperature)
 
@@ -263,7 +292,7 @@ def build_app(
     rag_factory: RAGFactory = _default_rag_factory,
     tool_list_factory: ToolListFactory = _default_tool_list_factory,
     chat_model_factory: ChatModelFactory = _default_chat_model_factory,
-    graph_nodes_factory: Callable[..., tuple[Any, Any, Any, Any, Any]] = create_graph_nodes,
+    graph_nodes_factory: Callable[..., tuple[Any, Any, Any, Any]] = create_graph_nodes,
     tool_node_factory: Callable[[list[Any]], Any] = ToolNode,
     project_root: Path | None = None,
     show_raw_llm: bool = False,
@@ -285,42 +314,29 @@ def build_app(
     if resource_coordinator is None and resolved_gpu_policy.handoff_enabled:
         resource_coordinator = GpuResourceCoordinator(policy=resolved_gpu_policy)
 
-    if tool_list_factory is _default_tool_list_factory:
-        tools = _default_tool_list_factory(
-            workspace_root_str,
-            str(knowledge_root),
-            rag_service,
-            model,
-            resource_coordinator=resource_coordinator,
-        )
-    else:
-        tools = tool_list_factory(
-            workspace_root_str,
-            str(knowledge_root),
-            rag_service,
-            model,
-        )
-
-    tools_set = {
-        tool.name
-        for tool in tools
-        if isinstance(getattr(tool, "name", None), str) and tool.name
-    }
-
-    tools_list_str = "\n".join(
+    tools = _build_tools(
+        tool_list_factory,
+        workspace_root_str,
+        str(knowledge_root),
+        rag_service,
+        model,
+        resource_coordinator=resource_coordinator,
+    )
+    tool_names = set(_tool_names(tools))
+    tool_prompt_text = "\n".join(
         f"- {name}"
-        for name in sorted(tools_set)
+        for name in sorted(tool_names)
     )
 
     if not supports_native_tool_calls:
-        tools_list_str = text_tool_definitions(tools)
+        tool_prompt_text = text_tool_definitions(tools)
 
     agent_system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         model=model,
         workspace_dir=workspace_root_str,
         knowledge_dir=str(knowledge_root),
         max_steps=MAX_REASONING_STEPS,
-        available_tools=tools_list_str,
+        available_tools=tool_prompt_text,
     )
 
     casual_system_prompt = CASUAL_SYSTEM_PROMPT_TEMPLATE
@@ -343,7 +359,7 @@ def build_app(
         agent_system_prompt=agent_system_prompt,
         casual_system_prompt=casual_system_prompt,
         sap_system_prompt=sap_system_prompt,
-        tools_set=tools_set,
+        tools_set=tool_names,
         show_raw_llm=show_raw_llm,
         supports_native_tool_calls=supports_native_tool_calls,
         worker_ports=worker_ports,

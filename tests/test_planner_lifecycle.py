@@ -1,5 +1,8 @@
 """P5 Controller-owned Planner outcome lifecycle."""
 
+from langchain_core.messages import HumanMessage
+
+from core.protocol.bridge import build_brain_input
 from core.runtime.controller_transition import apply_controller_decision_to_state
 from core.protocol.controller import CortexController
 from core.protocol.enums import (
@@ -9,6 +12,7 @@ from core.protocol.enums import (
 from core.protocol.models import (
     ControllerInput, ExecutionContext, ExecutionCursor, ExecutionIdentity,
     ExecutionPlan, ExecutionState, ExecutionStep, PlannerResult, ProtocolVisibleState,
+    PlanningCapabilities,
 )
 
 
@@ -62,10 +66,12 @@ def test_create_plan_and_no_plan_have_distinct_terminal_semantics():
 
 
 def test_needs_input_pauses_and_new_user_input_authorizes_a_new_episode():
-    ctrl = CortexController(20)
+    capabilities = PlanningCapabilities(available_tools=("read_file",))
+    ctrl = CortexController(20, planning_capabilities=capabilities)
     dispatch, request = authorize(ctrl)
     paused = ctrl.decide(result_input(dispatch, request, PlannerResult(
         outcome=PlannerOutcome.CLARIFICATION_REQUIRED, request_id=request.request_id,
+        planner_route="info",
         message="Which target should be inspected?",
     )))
     assert paused.decision_type == ControllerDecisionType.PAUSE
@@ -83,6 +89,7 @@ def test_needs_input_pauses_and_new_user_input_authorizes_a_new_episode():
     marker = restored.protocol_visible.planning_clarification
     assert restored.protocol_visible.planning_request is None
     assert marker.prompt == "Which target should be inspected?"
+    assert marker.planner_route == "info"
 
     waiting = ctrl.decide(initial_input(
         cursor=restored.protocol_visible.cursor,
@@ -104,6 +111,46 @@ def test_needs_input_pauses_and_new_user_input_authorizes_a_new_episode():
     assert new_request.episode_id != request.episode_id
     assert new_request.context.user_request == "Do the work"
     assert new_request.context.clarification == "The src directory"
+    assert new_request.planner_route == "info"
+    assert new_request.capabilities == capabilities
+
+    plan = ExecutionPlan(
+        plan_id="clarified",
+        available_tools=("read_file",),
+        steps=(ExecutionStep(
+            step_id="inspect",
+            title="Inspect the clarified target",
+            primary_tool="read_file",
+        ),),
+    )
+    continued = ctrl.decide(result_input(
+        resumed,
+        new_request,
+        PlannerResult(
+            outcome=PlannerOutcome.EXECUTION_PLAN,
+            request_id=new_request.request_id,
+            proposed_plan=plan,
+        ),
+        context=new_request.context,
+        planning_sequence=new_request.sequence,
+    ))
+    assert continued.decision_type == ControllerDecisionType.DISPATCH_BRAIN
+    assert continued.accepted_plan == plan
+
+    planning_state = apply_controller_decision_to_state(restored, resumed)
+    accepted_state = apply_controller_decision_to_state(planning_state, continued)
+    brain_input = build_brain_input({
+        "messages": [
+            HumanMessage(content="Do the work"),
+            HumanMessage(content="The src directory"),
+        ],
+        "execution_state": accepted_state,
+    })
+    assert accepted_state.protocol_visible.original_user_request == "Do the work"
+    assert accepted_state.protocol_visible.clarification == "The src directory"
+    assert brain_input.context.user_request == "Do the work"
+    assert brain_input.context.clarification == "The src directory"
+    assert brain_input.context.user_request != "The src directory"
 
 
 def test_retryable_failures_have_two_attempts_and_unplannable_does_not_retry():

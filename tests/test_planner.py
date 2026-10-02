@@ -1,5 +1,6 @@
 """Framework-neutral structured Planner P3 contract tests."""
 
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,6 +68,10 @@ VALID = {
 
 def planner_input(**updates):
     plan = updates.pop("active_plan", None)
+    request_context = updates.pop("context", None) or ExecutionContext(
+        user_request="create a file",
+        role=WorkerRole.PLANNER,
+    )
 
     return PlanningRequest(
         request_id="fixture-request",
@@ -83,6 +88,7 @@ def planner_input(**updates):
         base_revision=plan.revision if plan else None,
         trigger=ReplanTrigger.BRAIN_REQUESTED if plan else None,
         reason="fixture revision" if plan else "",
+        
         capabilities=PlanningCapabilities(
             available_tools=(
                 "list_files",
@@ -98,10 +104,7 @@ def planner_input(**updates):
             execution_id="p3",
             protocol_version="1",
         ),
-        context=ExecutionContext(
-            user_request="create a file",
-            role=WorkerRole.PLANNER,
-        ),
+        context=request_context,
         **updates,
     )
 
@@ -115,8 +118,10 @@ class FakeRouter:
     ):
         self.route_value = route
         self.error = error
+        self.calls = []
 
     def route(self, user_request: str):
+        self.calls.append(user_request)
         if self.error is not None:
             raise self.error
 
@@ -177,8 +182,142 @@ def test_valid_dependent_plan():
         step.primary_tool
         for step in result.proposed_plan.steps
     ] == ["list_files", "write_file"]
-
     assert "Add prerequisite inspection" in provider.messages[0][0].content
+
+
+def test_preserved_clarification_route_skips_router_and_plans_original_request():
+    provider = FakeProvider({
+        "result": "PLAN_PROPOSED",
+        "objective": "Read and summarize README.md",
+        "steps": [{
+            "step_id": "read",
+            "title": "Read and summarize README.md",
+            "description": "Read README.md and produce the requested summary.",
+            "primary_tool": "read_file",
+            "dependencies": [],
+        }],
+    })
+    router = FakeRouter(error=AssertionError("clarification must not be rerouted"))
+    planner = PlannerService(
+        provider=provider,
+        router=router,
+        mutating_tools={"write_file"},
+    )
+    request = planner_input(
+        planner_route="info",
+        context=ExecutionContext(
+            user_request="Workspace içindeki şu dosyayı oku ve özetle.",
+            clarification="Readme.md",
+            role=WorkerRole.PLANNER,
+        ),
+    )
+
+    result = planner.run(request)
+
+    assert router.calls == []
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert result.planner_route == "info"
+    assert result.proposed_plan.steps[0].primary_tool == "read_file"
+    assert provider.messages[0][-1].content == request.context.user_request
+    structured_context = provider.messages[0][-2].content
+    assert '"user_request": "Workspace içindeki şu dosyayı oku ve özetle."' in structured_context
+    assert '"clarification": "Readme.md"' in structured_context
+
+
+def test_new_request_and_existing_replan_still_route_normally():
+    router = FakeRouter(route="action")
+    planner = PlannerService(
+        provider=FakeProvider(), router=router, mutating_tools={"write_file"},
+    )
+
+    planner.run(planner_input())
+    base = ExecutionPlan(
+        plan_id="accepted",
+        revision=1,
+        steps=(ExecutionStep(step_id="old", title="Old"),),
+    )
+    planner.run(planner_input(active_plan=base))
+
+    assert router.calls == ["create a file", "create a file"]
+
+
+def _planner_facing_tool_sets(provider: FakeProvider) -> tuple[set[str], set[str]]:
+    messages = provider.messages[0]
+    prompt_section = messages[0].content.split(
+        "AVAILABLE TOOLS FOR THIS REQUEST", 1
+    )[1].split("PLANNING RULES:", 1)[0]
+    prompt_tools = {
+        line.removeprefix("- ").strip()
+        for line in prompt_section.splitlines()
+        if line.startswith("- ") and "No tool access" not in line
+    }
+    context = json.loads(messages[-2].content.split("\n", 1)[1])
+    return prompt_tools, set(context["capabilities"]["available_tools"])
+
+
+def test_info_planner_prompt_and_structured_context_share_authorized_tools():
+    provider = FakeProvider({
+        "result": "PLAN_PROPOSED",
+        "objective": "Inspect",
+        "steps": [{
+            "step_id": "inspect",
+            "title": "Inspect files",
+            "description": "Inspect workspace files",
+            "primary_tool": "list_files",
+            "dependencies": [],
+        }],
+    })
+
+    request = planner_input()
+    result = service(provider, route="info").run(request)
+
+    prompt_tools, context_tools = _planner_facing_tool_sets(provider)
+    assert prompt_tools == context_tools
+    assert "write_file" not in prompt_tools
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert result.proposed_plan.available_tools == tuple(sorted(prompt_tools))
+    assert request.capabilities.available_tools == planner_input().capabilities.available_tools
+
+
+def test_info_planner_cannot_validate_tool_outside_authorized_set():
+    provider = FakeProvider({
+        "result": "PLAN_PROPOSED",
+        "objective": "Write",
+        "steps": [{
+            "step_id": "write",
+            "title": "Write a file",
+            "description": "Create the requested file",
+            "primary_tool": "write_file",
+            "dependencies": [],
+        }],
+    })
+
+    result = service(provider, route="info").run(planner_input())
+
+    prompt_tools, context_tools = _planner_facing_tool_sets(provider)
+    assert prompt_tools == context_tools
+    assert "write_file" not in context_tools
+    assert result.outcome == PlannerOutcome.FAILED
+    assert result.failure_category == PlanningFailureCategory.INVALID_OUTPUT
+    assert "primary_tool 'write_file' is unknown" in result.message
+
+
+def test_empty_authorized_set_is_consistent_and_can_return_unplannable():
+    provider = FakeProvider({
+        "result": "PLANNING_FAILED",
+        "message": "No authorized capability can satisfy the request.",
+        "failure_category": "UNPLANNABLE",
+    })
+    request = planner_input().model_copy(update={
+        "capabilities": PlanningCapabilities(available_tools=("write_file",)),
+    })
+
+    result = service(provider, route="info").run(request)
+
+    prompt_tools, context_tools = _planner_facing_tool_sets(provider)
+    assert prompt_tools == context_tools == set()
+    assert result.outcome == PlannerOutcome.FAILED
+    assert result.failure_category == PlanningFailureCategory.UNPLANNABLE
 
 
 def test_planner_prompt_requires_plan_outcomes_in_responsible_steps():
@@ -1002,6 +1141,16 @@ def test_explicit_result_variants(
             == PlanningFailureCategory.UNPLANNABLE
         )
 
+
+@pytest.mark.parametrize("message", ["", "   "])
+def test_needs_input_requires_a_non_empty_question(message):
+    result = service(
+        FakeProvider({"result": "NEEDS_INPUT", "message": message}),
+        route="action",
+    ).run(planner_input())
+
+    assert result.outcome == PlannerOutcome.FAILED
+    assert result.failure_category == PlanningFailureCategory.INVALID_OUTPUT
 
 def test_revise_preserves_request_and_versions_candidate():
     base = ExecutionPlan(

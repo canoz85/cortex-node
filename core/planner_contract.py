@@ -39,7 +39,13 @@ class PlannerProposal(BaseModel):
     result: PlannerProposalResultType
     objective: str = ""
     steps: tuple[ProposedStep, ...] = ()
-    message: str = ""
+    message: str = Field(
+        default="",
+        description=(
+            "For NEEDS_INPUT, the concrete non-empty question to ask the user. "
+            "For other result variants, optional explanatory text."
+        ),
+    )
     failure_category: ProposalFailureCategory | None = None
 
     @model_validator(mode="after")
@@ -54,6 +60,8 @@ class PlannerProposal(BaseModel):
                 raise ValueError("PLANNING_FAILED requires failure_category")
         elif self.failure_category is not None:
             raise ValueError(f"{self.result.value} cannot contain failure_category")
+        if self.result == PlannerProposalResultType.NEEDS_INPUT and not self.message.strip():
+            raise ValueError("NEEDS_INPUT requires a non-empty clarification question")
         return self
 
 

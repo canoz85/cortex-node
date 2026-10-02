@@ -172,6 +172,22 @@ def test_planner_output_does_not_guess_brain_invocation(capsys):
         status.stop()
 
 
+def test_planner_clarification_question_is_rendered(capsys):
+    render_node_update(NodeUpdate(
+        from_node="planner",
+        to_node="controller",
+        planner_result=PlannerResult(
+            outcome=PlannerOutcome.CLARIFICATION_REQUIRED,
+            request_id="request-1",
+            message="Which MQTT password should I use?",
+        ),
+    ))
+
+    output = capsys.readouterr().out
+    assert "[planner:clarification_required]" in output
+    assert "Which MQTT password should I use?" in output
+
+
 def test_tool_output_does_not_guess_brain_invocation(capsys):
     status = LiveStatus(refresh_interval=60, enabled=True)
     status.start("list_files")

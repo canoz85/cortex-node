@@ -50,6 +50,15 @@ class RunMetrics:
     planner_route: str = ""
     error_counts: dict[str, int] = field(default_factory=dict)
 
+
+@dataclass(frozen=True)
+class PendingClarification:
+    """Application-boundary handle for one Controller-paused execution."""
+
+    execution_state: ExecutionState
+    run_id: str
+    prompt: str
+
 def _pretty_summary_text(raw_summary: str) -> str:
     def _compact_value(v: Any) -> str:
         if isinstance(v, dict):
@@ -104,9 +113,16 @@ def run_prompt(
     planner_memory_context: PlannerMemoryContext | None = None,
     verbose: bool = False,
     live_status: LiveStatus | None = None,
+    pending_clarification: PendingClarification | None = None,
+    clarification_sink: list[PendingClarification] | None = None,
 ) -> tuple[list, str]:
     prior_messages = list(bounded_recent_conversation(conversational_messages(history or [])))
-    run_id = run_id or uuid.uuid4().hex[:12]
+    if pending_clarification is not None:
+        if run_id is not None and run_id != pending_clarification.run_id:
+            raise ValueError("clarification resume run_id does not match paused execution")
+        run_id = pending_clarification.run_id
+    else:
+        run_id = run_id or uuid.uuid4().hex[:12]
     started_at = perf_counter()
     owns_live_status = live_status is None
     live_status = live_status or LiveStatus()
@@ -140,7 +156,11 @@ def run_prompt(
     # Migration boundary: legacy runtime state and protocol ExecutionState coexist here.
     # The protocol state is read-only and mirrors the same legacy inputs without
     # changing execution order, routing, or worker behavior.
-    execution_state = legacy_state_to_execution_state(initial_state)
+    execution_state = (
+        pending_clarification.execution_state
+        if pending_clarification is not None
+        else legacy_state_to_execution_state(initial_state)
+    )
     initial_state["execution_state"] = execution_state
 
     conversation_history = list(initial_state["messages"])
@@ -149,6 +169,8 @@ def run_prompt(
     terminal_decision: ControllerDecision | None = None
     terminal_state: ExecutionState | None = None
     terminal_finalization: FinalizationResult | None = None
+    latest_execution_state = execution_state
+    latest_controller_decision: ControllerDecision | None = None
 
     async_runtime = getattr(app, "async_runtime", None)
     graph_config = {
@@ -164,7 +186,7 @@ def run_prompt(
 
     try:
         while True:
-            latest_controller_decision: ControllerDecision | None = None
+            latest_controller_decision = None
 
             for event in events:
                 for node_name, value in event.items():
@@ -175,6 +197,8 @@ def run_prompt(
                     if isinstance(decision, ControllerDecision):
                         latest_controller_decision = decision
                         event_state = value.get("execution_state")
+                        if isinstance(event_state, ExecutionState):
+                            latest_execution_state = event_state
                         if decision.terminal and isinstance(event_state, ExecutionState):
                             terminal_decision = decision
                             terminal_state = event_state
@@ -226,6 +250,20 @@ def run_prompt(
         pretty = _pretty_summary_text(metrics.latest_summary)
         print(f"{ANSI_BLUE}{pretty}{ANSI_RESET}")
 
+    if clarification_sink is not None:
+        clarification_sink.clear()
+        marker = latest_execution_state.protocol_visible.planning_clarification
+        if (
+            latest_controller_decision is not None
+            and latest_controller_decision.decision_type == ControllerDecisionType.PAUSE
+            and marker is not None
+        ):
+            clarification_sink.append(PendingClarification(
+                execution_state=latest_execution_state,
+                run_id=run_id,
+                prompt=marker.prompt,
+            ))
+
     duration_ms = round((perf_counter() - started_at) * 1000.0, 3)
 
     log_event(
@@ -253,7 +291,14 @@ def run_prompt(
             completed_turn_evidence.append(CompletedTurnEvidence(
                 turn_id=run_id,
                 turn_index=turn_index,
-                user_request=prompt,
+                user_request=(
+                    pending_clarification.execution_state.protocol_visible
+                    .planning_clarification.original_user_request
+                    if pending_clarification is not None
+                    and pending_clarification.execution_state.protocol_visible
+                    .planning_clarification is not None
+                    else prompt
+                ),
                 execution_id=protocol.identity.execution_id,
                 status=TurnStatus(protocol.status.value),
                 direct_response=(

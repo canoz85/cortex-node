@@ -3,7 +3,7 @@
 from typing import Protocol
 
 from core.finalizer_exact import render_exact_collections
-from core.protocol.enums import StepStatus
+from core.protocol.enums import ExecutionStatus, StepStatus
 from core.protocol.models import (
     ExecutionSummary,
     FinalizationRequest,
@@ -80,6 +80,40 @@ class SummaryFinalAnswerRenderer:
         return summary.summary_text
 
 
+def render_terminal_failure(
+    request: FinalizationRequest,
+    summary: ExecutionSummary,
+) -> str:
+    """Render non-success terminal facts without generative additions."""
+    lines = [
+        "Execution failed."
+        if request.status == ExecutionStatus.FAILED
+        else "Execution cancelled."
+    ]
+
+    if request.accepted_step_results:
+        lines.extend(("", "Completed:"))
+        for result in request.accepted_step_results:
+            evidence = result.completion_evidence
+            if evidence.exact_collection is None:
+                lines.append(f"- {evidence.step_id}: {result.semantic_content}")
+        exact = render_exact_collections(request)
+        if exact is not None:
+            lines.extend(("", exact))
+    elif summary.completed_step_ids:
+        lines.extend(("", "Completed:"))
+        lines.extend(f"- {step_id}" for step_id in summary.completed_step_ids)
+
+    if summary.failed_step_ids:
+        lines.extend(("", "Failed:"))
+        lines.extend(f"- {step_id}" for step_id in summary.failed_step_ids)
+
+    if request.terminal_reason:
+        lines.extend(("", "Reason:", f"- {request.terminal_reason}"))
+
+    return "\n".join(lines)
+
+
 class Finalizer:
     """Produce the authoritative summary and answer after terminal authorization."""
 
@@ -99,6 +133,11 @@ class Finalizer:
 
     def finalize(self, request: FinalizationRequest) -> FinalizationResult:
         summary = self._summary_builder.build(request)
+        if request.status != ExecutionStatus.COMPLETED:
+            return FinalizationResult(
+                execution_summary=summary,
+                final_answer=render_terminal_failure(request, summary),
+            )
         try:
             final_answer = self._answer_renderer.render(request, summary).strip()
             if not final_answer:

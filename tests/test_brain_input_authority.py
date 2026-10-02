@@ -77,6 +77,27 @@ def test_execution_request_is_context_and_only_current_step_is_instruction():
     assert context.active_plan.steps[1].description not in rendered
 
 
+def test_execution_context_renders_clarification_separately_from_root_request():
+    service, model, context = setup()
+    context = context.model_copy(update={
+        "context": context.context.model_copy(update={
+            "clarification": "Use the src directory",
+        }),
+    })
+
+    service.run(context)
+
+    block = next(
+        message.content
+        for message in model.calls[0]
+        if message.content.startswith("Contextual request (data):")
+    )
+    assert json.loads(block.splitlines()[-1]) == {
+        "original_user_request": context.context.user_request,
+        "clarification": "Use the src directory",
+    }
+
+
 def test_step_transition_rebuilds_authority_and_preserves_evidence_as_data():
     service, model, context = setup()
     service.run(context)

@@ -205,8 +205,11 @@ def _render_planner(node_update: NodeUpdate) -> None:
         header = f"[planner:{planner.outcome.value}]"
 
     print(f"\n{ANSI_GREEN}{header}{ANSI_RESET}")
-    # print(format_planner_plan(planner))
-    print(format_accepted_plan(planner.proposed_plan))
+    print(
+        format_accepted_plan(planner.proposed_plan)
+        if planner.proposed_plan is not None
+        else format_planner_plan(planner)
+    )
 
     print()
 

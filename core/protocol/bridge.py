@@ -122,6 +122,8 @@ _WORKING_STATE_CONSUMED_KEYS: Final[frozenset[str]] = frozenset({
     "step_attempt",
     "current_worker",
     "execution_status",
+    "original_user_request",
+    "clarification",
     "execution_summary",
     "completed_step_ids",
     "completion_provenance",
@@ -624,6 +626,12 @@ def build_protocol_visible_state(
 
     return ProtocolVisibleState(
         identity=resolved_identity,
+        original_user_request=(
+            _to_str(state.get("original_user_request"), default="") or None
+        ),
+        clarification=(
+            _to_str(state.get("clarification"), default="") or None
+        ),
         status=resolved_status,
         cursor=resolved_cursor,
         active_plan=active_plan,
@@ -769,10 +777,18 @@ def build_brain_input(legacy_state: LegacyState | None = None) -> BrainInput:
     execution_state = build_execution_state(legacy_state)
     controller_decision = state.get("controller_decision")
 
+    context = build_execution_context(legacy_state)
+    protocol = execution_state.protocol_visible
+    if protocol.original_user_request is not None:
+        context = context.model_copy(update={
+            "user_request": protocol.original_user_request,
+            "clarification": protocol.clarification,
+        })
+
     return BrainInput(
         identity=execution_state.protocol_visible.identity,
         cursor=execution_state.protocol_visible.cursor,
-        context=build_execution_context(legacy_state),
+        context=context,
         active_plan=execution_state.protocol_visible.active_plan,
         active_step=execution_state.protocol_visible.active_step,
         last_tool_result=execution_state.working.last_tool_result,
@@ -803,10 +819,17 @@ def build_controller_input(
     tool_result = working.last_tool_result
     planner_result = state.get("planner_result")
 
+    context = build_execution_context(state, role=WorkerRole.CONTROLLER)
+    if protocol.original_user_request is not None:
+        context = context.model_copy(update={
+            "user_request": protocol.original_user_request,
+            "clarification": protocol.clarification,
+        })
+
     return ControllerInput(
         identity=protocol.identity,
         cursor=protocol.cursor,
-        context=build_execution_context(state, role=WorkerRole.CONTROLLER),
+        context=context,
         active_plan=protocol.active_plan,
         active_step=protocol.active_step,
         pending_tool_request=protocol.pending_tool_request,
@@ -960,6 +983,8 @@ def execution_state_to_legacy(state: ExecutionState) -> dict[str, Any]:
         legacy["correlation_id"] = pv.identity.correlation_id
 
     legacy["execution_status"] = pv.status.value
+    legacy["original_user_request"] = pv.original_user_request
+    legacy["clarification"] = pv.clarification
     legacy["phase"] = pv.cursor.phase.value
     legacy["step_id"] = pv.cursor.step_id
     legacy["event_index"] = pv.cursor.event_index

@@ -7,11 +7,12 @@ from core.protocol.models import ExecutionPlan, ExecutionStep, PlanningRequest, 
 
 MAX_PROPOSED_STEPS = 4
 def planner_failure(
-    request_id: str, category: PlanningFailureCategory, message: str,
+    request_id: str, category: PlanningFailureCategory, message: str, *,
+    route: str | None = None,
 ) -> PlannerResult:
     return PlannerResult(
         outcome=PlannerOutcome.FAILED, request_id=request_id,
-        message=message, failure_category=category,
+        planner_route=route, message=message, failure_category=category,
     )
 
 
@@ -53,22 +54,24 @@ def normalize_planner_proposal(
         proposal = PlannerProposal.model_validate(content)
     except (ValidationError, TypeError, ValueError, AttributeError) as exc:
         return planner_failure(planner_input.request_id, PlanningFailureCategory.INVALID_OUTPUT,
-                               f"Planner output is invalid ({type(exc).__name__}).")
+                               f"Planner output is invalid ({type(exc).__name__}).", route=route)
 
     if proposal.result == PlannerProposalResultType.NO_PLAN_REQUIRED:
         semantic_content = proposal.message.strip() or None
         return PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=planner_input.request_id,
+                             planner_route=route,
                              message=semantic_content or "No execution plan required.",
                              direct_response_content=semantic_content,
                              planning_rationale=rationale)
     if proposal.result == PlannerProposalResultType.NEEDS_INPUT:
         return PlannerResult(outcome=PlannerOutcome.CLARIFICATION_REQUIRED, request_id=planner_input.request_id,
-                             message=proposal.message or "Planner needs additional input.",
+                             planner_route=route,
+                             message=proposal.message.strip(),
                              planning_rationale=rationale)
     if proposal.result == PlannerProposalResultType.PLANNING_FAILED:
         category = PlanningFailureCategory(proposal.failure_category.value)
         return planner_failure(planner_input.request_id, category,
-                               proposal.message or "Planner could not produce a plan.")
+                               proposal.message or "Planner could not produce a plan.", route=route)
 
     try:
         if not proposal.steps:
@@ -111,9 +114,10 @@ def normalize_planner_proposal(
             ) for step in proposal.steps),
         )
         return PlannerResult(outcome=PlannerOutcome.EXECUTION_PLAN,
-                             request_id=planner_input.request_id, proposed_plan=plan,
+                             request_id=planner_input.request_id, planner_route=route,
+                             proposed_plan=plan,
                              message=proposal.message or "Plan generated successfully.",
                              planning_rationale=rationale)
     except (ValueError, TypeError, AttributeError) as exc:
         return planner_failure(planner_input.request_id, PlanningFailureCategory.INVALID_OUTPUT,
-                               f"Planner proposal is invalid: {exc}")
+                               f"Planner proposal is invalid: {exc}", route=route)

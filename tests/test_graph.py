@@ -2,7 +2,8 @@ from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from core.graph import _load_sap_system_prompt, build_app
+import core.graph as graph_module
+from core.graph import _build_tools, _load_sap_system_prompt, _tool_names, build_app
 from core.protocol.enums import ControllerDecisionType, ExecutionPhase, ExecutionStatus, WorkerRole
 from core.protocol.models import (
     ControllerDecision,
@@ -20,6 +21,55 @@ from core.protocol.models import (
 class DummyTool:
     def __init__(self, name: str):
         self.name = name
+
+
+def test_tool_names_keeps_only_non_empty_string_names():
+    class NamelessTool:
+        pass
+
+    assert _tool_names([
+        DummyTool("read_file"),
+        DummyTool(""),
+        DummyTool("read_file"),
+        DummyTool(None),
+        NamelessTool(),
+    ]) == frozenset({"read_file"})
+
+
+def test_build_tools_preserves_custom_factory_four_argument_contract():
+    calls = []
+
+    def factory(*args):
+        calls.append(args)
+        return [DummyTool("custom")]
+
+    rag_service = object()
+    tools = _build_tools(
+        factory, "workspace", "knowledge", rag_service, "model",
+        resource_coordinator=object(),
+    )
+
+    assert [tool.name for tool in tools] == ["custom"]
+    assert calls == [("workspace", "knowledge", rag_service, "model")]
+
+
+def test_build_tools_passes_resource_coordinator_to_default_factory(monkeypatch):
+    calls = []
+
+    def default_factory(*args, resource_coordinator=None):
+        calls.append((*args, resource_coordinator))
+        return [DummyTool("default")]
+
+    monkeypatch.setattr(graph_module, "_default_tool_list_factory", default_factory)
+    coordinator = object()
+    rag_service = object()
+    tools = _build_tools(
+        default_factory, "workspace", "knowledge", rag_service, "model",
+        resource_coordinator=coordinator,
+    )
+
+    assert [tool.name for tool in tools] == ["default"]
+    assert calls == [("workspace", "knowledge", rag_service, "model", coordinator)]
 
 
 class FakeChatModel:

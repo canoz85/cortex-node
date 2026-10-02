@@ -11,6 +11,42 @@ from core.logging.live_status import add_response_usage
 from core.logging.live_status import current_live_status
 
 
+def _extract_planner_proposal(exchange) -> PlannerProposal:
+    is_envelope = (
+        isinstance(exchange, dict)
+        and "raw" in exchange
+        and "parsed" in exchange
+    )
+
+    if not is_envelope:
+        return PlannerProposal.model_validate(exchange)
+
+    parsed = exchange.get("parsed")
+
+    if parsed is not None:
+        if isinstance(parsed, PlannerProposal):
+            return parsed
+
+        return PlannerProposal.model_validate(parsed)
+
+    raw = exchange.get("raw")
+    content = (raw.content or "").strip() if raw is not None else ""
+
+    if content:
+        try:
+            return PlannerProposal.model_validate_json(content)
+        except ValidationError:
+            pass
+
+    parsing_error = exchange.get("parsing_error")
+
+    if parsing_error is not None:
+        raise parsing_error
+
+    raise PlannerInvalidOutputError(
+        "Planner structured output contained no valid proposal"
+    )
+
 class LangChainPlannerProvider:
     def __init__(self, *, planner_llm, show_raw_llm: bool = False):
         self.planner_llm = planner_llm
@@ -40,16 +76,12 @@ class LangChainPlannerProvider:
                 )
             except TypeError:
                 structured = self.planner_llm.with_structured_output(
-                    PlannerProposal, method="json_schema",
+                    PlannerProposal, method="json_schema", include_raw=True
                 )
             exchange = structured.invoke(provider_messages)
             add_response_usage(exchange, worker="planner")
-            is_envelope = (
-                isinstance(exchange, dict)
-                and "raw" in exchange
-                and "parsed" in exchange
-            )
-            raw = exchange.get("raw") if is_envelope else exchange
+
+            raw = exchange.get("raw") if isinstance(exchange, dict) else exchange
             log_llm_exchange(
                 worker="planner",
                 operation="plan",
@@ -58,16 +90,12 @@ class LangChainPlannerProvider:
                 execution_id=messages[0].execution_id if messages else None,
                 enabled=self.show_raw_llm,
             )
-            if is_envelope:
-                parsing_error = exchange.get("parsing_error")
-                if parsing_error is not None:
-                    raise parsing_error
-                value = exchange.get("parsed")
-            else:
-                value = exchange
-            return PlannerProposal.model_validate(value)
+                
+            return _extract_planner_proposal(exchange)
 
+        except PlannerInvalidOutputError:
+            raise
         except (ValidationError, OutputParserException) as exc:
             raise PlannerInvalidOutputError(
-                "Planner output failed schema validation"
+                f"Planner output failed schema validation: {exc}"
             ) from exc

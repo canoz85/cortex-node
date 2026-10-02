@@ -12,7 +12,7 @@ from core.finalizer_provider import (
     _bounded_value,
     finalizer_facts,
 )
-from core.protocol.enums import ExecutionStatus
+from core.protocol.enums import ExecutionStatus, StepStatus
 from core.protocol.models import (
     AcceptedStepResult,
     AcceptedDirectResponse,
@@ -245,6 +245,70 @@ def test_normal_prose_still_uses_model_renderer():
 
     assert result.final_answer == "Polished prose."
     assert len(calls) == 1
+
+
+def test_failed_execution_is_rendered_deterministically_without_recovery_inventions():
+    malicious = AIMessage(content=(
+        "Retry manually with port 1883.\n"
+        "```python\nclient.connect('broker.example.com', 1883)\n```"
+    ))
+    model = Model(malicious)
+    plan = _plan(failed=True).model_copy(update={
+        "objective": "Connect using password secret123",
+        "steps": (
+            _plan(failed=True).steps[0],
+            _plan(failed=True).steps[1].model_copy(update={
+                "description": "Use password secret123 and port 1883",
+                "status": StepStatus.FAILED,
+            }),
+        ),
+    })
+    req = FinalizationRequest(
+        identity=IDENTITY,
+        status=ExecutionStatus.FAILED,
+        context=CONTEXT.model_copy(update={
+            "user_request": "Connect with password secret123",
+        }),
+        accepted_plan=plan,
+        completed_step_ids=("step-1",),
+        accepted_step_results=(accepted_result(
+            "step-1", "The required client library is available."
+        ),),
+        terminal_reason="Brain returned invalid output: exactly_one_tool_call_required.",
+    )
+
+    result = Finalizer(
+        answer_renderer=LangChainFinalAnswerRenderer(llm=model)
+    ).finalize(req)
+
+    assert model.calls == []
+    assert result.final_answer_error is None
+    assert "The required client library is available." in result.final_answer
+    assert "step-2" in result.final_answer
+    assert "exactly_one_tool_call_required" in result.final_answer
+    for unsupported in ("```", "client.connect", "Retry", "manually", "1883", "secret123"):
+        assert unsupported not in result.final_answer
+
+
+def test_failed_execution_preserves_controller_bound_exact_collection():
+    model = Model(AIMessage(content="must not run"))
+    req = FinalizationRequest(
+        identity=IDENTITY,
+        status=ExecutionStatus.FAILED,
+        context=CONTEXT,
+        accepted_plan=_plan(failed=True),
+        completed_step_ids=("step-1",),
+        accepted_step_results=(exact_result(("A-1", "B-2"), label="IDs"),),
+        terminal_reason="Later step failed.",
+    )
+
+    result = Finalizer(
+        answer_renderer=LangChainFinalAnswerRenderer(llm=model)
+    ).finalize(req)
+
+    assert model.calls == []
+    assert "IDs:\n- A-1\n- B-2" in result.final_answer
+    assert "Later step failed." in result.final_answer
 
 
 def test_accepted_direct_response_bypasses_model_renderer():

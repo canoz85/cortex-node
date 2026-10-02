@@ -2,15 +2,18 @@ import logging
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from core.graph_runner import run_prompt
+from core.graph_runner import PendingClarification, run_prompt
 from core.models import ToolOutputEnvelope
-from core.protocol.enums import BrainOutcomeKind
+from core.protocol.enums import (
+    BrainOutcomeKind, ControllerDecisionType, ExecutionPhase, PlannerOutcome,
+    PlanningOperation, WorkerRole,
+)
 from core.protocol.models import (
-    BrainOutcome,
+    BrainOutcome, ControllerDecision,
     ExecutionCursor,
     ExecutionIdentity,
     ExecutionState,
-    ProtocolVisibleState,
+    PlanningClarification, PlannerResult, ProtocolVisibleState,
     ToolExecutionRecord,
     ToolRequest,
     ToolResult as ProtocolToolResult,
@@ -27,6 +30,70 @@ class FakeApp:
         self.initial_state = initial_state
         for event in self._events:
             yield event
+
+
+def test_run_prompt_exposes_paused_clarification_and_reuses_execution_on_reply(capsys):
+    marker = PlanningClarification(
+        prompt="Which MQTT password should I use?",
+        source_request_id="request-1",
+        episode_id="episode-1",
+        operation=PlanningOperation.CREATE,
+        original_user_request="Connect to the MQTT broker",
+        observed_user_message_count=1,
+    )
+    cursor = ExecutionCursor(
+        phase=ExecutionPhase.WAITING,
+        current_worker=WorkerRole.CONTROLLER,
+    )
+    execution_state = ExecutionState(protocol_visible=ProtocolVisibleState(
+        identity=ExecutionIdentity(execution_id="mqtt-run", protocol_version="1"),
+        cursor=cursor,
+        planning_clarification=marker,
+        planning_sequence=1,
+    ))
+    decision = ControllerDecision(
+        decision_type=ControllerDecisionType.PAUSE,
+        reason="needs_input",
+        next_worker=WorkerRole.CONTROLLER,
+        cursor=cursor,
+        planning_clarification=marker,
+        requires_checkpoint=True,
+    )
+    app = FakeApp([{"controller": {
+        "execution_state": execution_state,
+        "controller_decision": decision,
+        "planner_result": PlannerResult(
+            outcome=PlannerOutcome.CLARIFICATION_REQUIRED,
+            request_id="request-1",
+            message=marker.prompt,
+        ),
+    }}])
+    sink: list[PendingClarification] = []
+
+    history, _ = run_prompt(
+        app,
+        marker.original_user_request,
+        run_id="mqtt-run",
+        clarification_sink=sink,
+    )
+
+    assert len(sink) == 1
+    assert sink[0].execution_state.protocol_visible.identity.execution_id == "mqtt-run"
+    assert marker.prompt in capsys.readouterr().out
+
+    resumed_app = FakeApp([])
+    run_prompt(
+        resumed_app,
+        "secret-value",
+        history=history,
+        pending_clarification=sink[0],
+    )
+    assert resumed_app.initial_state["execution_state"] is execution_state
+    assert resumed_app.initial_state["run_id"] == "mqtt-run"
+    assert [message.content for message in resumed_app.initial_state["messages"]][-2:] == [
+        marker.original_user_request,
+        "secret-value",
+    ]
 
 
 def test_run_prompt_renders_portable_controller_tool_result_concisely(capsys):

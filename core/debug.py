@@ -90,16 +90,16 @@ def _response_value(response) -> tuple[dict, dict]:
     if get("invalid_tool_calls"):
         response_value["invalid_tool_calls"] = get("invalid_tool_calls")
 
-    if metadata:
-        metadata_value = dict(metadata)
+    # if metadata:
+    #     metadata_value = dict(metadata)
 
-        for key in ("model", "model_name", 
-                    "done_reason", "done",
-                    "prompt_eval_count", "eval_count"):
-            metadata_value.pop(key, None)
+    #     for key in ("model", "model_name", 
+    #                 "done_reason", "done",
+    #                 "prompt_eval_count", "eval_count"):
+    #         metadata_value.pop(key, None)
 
-        if metadata_value:
-            response_value["metadata"] = metadata_value
+    #     if metadata_value:
+    #         response_value["metadata"] = metadata_value
 
     usage_value = {
         "input_tokens": usage.get("input_tokens", metadata.get("prompt_eval_count", 0)),

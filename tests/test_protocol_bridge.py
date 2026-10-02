@@ -160,6 +160,15 @@ def test_build_brain_input_transfers_tool_execution_history_from_working_state()
     assert record.tool_name == "list_files"
 
 
+def test_build_brain_input_uses_initial_user_request_without_durable_override():
+    brain_input = build_brain_input({
+        "messages": [HumanMessage(content="Initial task")],
+    })
+
+    assert brain_input.context.user_request == "Initial task"
+    assert brain_input.context.clarification is None
+
+
 def test_tool_result_content_integrity_and_artifacts():
     legacy_state = {
         "last_tool_signature": "read_file:{\"path\":\"test.txt\"}",

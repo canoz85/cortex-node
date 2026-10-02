@@ -231,6 +231,7 @@ class CortexController:
             resumed = controller_input.model_copy(update={"context": clarification_context})
             request = self._build_planning_request(
                 resumed, operation=clarification.operation,
+                planner_route=clarification.planner_route,
                 trigger=clarification.trigger,
                 reason=clarification.replan_reason,
                 suggested_constraints=clarification.suggested_constraints,
@@ -354,10 +355,11 @@ class CortexController:
             
             case PlannerOutcome.CLARIFICATION_REQUIRED:
                 request = controller_input.planning_request
-                prompt = (planner_result.message.strip() or "Additional planning input is required.")[:2000]
+                prompt = planner_result.message.strip()[:2000]
                 marker = PlanningClarification(
                     prompt=prompt, source_request_id=request.request_id,
                     episode_id=request.episode_id, operation=request.operation,
+                    planner_route=planner_result.planner_route,
                     original_user_request=request.context.user_request,
                     observed_user_message_count=controller_input.context.user_message_count,
                     base_plan_id=request.base_plan_id, base_revision=request.base_revision,
@@ -377,6 +379,7 @@ class CortexController:
                     } and request.attempt < request.max_attempts):
                     retry_request = self._build_planning_request(
                         controller_input, operation=request.operation,
+                        planner_route=request.planner_route,
                         trigger=request.trigger, reason=request.reason,
                         suggested_constraints=request.suggested_constraints,
                         episode_id=request.episode_id, attempt=request.attempt + 1,
@@ -1123,6 +1126,7 @@ class CortexController:
 
     def _build_planning_request(
         self, context: ControllerInput, *, operation: PlanningOperation,
+        planner_route: str | None = None,
         trigger: ReplanTrigger | None = None, reason: str = "",
         suggested_constraints: tuple[str, ...] = (), failure: ToolResult | None = None,
         episode_id: str | None = None, attempt: int = 1,
@@ -1145,6 +1149,7 @@ class CortexController:
             request_id=str(uuid5(NAMESPACE_URL, f"{context.identity.execution_id}:planning:{sequence}")),
             episode_id=episode_id, attempt=attempt, max_attempts=2,
             identity=context.identity, operation=operation,
+            planner_route=planner_route,
             context=(context_override or context.context).model_copy(update={"role": WorkerRole.PLANNER}),
             capabilities=self._planning_capabilities,
             sequence=sequence, created_at_utc=self._as_utc(self._now_utc()),

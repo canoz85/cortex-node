@@ -751,6 +751,7 @@ class PlanningRequest(ImmutableProtocolModel):
     max_attempts: int = Field(default=2, ge=1)
     identity: ExecutionIdentity
     operation: PlanningOperation
+    planner_route: Literal["conversation", "info", "action", "clarify"] | None = None
     context: ExecutionContext
     capabilities: PlanningCapabilities
     sequence: int = Field(ge=1)
@@ -815,6 +816,7 @@ class PlannerResult(ImmutableProtocolModel):
 
     outcome: PlannerOutcome
     request_id: str = Field(min_length=1)
+    planner_route: Literal["conversation", "info", "action", "clarify"] | None = None
     proposed_plan: ExecutionPlan | None = None
     message: str = ""
     direct_response_content: str | None = Field(default=None, min_length=1, max_length=4000)
@@ -954,6 +956,7 @@ class PlanningClarification(ImmutableProtocolModel):
     source_request_id: str = Field(min_length=1)
     episode_id: str = Field(min_length=1)
     operation: PlanningOperation
+    planner_route: Literal["conversation", "info", "action", "clarify"] | None = None
     original_user_request: str = Field(min_length=1)
     observed_user_message_count: int = Field(ge=1)
     base_plan_id: str | None = None
@@ -973,6 +976,8 @@ class ProtocolVisibleState(ImmutableProtocolModel):
     """
 
     identity: ExecutionIdentity
+    original_user_request: str | None = None
+    clarification: str | None = None
     status: ExecutionStatus = ExecutionStatus.NON_TERMINAL
     cursor: ExecutionCursor
     active_plan: ExecutionPlan | None = None

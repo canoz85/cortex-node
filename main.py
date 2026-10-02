@@ -22,6 +22,7 @@ from core.logging.renderer import render_system_message, render_usage_summary
 from core.logging.live_status import LiveStatus
 
 from core.graph import build_app, run_prompt
+from core.graph_runner import PendingClarification
 from core.runtime.gpu_resources import GpuResourceMode, GpuResourcePolicy
 
 
@@ -468,6 +469,7 @@ def main():
     )
 
     session = load_session(settings["session_file"]) if args.resume else ApplicationSession()
+    pending_clarification: PendingClarification | None = None
     compaction_limits = CompactionLimits(
         target_turns=int(settings["memory_compaction_target_turns"]),
         minimum_verbatim_turns=int(settings["memory_minimum_verbatim_turns"]),
@@ -479,8 +481,9 @@ def main():
         memory_updater = None
 
     def _complete_turn(user_prompt: str, live_status: LiveStatus) -> str:
-        nonlocal session
+        nonlocal session, pending_clarification
         terminal_evidence = []
+        clarification_updates: list[PendingClarification] = []
         history, legacy_summary = run_prompt(
             app,
             user_prompt,
@@ -495,7 +498,23 @@ def main():
             ),
             verbose=bool(settings["verbose"]),
             live_status=live_status,
+            pending_clarification=pending_clarification,
+            clarification_sink=clarification_updates,
         )
+        if clarification_updates:
+            pending_clarification = clarification_updates[0]
+            session = ApplicationSession(
+                conversation_memory=session.conversation_memory,
+                recent_conversation=bounded_recent_conversation(history),
+                legacy_rolling_summary=legacy_summary,
+                completed_turn_count=session.completed_turn_count,
+                maintenance_start_turn=session.maintenance_start_turn,
+                maintenance_end_turn=session.maintenance_end_turn,
+                last_enrichment_status=session.last_enrichment_status,
+            )
+            render_usage_summary(live_status)
+            return pending_clarification.prompt
+        pending_clarification = None
         live_status.update("memory", "saving session")
         memory = session.conversation_memory
         completed_count = session.completed_turn_count
@@ -613,7 +632,8 @@ def main():
                 print("\nStopping CortexNode.")
                 break
     finally:
-        save_session(settings["session_file"], session)
+        if pending_clarification is None:
+            save_session(settings["session_file"], session)
 
 
 if __name__ == "__main__":

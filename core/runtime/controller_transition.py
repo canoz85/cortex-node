@@ -77,6 +77,16 @@ def apply_controller_decision_to_state(
         ):
             raise ValueError("accepted direct response is not bound to this terminal planning request")
 
+    accepted_context = (
+        protocol_visible.planning_request.context
+        if protocol_visible.planning_request is not None
+        and (
+            decision.accepted_plan is not None
+            or decision.accepted_direct_response is not None
+        )
+        else None
+    )
+
     completed_step_ids = protocol_visible.completed_step_ids
     completion_provenance = protocol_visible.completion_provenance
     if (
@@ -162,6 +172,16 @@ def apply_controller_decision_to_state(
             "protocol_visible": protocol_visible.model_copy(
                 update={
                     "status": decision.execution_status,
+                    "original_user_request": (
+                        accepted_context.user_request
+                        if accepted_context is not None
+                        else protocol_visible.original_user_request
+                    ),
+                    "clarification": (
+                        accepted_context.clarification
+                        if accepted_context is not None
+                        else protocol_visible.clarification
+                    ),
                     "cancellation_source": (
                         decision.cancellation_source
                         if decision.cancellation_source is not None
