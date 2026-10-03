@@ -11,12 +11,6 @@ class PlannerProposalResultType(str, Enum):
     PLANNING_FAILED = "PLANNING_FAILED"
 
 
-class ProposalFailureCategory(str, Enum):
-    INVALID_OUTPUT = "INVALID_OUTPUT"
-    PROVIDER_FAILURE = "PROVIDER_FAILURE"
-    UNPLANNABLE = "UNPLANNABLE"
-
-
 class ProposedStep(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     step_id: str = Field(min_length=1)
@@ -46,22 +40,19 @@ class PlannerProposal(BaseModel):
             "For other result variants, optional explanatory text."
         ),
     )
-    failure_category: ProposalFailureCategory | None = None
-
     @model_validator(mode="after")
     def variant_shape(self):
         if self.result == PlannerProposalResultType.PLAN_PROPOSED:
-            if self.failure_category is not None:
-                raise ValueError("PLAN_PROPOSED cannot contain failure_category")
+            if not self.steps:
+                raise ValueError("PLAN_PROPOSED requires at least one step")
         elif self.steps:
             raise ValueError(f"{self.result.value} cannot contain steps")
-        if self.result == PlannerProposalResultType.PLANNING_FAILED:
-            if self.failure_category is None:
-                raise ValueError("PLANNING_FAILED requires failure_category")
-        elif self.failure_category is not None:
-            raise ValueError(f"{self.result.value} cannot contain failure_category")
-        if self.result == PlannerProposalResultType.NEEDS_INPUT and not self.message.strip():
-            raise ValueError("NEEDS_INPUT requires a non-empty clarification question")
+        if self.result in {
+            PlannerProposalResultType.NO_PLAN_REQUIRED,
+            PlannerProposalResultType.NEEDS_INPUT,
+            PlannerProposalResultType.PLANNING_FAILED,
+        } and not self.message.strip():
+            raise ValueError(f"{self.result.value} requires a non-empty message")
         return self
 
 

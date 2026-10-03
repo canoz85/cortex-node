@@ -238,7 +238,10 @@ def test_current_request_and_memory_use_one_existing_planner_generation(route):
         def generate(self, messages):
             self.generations += 1
             self.messages = messages
-            return PlannerProposal(result=PlannerProposalResultType.NO_PLAN_REQUIRED)
+            return PlannerProposal(
+                result=PlannerProposalResultType.NO_PLAN_REQUIRED,
+                message="No plan required.",
+            )
 
     provider = Provider()
     service = PlannerService(provider=provider, router=FakePlannerRouter(), mutating_tools=set())

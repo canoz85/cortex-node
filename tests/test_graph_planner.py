@@ -746,7 +746,7 @@ def test_valid_independent_steps():
             lambda value: value.update(
                 steps=[]
             ),
-            "at least one",
+            "ValidationError",
         ),
     ],
 )
@@ -976,7 +976,6 @@ def test_provider_parse_failure_is_invalid_output():
         (
             {
                 "result": "PLANNING_FAILED",
-                "failure_category": "UNPLANNABLE",
                 "message": "impossible",
             },
             PlannerOutcome.FAILED,
@@ -1359,7 +1358,6 @@ def test_comfy_guidance_uses_action_route_and_authorized_capability_only():
 def test_genuinely_missing_capability_can_remain_unplannable():
     proposal = {
         "result": "PLANNING_FAILED",
-        "failure_category": "UNPLANNABLE",
         "message": "A required capability is unavailable.",
     }
 

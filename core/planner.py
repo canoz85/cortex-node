@@ -143,23 +143,71 @@ PLAN_PROPOSED, NO_PLAN_REQUIRED, NEEDS_INPUT, PLANNING_FAILED.
 
 PLAN_PROPOSED:
 - Use when runtime work is required and can be performed with available tools.
-- Put executable runtime-tool-bound work in steps.
-- failure_category must be null or omitted.
+- steps must contain one or more executable runtime-tool-bound steps.
+- Each step must include:
+  step_id, title, description, primary_tool, dependencies.
+- message may be empty.
+
+Canonical shape:
+{{
+  "result": "PLAN_PROPOSED",
+  "objective": "",
+  "steps": [
+    {{
+      "step_id": "step1",
+      "title": "non-empty string",
+      "description": "non-empty string",
+      "primary_tool": "one available tool",
+      "dependencies": []
+    }}
+  ],
+  "message": ""
+}}
 
 NO_PLAN_REQUIRED:
 - Use when no runtime work is required.
-- Put the direct answer substance in message.
-- failure_category must be null or omitted.
+- steps must be empty.
+- message must contain the direct answer.
+
+Canonical shape:
+{{
+  "result": "NO_PLAN_REQUIRED",
+  "objective": "",
+  "steps": [],
+  "message": "direct answer"
+}}
 
 NEEDS_INPUT:
 - Use when intent is known but required non-discoverable user information is missing.
-- message is REQUIRED and must contain the concrete question to ask the user.
-- failure_category must be null or omitted.
+- steps must be empty.
+- message must contain the concrete question to ask the user.
+
+Canonical shape:
+{{
+  "result": "NEEDS_INPUT",
+  "objective": "",
+  "steps": [],
+  "message": "concrete question for the user"
+}}
 
 PLANNING_FAILED:
-- Use only when required runtime capability is unavailable or the request cannot be planned with the available runtime capabilities.
-- failure_category is REQUIRED and must be exactly one of:
-  INVALID_OUTPUT, PROVIDER_FAILURE, UNPLANNABLE.
+- Use only when the request cannot be planned with the available runtime capabilities.
+- steps must be empty.
+- message must briefly state why planning cannot proceed.
+- Provider failures and invalid model output are not PLANNING_FAILED results; they are handled outside the Planner result contract.
+
+Canonical shape:
+{{
+  "result": "PLANNING_FAILED",
+  "objective": "",
+  "steps": [],
+  "message": "reason planning cannot proceed"
+}}
+
+Follow the bound schema exactly.
+Do not omit required fields.
+Do not rename fields.
+Do not add fields outside the schema.
 """
 
 
@@ -197,9 +245,6 @@ def filter_planner_tools(
     mutating_tools: Set[str],
 ) -> set[str]:
     """Narrow the Controller capability ceiling by execution mode only."""
-
-    print(f"filter_planner_tools: all_tools={all_tools}")
-    print(f"filter_planner_tools: route={route}, mutating_tools={mutating_tools}")
 
     filtered = set(all_tools)
 
@@ -279,6 +324,7 @@ class PlannerService:
             route=routing.route,
             mutating_tools=self.mutating_tools,
         ))
+
         authorized_input = planner_input.model_copy(update={
             "capabilities": planner_input.capabilities.model_copy(update={
                 "available_tools": tuple(sorted(authorized_tools)),

@@ -69,9 +69,8 @@ def normalize_planner_proposal(
                              message=proposal.message.strip(),
                              planning_rationale=rationale)
     if proposal.result == PlannerProposalResultType.PLANNING_FAILED:
-        category = PlanningFailureCategory(proposal.failure_category.value)
-        return planner_failure(planner_input.request_id, category,
-                               proposal.message or "Planner could not produce a plan.", route=route)
+        return planner_failure(planner_input.request_id, PlanningFailureCategory.UNPLANNABLE,
+                               proposal.message, route=route)
 
     try:
         if not proposal.steps:

@@ -34,6 +34,7 @@ def _extract_planner_proposal(exchange) -> PlannerProposal:
 
     if content:
         try:
+            print("PLANNER DEBUG: raw JSON fallback used")
             return PlannerProposal.model_validate_json(content)
         except ValidationError:
             pass

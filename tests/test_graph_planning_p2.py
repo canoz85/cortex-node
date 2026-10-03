@@ -15,7 +15,7 @@ class FakeModel:
 
     def with_structured_output(self, schema, method):
         value = ({"route": "conversation"} if schema is RouterDecisionSchema
-                 else {"result": "NO_PLAN_REQUIRED"})
+                 else {"result": "NO_PLAN_REQUIRED", "message": "Hello."})
         return SimpleNamespace(invoke=lambda messages: schema(**value))
 
     def invoke(self, messages):
