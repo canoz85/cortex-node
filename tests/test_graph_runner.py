@@ -1,24 +1,33 @@
-import logging
-
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
+from core.graph_messages import ACCEPTED_FINALIZER_PROVENANCE, CONVERSATION_PROVENANCE_KEY
 from core.graph_runner import PendingClarification, run_prompt
-from core.models import ToolOutputEnvelope
+from core.protocol.bridge import build_controller_input
+from core.protocol.controller import CortexController
 from core.protocol.enums import (
-    BrainOutcomeKind, ControllerDecisionType, ExecutionPhase, PlannerOutcome,
-    PlanningOperation, WorkerRole,
+    BrainOutcomeKind,
+    ControllerDecisionType,
+    ExecutionPhase,
+    ExecutionStatus,
+    PlannerOutcome,
+    WorkerRole,
 )
 from core.protocol.models import (
-    BrainOutcome, ControllerDecision,
+    BrainOutcome,
+    ControllerDecision,
+    ExecutionContext,
     ExecutionCursor,
     ExecutionIdentity,
     ExecutionState,
-    PlanningClarification, PlannerResult, ProtocolVisibleState,
+    ExecutionSummary,
+    FinalizationResult,
+    PlannerResult,
+    PlanningClarification,
+    ProtocolVisibleState,
     ToolExecutionRecord,
     ToolRequest,
     ToolResult as ProtocolToolResult,
     WorkingState,
 )
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 
 class FakeApp:
@@ -167,139 +176,68 @@ def test_run_prompt_renders_portable_controller_tool_result_concisely(capsys):
     assert execution_state.working.tool_execution_history[-1].result is result
 
 
-def test_run_prompt_renders_injected_tool_flow_events(capsys):
-    planner_event = {
-        "planner": {
-            "steps": 1,
-            "plan": "1. call list_files\n2. summarize",
-        }
-    }
-    brain_with_tool_call = {
-        "brain": {
-            "steps": 2,
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[{"name": "list_files", "args": {"path": "."}, "id": "call-1", "type": "tool_call"}],
-                )
-            ],
-        }
-    }
-    tools_event = {
-        "tools": {
-            "steps": 3,
-            "messages": [
-                ToolMessage(
-                    content=ToolOutputEnvelope(success=True, message="Listing for .", data={"entries": ["a.py"]}).to_tool_output(),
-                    tool_call_id="call-1",
-                )
-            ],
-        }
-    }
-    final_brain_event = {
-        "brain": {
-            "steps": 4,
-            "messages": [AIMessage(content="Completed")],
-        }
-    }
-
-    app = FakeApp([planner_event, brain_with_tool_call, tools_event, final_brain_event])
-    history, _ = run_prompt(app, "list files", history=[HumanMessage(content="previous")], rolling_summary="old")
-
-    assert [message.content for message in history] == ["previous", "list files"]
-
-    output = capsys.readouterr().out
-    assert "Completed" in output
+"""Cross-turn Planner context ownership regressions."""
 
 
-def test_run_prompt_renders_pseudo_tool_text_without_legacy_stop_warning(capsys):
-    pseudo_event = {
-        "brain": {
-            "steps": 2,
-            "messages": [AIMessage(content="pseudo tool-call text detected")],
-        }
-    }
-    app = FakeApp([pseudo_event])
-
-    history, summary = run_prompt(app, "do task")
-
-    assert [message.content for message in history] == ["do task"]
-    assert summary == ""
-    output = capsys.readouterr().out
-    assert "pseudo tool-call text detected" in output
+def finalization(answer="Workspace inspected."):
+    return FinalizationResult(
+        execution_summary=ExecutionSummary(
+            execution_id="prior", status=ExecutionStatus.COMPLETED,
+            summary_text="Completed.",
+        ),
+        final_answer=answer,
+    )
 
 
-def test_run_prompt_does_not_infer_max_step_semantics_from_legacy_event_fields(capsys):
-    max_step_event = {
-        "brain": {
-            "steps": 24,
-            "messages": [AIMessage(content="done")],
-        }
-    }
-    app = FakeApp([max_step_event])
+class Events:
+    def __init__(self, events):
+        self.events = events
+        self.initial_state = None
 
-    run_prompt(app, "do task")
-
-    output = capsys.readouterr().out
-    assert "done" in output
+    def stream(self, initial_state):
+        self.initial_state = initial_state
+        yield from self.events
 
 
-def test_run_prompt_logs_completion_metrics(caplog):
-    planner_event = {
-        "planner": {
-            "steps": 1,
-            "plan": "1. call list_files",
-        }
-    }
-    brain_with_tool_call = {
-        "brain": {
-            "steps": 2,
-            "messages": [
-                AIMessage(
-                    content="",
-                    tool_calls=[{"name": "list_files", "args": {"path": "."}, "id": "call-1", "type": "tool_call"}],
-                )
-            ],
-        }
-    }
-    tools_event = {
-        "tools": {
-            "steps": 3,
-            "messages": [
-                ToolMessage(
-                    content=ToolOutputEnvelope(success=True, message="Listing for .", data={"entries": ["a.py"]}).to_tool_output(),
-                    tool_call_id="call-1",
-                )
-            ],
-        }
-    }
-    final_brain_event = {
-        "brain": {
-            "steps": 4,
-            "messages": [AIMessage(content="Completed")],
-        }
-    }
-
-    app = FakeApp([planner_event, brain_with_tool_call, tools_event, final_brain_event])
-    with caplog.at_level(logging.INFO):
-        run_prompt(app, "list files")
-
-    completed_records = [record for record in caplog.records if getattr(record, "event_name", "") == "prompt_completed"]
-    assert len(completed_records) == 1
-    completed = completed_records[0]
-    # The raw ToolNode transport event is intentionally suppressed; the runner
-    # counts only successfully extracted typed NodeUpdate events.
-    assert completed.node_updates == 3
-    assert completed.duration_ms >= 0
-    assert completed.max_steps_reached is False
+def test_runner_projects_session_history_from_injected_finalization_events():
+    events = Events([
+        {"brain": {"messages": [AIMessage(
+            content="Brain requested tool execution.",
+            tool_calls=[{"name": "read_file", "args": {"path": "a.py"}, "id": "call"}],
+        )]}},
+        {"tools": {"messages": [ToolMessage(content="full file contents", tool_call_id="call")]}},
+        {"brain": {"messages": [AIMessage(content="Finalization requested.")]}},
+        {"controller": {
+            "finalization_result": finalization(),
+            "messages": [AIMessage(content="Workspace inspected.")],
+        }},
+    ])
+    history, _ = run_prompt(events, "Inspect workspace")
+    assert [message.content for message in history] == ["Inspect workspace", "Workspace inspected."]
+    assert isinstance(history[0], HumanMessage)
+    assert history[1].additional_kwargs[CONVERSATION_PROVENANCE_KEY] == ACCEPTED_FINALIZER_PROVENANCE
 
 
-def test_run_prompt_attaches_execution_state_before_first_node():
-    app = FakeApp([])
-
-    run_prompt(app, "do task")
-
-    assert app.initial_state is not None
-    execution_state = app.initial_state.get("execution_state")
-    assert isinstance(execution_state, ExecutionState)
-    assert app.initial_state["execution_state"] is execution_state
+def test_new_create_request_has_conversation_but_no_prior_execution_artifacts():
+    accepted = AIMessage(
+        content="Previous final answer",
+        additional_kwargs={CONVERSATION_PROVENANCE_KEY: ACCEPTED_FINALIZER_PROVENANCE},
+    )
+    polluted = [
+        HumanMessage(content="Previous request"),
+        HumanMessage(content="Explicit clarification"),
+        AIMessage(content="Brain requested tool execution.", tool_calls=[{
+            "name": "read_file", "args": {"path": "a.py"}, "id": "call",
+        }]),
+        ToolMessage(content="full read_file contents", tool_call_id="call"),
+        AIMessage(content="Finalization requested."),
+        accepted,
+    ]
+    app = Events([])
+    history, _ = run_prompt(app, "hi", history=polluted, run_id="new-execution")
+    request = CortexController(24).decide(build_controller_input(app.initial_state)).planning_request
+    assert request.operation.value == "create"
+    assert request.context.recent_history == (
+        "Previous request", "Explicit clarification", "Previous final answer",
+    )
+    assert [message.content for message in history] == [*request.context.recent_history, request.context.user_request]

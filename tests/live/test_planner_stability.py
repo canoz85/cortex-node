@@ -16,7 +16,7 @@ from core.planner_provider import LangChainPlannerProvider
 from core.planner_routing import LangChainPlannerRouter
 from core.protocol.models import PlanningCapabilities
 
-from tests.test_planner import planner_input
+from tests.test_planner_service import planner_input
 
 
 RUNS = 10
@@ -147,7 +147,7 @@ def assert_steps(result, expected_steps):
     CASES,
     ids=[case["name"] for case in CASES],
 )
-def test_planner_stability(case):
+def test_planner_stability_live(case):
     service = build_planner_service()
     tool_names = build_production_tool_names()
 

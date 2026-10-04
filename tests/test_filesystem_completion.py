@@ -6,7 +6,7 @@ import pytest
 
 from core.completion import CompletionService, EvidenceSnapshot, immutable
 from core.completion_providers.filesystem import FileReadCollectionProvider, PROVIDER_ID
-from core.graph_capture import _build_tool_result
+from core.tool_output import normalize_tool_output
 from core.graph_controller import create_controller_node
 from core.models import ListFilesResult, ReadFileResult
 from core.protocol.controller import CortexController
@@ -27,7 +27,7 @@ def spec():
 
 def capture(name, step, request_id, arguments, payload):
     request = ToolRequest(request_id=request_id, tool_name=name, arguments=arguments)
-    result = _build_tool_result(request=request, raw_content=payload.to_tool_output())
+    result = normalize_tool_output(request=request, raw_content=payload.to_tool_output())
     return ToolExecutionRecord(execution_id="e", plan_id="p", plan_revision=1,
                                step_id=step, tool_name=name, arguments=arguments, result=result)
 

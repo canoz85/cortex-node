@@ -1,4 +1,4 @@
-"""P4 deterministic revision acceptance and reconciliation regressions."""
+"""Controller revision reconciliation and acceptance regressions."""
 
 from datetime import datetime, timezone
 
@@ -20,7 +20,7 @@ from core.protocol.models import (
 )
 
 
-IDENTITY = ExecutionIdentity(execution_id="p4", protocol_version="1")
+IDENTITY = ExecutionIdentity(execution_id="controller-revision", protocol_version="1")
 DONE = ExecutionStep(step_id="done", title="Collect facts", description="facts",
                      primary_tool="read_file", status=StepStatus.COMPLETED)
 FAILED = ExecutionStep(step_id="failed", title="Old approach", description="blocked",
@@ -50,7 +50,7 @@ def replacement(step_id="new", title="New approach"):
                          depends_on_step_ids=("done",))
 
 
-def test_valid_meaningful_revision_is_controller_versioned_and_completed_work_preserved():
+def test_revision_reconciliation_versions_candidate_and_preserves_completed_work():
     accepted = reconcile_revision(request(), BASE, proposal(replacement()))
     assert (accepted.plan_id, accepted.revision) == ("plan", 4)
     assert accepted.steps == (DONE, replacement())
@@ -87,7 +87,7 @@ def test_structurally_identical_remaining_plan_is_ineffective():
 
 def test_rejection_decision_is_atomic_and_provenance_survives_acceptance_round_trip():
     provenance = StepCompletionEvidence(
-        step_id="done", summary="facts captured", execution_id="p4", plan_id="plan",
+        step_id="done", summary="facts captured", execution_id="controller-revision", plan_id="plan",
         plan_revision=3, evidence_id="stable",
     )
     protocol = ProtocolVisibleState(
@@ -142,13 +142,13 @@ def test_create_path_is_not_revision_reconciled():
 def test_only_structurally_carried_completed_evidence_crosses_revision_boundary():
     revised = reconcile_revision(request(), BASE, proposal(replacement()))
     records = (
-        ToolExecutionRecord(execution_id="p4", plan_id="plan", plan_revision=3,
+        ToolExecutionRecord(execution_id="controller-revision", plan_id="plan", plan_revision=3,
                             step_id="done", tool_name="read_file",
                             result=ToolResult(request_id="done-evidence", success=True, message="done")),
-        ToolExecutionRecord(execution_id="p4", plan_id="plan", plan_revision=3,
+        ToolExecutionRecord(execution_id="controller-revision", plan_id="plan", plan_revision=3,
                             step_id="failed", tool_name="read_file",
                             result=ToolResult(request_id="failed-evidence", success=False, message="failed")),
-        ToolExecutionRecord(execution_id="p4", plan_id="plan", plan_revision=4,
+        ToolExecutionRecord(execution_id="controller-revision", plan_id="plan", plan_revision=4,
                             step_id="new", tool_name="read_file",
                             result=ToolResult(request_id="new-evidence", success=True, message="new")),
     )

@@ -214,8 +214,8 @@ def test_projection_does_not_enter_brain_or_finalizer_context():
                          planner_memory_context=state["planner_memory_context"])
 
 
-@pytest.mark.parametrize("route", ["conversation", "action"])
-def test_current_request_and_memory_use_one_existing_planner_generation(route):
+def test_authorized_memory_is_projected_in_one_scripted_provider_exchange():
+    route = "conversation"
     state, request = authorized_state()
     worker_request = request.model_copy(update={
         "context": request.context.model_copy(update={

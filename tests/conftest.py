@@ -1,6 +1,29 @@
 import json
+import os
+
+import pytest
 
 from core.models import ToolOutputEnvelope
+
+
+@pytest.fixture(autouse=True)
+def isolate_raw_llm_logging(monkeypatch, request):
+    """Scripted exchanges must never append to the developer's raw log.
+
+    Live logging is opt-in through --live-raw-llm-file; logging tests explicitly
+    set their own temporary destination after this fixture runs.
+    """
+    # The logger has a production default even when the variable is absent.
+    # A null destination disables file logging without changing production code.
+    monkeypatch.setenv("CORTEX_RAW_LLM_FILE", os.devnull)
+    live_path = request.config.getoption("--live-raw-llm-file")
+    if live_path and "live" in request.node.path.parts:
+        monkeypatch.setenv("CORTEX_RAW_LLM_FILE", live_path)
+
+
+def pytest_addoption(parser):
+    parser.addoption("--live-raw-llm-file", default=None,
+                     help="Explicit raw exchange log destination for tests/live only")
 
 
 def get_tool(tools: list, name: str):

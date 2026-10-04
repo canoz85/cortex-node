@@ -1,28 +1,21 @@
-from langchain_core.messages import AIMessage, HumanMessage
-
-from core.protocol.controller import CortexController
 from core.protocol.bridge import build_brain_input, build_controller_input
-from core.protocol.enums import AsyncJobStatus, BrainOutcome, ExecutionPhase, WorkerRole
+from core.protocol.controller import CortexController
+from core.protocol.enums import AsyncJobStatus, ExecutionPhase
 from core.protocol.models import (
-    AsyncJobPolicy,
     ArtifactRecord,
-    BrainResult,
-    ContentIntegrity,
+    AsyncJobPolicy,
     ExecutionCursor,
     ExecutionIdentity,
     ExecutionPlan,
     ExecutionState,
     ExecutionStep,
-    PaginationMetadata,
-    PlannerResult,
     ProtocolVisibleState,
     ToolExecutionRecord,
-    ToolResult,
     ToolRequest,
+    ToolResult,
     WorkingState,
 )
-
-
+from langchain_core.messages import HumanMessage
 
 
 def test_build_controller_input_leaves_optional_worker_outputs_none_when_missing():
@@ -108,8 +101,6 @@ def test_build_brain_input_uses_initial_user_request_without_durable_override():
 
     assert brain_input.context.user_request == "Initial task"
     assert brain_input.context.clarification is None
-
-
 
 
 def test_controller_input_evidence_predicates_and_consecutive_failures():

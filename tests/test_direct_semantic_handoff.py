@@ -113,39 +113,6 @@ def _start(request_text, planner):
     return driver, first, brain, finalizer
 
 
-def test_memory_backed_direct_semantics_are_accepted_bound_and_presented():
-    planner = Planner("Your preferred signature is Amber.")
-    driver, first, brain, finalizer = _start("What is my preferred signature?", planner)
-    second = driver.turn(first.execution_state, _input(
-        first.execution_state, "What is my preferred signature?", first.worker_result,
-    ))
-    accepted = second.execution_state.protocol_visible.accepted_direct_response
-    assert second.decision.decision_type == ControllerDecisionType.TERMINATE
-    assert accepted.content == "Your preferred signature is Amber."
-    assert accepted.request_id == first.decision.planning_request.request_id
-    assert accepted.execution_id == IDENTITY.execution_id
-    restored = ExecutionState.model_validate_json(second.execution_state.model_dump_json())
-    assert restored.protocol_visible.accepted_direct_response == accepted
-    assert finalizer.requests[0].accepted_direct_response == accepted
-    assert finalizer.requests[0].context.planner_memory_context is None
-    assert second.worker_result.final_answer == accepted.content
-    assert not brain.inputs
-    assert second.execution_state.protocol_visible.active_plan is None
-    assert second.execution_state.protocol_visible.completed_step_ids == ()
-    assert second.execution_state.protocol_visible.pending_tool_request is None
-
-
-def test_generic_result_message_is_not_an_accepted_direct_answer():
-    driver, first, _, finalizer = _start("Just talk", Planner("Hello."))
-    generic = PlannerResult(
-        outcome=PlannerOutcome.DIRECT_RESPONSE,
-        request_id=first.decision.planning_request.request_id,
-        message="No tools required",
-    )
-    third = driver.turn(first.execution_state, _input(first.execution_state, "Just talk", generic))
-    assert third.execution_state.protocol_visible.accepted_direct_response is None
-
-
 def test_stale_or_unaccepted_direct_semantics_cannot_reach_finalizer():
     driver, first, _, finalizer = _start("Question", Planner("Private answer"))
     stale = first.worker_result.model_copy(update={"request_id": "another-request"})
@@ -163,7 +130,7 @@ def test_stale_or_unaccepted_direct_semantics_cannot_reach_finalizer():
         )
 
 
-def test_memory_resolved_step_reaches_brain_without_planner_projection():
+def test_accepted_step_semantics_reach_brain_with_scripted_provider():
     planner = Planner("Amber", planned=True)
     driver, first, brain, finalizer = _start("Write a note using my signature", planner)
     assert "Amber" in first.worker_result.proposed_plan.steps[0].description

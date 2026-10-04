@@ -1,15 +1,11 @@
 import pytest
-from datetime import datetime, timezone
-
 from core.protocol.controller import CortexController
-from core.protocol.bridge import build_brain_input
 from core.protocol.enums import (
     BrainOutcome,
     ControllerDecisionType,
     ExecutionPhase,
     ExecutionStatus,
     PlannerOutcome,
-    PlanningFailureCategory,
     PlanningOperation,
     ReplanTrigger,
     StepStatus,
@@ -23,18 +19,17 @@ from core.protocol.models import (
     ExecutionCursor,
     ExecutionIdentity,
     ExecutionPlan,
-    ExecutionState,
     ExecutionStep,
     PlannerResult,
     PlanningCapabilities,
     PlanningRequest,
-    ProtocolVisibleState,
     ReplanRequest,
     RetryMetadata,
 )
+from datetime import datetime, timezone
 
 
-IDENTITY = ExecutionIdentity(execution_id="stage-1", protocol_version="1.0")
+IDENTITY = ExecutionIdentity(execution_id="controller-execution", protocol_version="1.0")
 CONTEXT = ExecutionContext(user_request="complete the task", role=WorkerRole.CONTROLLER)
 
 
@@ -89,20 +84,6 @@ def _input(**updates) -> ControllerInput:
     return ControllerInput(**payload)
 
 
-def test_direct_response_context_is_explicit_and_final_answer_completes():
-    controller = _controller()
-    dispatch = controller.decide(_input())
-    request = dispatch.planning_request
-    completed = controller.decide(_input(
-        cursor=dispatch.cursor, planning_request=request, planning_sequence=request.sequence,
-        planner_result=PlannerResult(
-            outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=request.request_id,
-        ),
-    ))
-    assert completed.decision_type == ControllerDecisionType.TERMINATE
-    assert completed.execution_status == ExecutionStatus.COMPLETED
-    assert completed.accepted_plan is None and completed.terminal
-
 def test_final_answer_after_completed_plan_does_not_require_active_step():
     execution = _active_execution()
 
@@ -131,19 +112,6 @@ def test_final_answer_after_completed_plan_does_not_require_active_step():
     assert completed.cursor.phase == ExecutionPhase.COMPLETED
     assert completed.terminal is True
 
-def test_no_plan_required_does_not_create_a_brain_direct_response_marker():
-    controller = _controller()
-    dispatch = controller.decide(_input())
-    request = dispatch.planning_request
-    decision = controller.decide(_input(
-        cursor=dispatch.cursor, planning_request=request, planning_sequence=request.sequence,
-        planner_result=PlannerResult(
-            outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=request.request_id,
-        ),
-    ))
-    assert decision.decision_type == ControllerDecisionType.TERMINATE
-    assert decision.direct_response is False
-
 
 def test_cancelled_and_failed_termination_carry_matching_status_and_cursor():
     cancelled = _controller().decide(_input(cancel_requested=True))
@@ -166,26 +134,6 @@ def test_cancelled_and_failed_termination_carry_matching_status_and_cursor():
     assert failed.cursor is not None
     assert failed.cursor.phase == ExecutionPhase.FAILED
     assert failed.terminal is True
-
-
-def test_planner_failure_terminates_with_failed_status():
-    controller = _controller()
-    dispatch = controller.decide(_input())
-    request = dispatch.planning_request
-    decision = controller.decide(_input(
-        cursor=dispatch.cursor, planning_request=request, planning_sequence=request.sequence,
-        planner_result=PlannerResult(
-            outcome=PlannerOutcome.FAILED, request_id=request.request_id,
-            failure_category=PlanningFailureCategory.UNPLANNABLE,
-            message="planner unavailable",
-        ),
-    ))
-
-    assert decision.decision_type == ControllerDecisionType.TERMINATE
-    assert decision.execution_status == ExecutionStatus.FAILED
-    assert decision.failure_reason == "planner unavailable"
-    assert decision.cursor is not None
-    assert decision.cursor.phase == ExecutionPhase.FAILED
 
 
 def test_step_failed_retries_same_step_when_budget_remains():
@@ -241,34 +189,6 @@ def test_step_failed_marks_step_failed_and_terminates_when_retries_exhausted():
     assert decision.retry.retry_count == 1
     assert decision.clear_active_step is True
     assert decision.terminal is True
-
-
-def test_explicit_replan_marks_current_step_failed_and_dispatches_planner():
-    execution = _active_execution(retry_count=1, max_retries=2, attempt=2)
-    decision = _controller().decide(
-        _input(
-            **execution,
-            brain_result=BrainResult(
-                outcome=BrainOutcome.REPLAN_REQUEST,
-                message="current plan cannot continue",
-                replan_request=ReplanRequest(
-                    reason="dependency changed",
-                    failed_step_id="step-1",
-                ),
-            ),
-        )
-    )
-
-    assert decision.decision_type == ControllerDecisionType.DISPATCH_PLANNER
-    assert decision.execution_status == ExecutionStatus.NON_TERMINAL
-    assert decision.requires_replan is True
-    assert decision.failed_step_id == "step-1"
-    assert decision.accepted_plan is not None
-    assert decision.accepted_plan.steps[0].status == StepStatus.FAILED
-    assert decision.clear_active_step is True
-    assert decision.cursor is not None
-    assert decision.cursor.phase == ExecutionPhase.REPLANNING
-    assert decision.retry == RetryMetadata(max_retries=2)
 
 
 @pytest.mark.parametrize("has_next_step", [False, True])

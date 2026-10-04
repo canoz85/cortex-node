@@ -112,9 +112,8 @@ def test_prompt_examples_are_complete_json_envelopes(kind):
     assert any(example["kind"] == kind.name or Kind.__members__[example["kind"]] == kind for example in examples)
 
 
-@pytest.mark.parametrize("direct", [False, True])
 @pytest.mark.parametrize("supports_native_tool_calls", [True, False])
-def test_graph_brain_execution_with_injected_planner_result(direct, supports_native_tool_calls):
+def test_graph_brain_execution_with_injected_planner_result(supports_native_tool_calls):
     calls = []
     tool_calls = []
     tool_node_bindings = []
@@ -174,8 +173,6 @@ def test_graph_brain_execution_with_injected_planner_result(direct, supports_nat
 
         def planner(_state):
             request_id = _state["execution_state"].protocol_visible.planning_request.request_id
-            if direct:
-                return {"planner_result": PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=request_id)}
             return {"planner_result": PlannerResult(
                 outcome=PlannerOutcome.EXECUTION_PLAN,
                 request_id=request_id,
@@ -225,35 +222,27 @@ def test_graph_brain_execution_with_injected_planner_result(direct, supports_nat
     assert protocol.cursor.step_id is None
     assert protocol.active_step is None
     assert result["messages"][-1].content == "File contents reported"
-    assert len(tool_calls) == (0 if direct else 1)
-    assert [enabled for enabled, _ in calls] == (
-        [] if direct else [supports_native_tool_calls, supports_native_tool_calls]
-    )
-    assert len(bindings) == (2 if supports_native_tool_calls and not direct else 0)
+    assert len(tool_calls) == 1
+    assert [enabled for enabled, _ in calls] == [supports_native_tool_calls, supports_native_tool_calls]
+    assert len(bindings) == (2 if supports_native_tool_calls else 0)
     assert tool_node_bindings == [read_file]
-    if supports_native_tool_calls and not direct:
+    if supports_native_tool_calls:
         assert bindings[0][0] is read_file
         assert {item["function"]["name"] for item in bindings[0][1:]} == {
             "brain_step_completed", "brain_step_failed", "brain_replan_requested",
         }
     assert all("BRAIN OUTCOME CONTRACT" in prompt for _, prompt in calls)
-    if not direct:
-        if supports_native_tool_calls:
-            assert "Return exactly one native call" in calls[0][1]
-            assert "brain_step_completed" in calls[0][1]
-            assert '"kind":"TOOL_REQUESTED"' not in calls[0][1]
-        else:
-            assert "Tool format: JSON" in calls[0][1]
-            assert '"kind":"TOOL_REQUESTED"' in calls[0][1]
-            assert '"parameters"' in calls[0][1]
-            assert '"path"' in calls[0][1]
-        assert "Execution evidence v1:" in calls[-1][1]
-        assert protocol.completion_provenance[0].tool_request_ids == (tool_calls[0].request_id,)
-        assert protocol.completed_step_ids == ("s1",)
-        assert protocol.retry.retry_count == 0
-        assert protocol.active_plan.steps[0].status == StepStatus.COMPLETED
-        assert app.builder.edges == {("__start__", "controller")}
-        assert set(app.get_graph().nodes) == {
-            "__start__", "controller", "__end__",
-        }
-    assert set(app.builder.branches) == {"controller"}
+    if supports_native_tool_calls:
+        assert "Return exactly one native call" in calls[0][1]
+        assert "brain_step_completed" in calls[0][1]
+        assert '"kind":"TOOL_REQUESTED"' not in calls[0][1]
+    else:
+        assert "Tool format: JSON" in calls[0][1]
+        assert '"kind":"TOOL_REQUESTED"' in calls[0][1]
+        assert '"parameters"' in calls[0][1]
+        assert '"path"' in calls[0][1]
+    assert "Execution evidence v1:" in calls[-1][1]
+    assert protocol.completion_provenance[0].tool_request_ids == (tool_calls[0].request_id,)
+    assert protocol.completed_step_ids == ("s1",)
+    assert protocol.retry.retry_count == 0
+    assert protocol.active_plan.steps[0].status == StepStatus.COMPLETED

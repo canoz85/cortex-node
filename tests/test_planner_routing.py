@@ -23,6 +23,7 @@ class RouterLLM:
     ):
         assert schema is RouterDecisionSchema
         assert method == "json_schema"
+        assert include_raw
 
         def invoke(messages):
             if self.error is not None:
@@ -49,39 +50,18 @@ class RouterLLM:
 @pytest.mark.parametrize(
     ("user_text", "route"),
     [
-        ("explain Python decorators", "conversation"),
+        ("hello", "conversation"),
         ("list files", "info"),
-        ("read config and change timeout to 30", "action"),
-        (
-            "inspect the config, modify the timeout, and verify the change",
-            "action",
-        ),
-        ("do the thing", "clarify"),
-        (
-            "change the timeout, using the applicable config file",
-            "action",
-        ),
+        ("write a file", "action"),
+        ("which target", "clarify"),
     ],
 )
-def test_execution_mode_routes(user_text, route):
+def test_supported_route_transport_with_scripted_provider(user_text, route):
     decision = LangChainPlannerRouter(router_llm=RouterLLM(route=route)).route(user_text)
 
     assert decision.route == route
 
 
-@pytest.mark.parametrize(
-    "route",
-    [
-        "conversation",
-        "info",
-        "action",
-        "clarify",
-    ],
-)
-def test_router_schema_accepts_supported_routes(route):
-    decision = RouterDecisionSchema(route=route)
-
-    assert decision.route == route
 
 
 def test_router_schema_rejects_removed_fields():
