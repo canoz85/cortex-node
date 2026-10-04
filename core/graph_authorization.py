@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from core.protocol.enums import ControllerDecisionType, ExecutionStatus, WorkerRole
+from core.protocol.enums import (
+    ControllerDecisionType, ExecutionPhase, ExecutionStatus, PlanningOperation, WorkerRole,
+)
 from core.protocol.models import ControllerDecision, ExecutionState, ToolRequest
 from core.runtime.execution_driver import WorkerDispatchError
 
@@ -55,6 +57,17 @@ def require_planner_authorization(state):
         raise WorkerDispatchError("Planner authorization request is missing or stale")
     if request.identity != execution_state.protocol_visible.identity:
         raise WorkerDispatchError("Planner authorization execution identity mismatch")
+    protocol = execution_state.protocol_visible
+    if request.sequence != protocol.planning_sequence:
+        raise WorkerDispatchError("Planner authorization sequence mismatch")
+    if request.operation == PlanningOperation.CREATE:
+        if protocol.active_plan is not None or protocol.cursor.phase != ExecutionPhase.PLANNING:
+            raise WorkerDispatchError("CREATE requires planning without an accepted plan")
+    elif (protocol.active_plan is None
+          or request.base_plan_id != protocol.active_plan.plan_id
+          or request.base_revision != protocol.active_plan.revision
+          or protocol.cursor.phase != ExecutionPhase.REPLANNING):
+        raise WorkerDispatchError("REVISE authorization base revision mismatch")
     return request
 
 

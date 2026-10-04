@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, Literal
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from core.application_session import bounded_recent_conversation
 from core.graph_constants import ANSI_BLUE, ANSI_RESET, MAX_REASONING_STEPS
@@ -19,7 +20,7 @@ from core.logging.live_status import LiveStatus
 from core.logging_utils import get_logger, log_event
 from core.memory.terminal import AcceptedCompletion, CompletedTurnEvidence
 from core.memory import TurnStatus
-from core.protocol.bridge import legacy_state_to_execution_state
+from core.protocol.controller import CortexController
 from core.protocol.enums import ControllerDecisionType, ExecutionStatus
 from core.protocol.models import (
     AsyncJobPolicy, ControllerDecision, ExecutionState, FinalizationResult,
@@ -56,8 +57,14 @@ class PendingClarification:
     """Application-boundary handle for one Controller-paused execution."""
 
     execution_state: ExecutionState
-    run_id: str
-    prompt: str
+
+    @property
+    def run_id(self) -> str:
+        return self.execution_state.protocol_visible.identity.execution_id
+
+    @property
+    def prompt(self) -> str:
+        return self.execution_state.protocol_visible.planning_clarification.prompt
 
 def _pretty_summary_text(raw_summary: str) -> str:
     def _compact_value(v: Any) -> str:
@@ -140,12 +147,8 @@ def run_prompt(
 
     initial_state: AgentState = {
         "messages": [*prior_messages, HumanMessage(content=prompt)],
-        "steps": 0,
-        "plan": "",
-        "planner_route": "",
-        "rolling_summary": rolling_summary,
+        "user_input": prompt,
         "retrieval_messages": [],
-        "tool_text_retry_used": False,
         "run_id": run_id,
     }
     if async_job_policy is not None:
@@ -153,13 +156,10 @@ def run_prompt(
     if planner_memory_context is not None:
         initial_state["planner_memory_context"] = planner_memory_context
 
-    # Migration boundary: legacy runtime state and protocol ExecutionState coexist here.
-    # The protocol state is read-only and mirrors the same legacy inputs without
-    # changing execution order, routing, or worker behavior.
     execution_state = (
         pending_clarification.execution_state
         if pending_clarification is not None
-        else legacy_state_to_execution_state(initial_state)
+        else CortexController.start_execution(run_id, async_job_policy)
     )
     initial_state["execution_state"] = execution_state
 
@@ -173,6 +173,12 @@ def run_prompt(
     latest_controller_decision: ControllerDecision | None = None
 
     async_runtime = getattr(app, "async_runtime", None)
+    if async_runtime is not None and pending_clarification is not None:
+        # Session history is a replacement projection. Checkpoint add_messages
+        # must not append recreated copies of the previous user turns.
+        initial_state["messages"] = [
+            RemoveMessage(id=REMOVE_ALL_MESSAGES), *conversation_history,
+        ]
     graph_config = {
         "configurable": {
             "thread_id": run_id,
@@ -260,8 +266,6 @@ def run_prompt(
         ):
             clarification_sink.append(PendingClarification(
                 execution_state=latest_execution_state,
-                run_id=run_id,
-                prompt=marker.prompt,
             ))
 
     duration_ms = round((perf_counter() - started_at) * 1000.0, 3)
@@ -291,14 +295,7 @@ def run_prompt(
             completed_turn_evidence.append(CompletedTurnEvidence(
                 turn_id=run_id,
                 turn_index=turn_index,
-                user_request=(
-                    pending_clarification.execution_state.protocol_visible
-                    .planning_clarification.original_user_request
-                    if pending_clarification is not None
-                    and pending_clarification.execution_state.protocol_visible
-                    .planning_clarification is not None
-                    else prompt
-                ),
+                user_request=protocol.original_user_request or prompt,
                 execution_id=protocol.identity.execution_id,
                 status=TurnStatus(protocol.status.value),
                 direct_response=(

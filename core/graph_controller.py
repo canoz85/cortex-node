@@ -1,6 +1,6 @@
 from __future__ import annotations
 from langchain_core.messages import AIMessage
-from core.protocol.controller import CortexController
+from core.protocol.controller import CortexController, record_finalization
 from core.finalizer import Finalizer
 
 from core.graph_constants import MAX_REASONING_STEPS
@@ -76,6 +76,7 @@ def create_controller_node(
         update = {
             "execution_state": execution_state,
             "controller_decision": decision,
+            "user_input": None,
         }
         worker_update = {}
         if worker_ports is not None:
@@ -87,11 +88,6 @@ def create_controller_node(
                 )
             update.update(worker_update)
             update["execution_state"] = execution_state
-        if decision.planning_clarification is not None:
-            update["clarification_request"] = decision.planning_clarification.prompt
-        elif decision.clear_planning_clarification:
-            update["clarification_request"] = ""
-
         if (
             controller_input.brain_result is not None
             and "brain_result" not in worker_update
@@ -108,11 +104,7 @@ def create_controller_node(
             result = turn.worker_result
             error = portable_turn.terminal_dispatch_error
             if isinstance(result, FinalizationResult):
-                execution_state = execution_state.model_copy(update={
-                    "protocol_visible": execution_state.protocol_visible.model_copy(update={
-                        "summary": result.execution_summary,
-                    }),
-                })
+                execution_state = record_finalization(execution_state, result)
                 update["execution_state"] = execution_state
                 update["finalization_result"] = result
                 update["finalization_error"] = result.final_answer_error or ""

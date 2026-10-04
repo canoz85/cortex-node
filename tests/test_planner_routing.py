@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from core.planner_routing import (
     RouterDecisionSchema,
-    planner_routing_decision,
+    LangChainPlannerRouter,
 )
 
 
@@ -64,18 +64,9 @@ class RouterLLM:
     ],
 )
 def test_execution_mode_routes(user_text, route):
-    decision = planner_routing_decision(
-        user_text,
-        RouterLLM(route=route),
-    )
+    decision = LangChainPlannerRouter(router_llm=RouterLLM(route=route)).route(user_text)
 
     assert decision.route == route
-
-
-def test_empty_request_routes_to_clarify_without_llm():
-    decision = planner_routing_decision("")
-
-    assert decision.route == "clarify"
 
 
 @pytest.mark.parametrize(
@@ -104,43 +95,17 @@ def test_router_schema_rejects_removed_fields():
         )
 
 
-def test_router_failure_falls_back_to_conversation():
-    decision = planner_routing_decision(
-        "hello",
-        RouterLLM(error=RuntimeError("failed")),
-    )
-
-    assert decision.route == "conversation"
+@pytest.mark.parametrize("error", [RuntimeError("provider failed"), ValueError("invalid structured output")])
+def test_router_failures_propagate_without_fallback_route(error):
+    router = LangChainPlannerRouter(router_llm=RouterLLM(error=error))
+    with pytest.raises(type(error), match=str(error)):
+        router.route("hello")
 
 
-def test_router_parsing_failure_falls_back_to_conversation():
-    decision = planner_routing_decision(
-        "hello",
-        RouterLLM(
-            parsing_error=ValueError("invalid structured output"),
-        ),
-    )
-
-    assert decision.route == "conversation"
-
-
-def test_router_failure_is_propagated_when_requested():
-    with pytest.raises(RuntimeError, match="failed"):
-        planner_routing_decision(
-            "hello",
-            RouterLLM(error=RuntimeError("failed")),
-            propagate_errors=True,
-        )
-
-
-def test_router_parsing_failure_is_propagated_when_requested():
-    with pytest.raises(ValueError, match="invalid structured output"):
-        planner_routing_decision(
-            "hello",
-            RouterLLM(
-                parsing_error=ValueError(
-                    "invalid structured output"
-                ),
-            ),
-            propagate_errors=True,
-        )
+def test_router_does_not_reparse_raw_enum_or_json():
+    for raw in ("info", '{"route":"info"}'):
+        class Model:
+            def with_structured_output(self, *_args, **_kwargs):
+                return SimpleNamespace(invoke=lambda _: {"raw": SimpleNamespace(content=raw), "parsed": None})
+        with pytest.raises(ValueError, match="contained no route"):
+            LangChainPlannerRouter(router_llm=Model()).route("hello")

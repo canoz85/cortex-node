@@ -7,7 +7,7 @@ from core.finalizer import Finalizer
 from core.finalizer_provider import LangChainFinalAnswerRenderer
 from core.planner import PlannerService, PLANNER_SYSTEM_PROMPT
 from core.planner_contract import PlannerProposal, PlannerProposalResultType, ProposedStep
-from core.planner_routing import RoutingDecision
+from core.planner import PlannerRoute
 from core.protocol.controller import CortexController
 from core.protocol.enums import ControllerDecisionType, ExecutionStatus, PlannerOutcome
 from core.protocol.models import (
@@ -30,7 +30,7 @@ class FakePlannerRouter:
         self.route_value = route
 
     def route(self, user_request: str):
-        return RoutingDecision(route=self.route_value)
+        return PlannerRoute(route=self.route_value)
 
 class Planner:
     def __init__(self, semantic, *, planned=False):
@@ -40,9 +40,6 @@ class Planner:
 
     def run(self, request):
         self.requests.append(request)
-        worker_request = request.model_copy(update={"context": request.context.model_copy(update={
-            "planner_memory_context": MEMORY,
-        })})
 
         class Provider:
         
@@ -65,7 +62,7 @@ class Planner:
         self_planned, self_semantic = self.planned, self.semantic
         return PlannerService(
             provider=Provider(), router=FakePlannerRouter(), mutating_tools=set(),
-        ).run(worker_request)
+        ).run(request)
 
 
 class CaptureBrain:
@@ -91,6 +88,7 @@ def _input(state, request_text, planner_result=None):
     return ControllerInput(
         identity=protocol.identity, cursor=protocol.cursor,
         context=ExecutionContext(user_request=request_text),
+        planner_memory_context=MEMORY,
         active_plan=protocol.active_plan, active_step=protocol.active_step,
         planning_request=protocol.planning_request,
         planning_sequence=protocol.planning_sequence,
@@ -137,15 +135,8 @@ def test_memory_backed_direct_semantics_are_accepted_bound_and_presented():
     assert second.execution_state.protocol_visible.pending_tool_request is None
 
 
-def test_empty_no_plan_and_generic_message_create_no_semantic_answer():
-    planner = Planner("")
-    driver, first, _, finalizer = _start("Just talk", planner)
-    assert first.worker_result.message == "No execution plan required."
-    assert first.worker_result.direct_response_content is None
-    second = driver.turn(first.execution_state, _input(first.execution_state, "Just talk", first.worker_result))
-    assert second.execution_state.protocol_visible.accepted_direct_response is None
-    assert finalizer.requests[0].accepted_direct_response is None
-
+def test_generic_result_message_is_not_an_accepted_direct_answer():
+    driver, first, _, finalizer = _start("Just talk", Planner("Hello."))
     generic = PlannerResult(
         outcome=PlannerOutcome.DIRECT_RESPONSE,
         request_id=first.decision.planning_request.request_id,
@@ -187,7 +178,7 @@ def test_memory_resolved_step_reaches_brain_without_planner_projection():
     assert brain_input.context.planner_memory_context is None
     assert brain_input.active_plan.steps[0] == brain_input.active_step
     assert finalizer.requests == []
-    assert "put the concrete value in the responsible step's title or description" in PLANNER_SYSTEM_PROMPT
+    assert "Any value required for execution must appear in the responsible step semantics" in PLANNER_SYSTEM_PROMPT
 
 
 def test_direct_result_is_not_a_tool_or_step_authority():

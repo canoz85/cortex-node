@@ -5,7 +5,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from core.graph import build_app
 from core.planner_routing import RouterDecisionSchema
-from core.protocol.bridge import build_execution_state
+from core.protocol.controller import CortexController
 from core.protocol.enums import PlanningOperation, ExecutionStatus
 
 
@@ -13,10 +13,10 @@ class FakeModel:
     def bind_tools(self, tools):
         return self
 
-    def with_structured_output(self, schema, method):
+    def with_structured_output(self, schema, method, include_raw):
         value = ({"route": "conversation"} if schema is RouterDecisionSchema
                  else {"result": "NO_PLAN_REQUIRED", "message": "Hello."})
-        return SimpleNamespace(invoke=lambda messages: schema(**value))
+        return SimpleNamespace(invoke=lambda messages: {"parsed": schema(**value), "raw": AIMessage(content="structured output"), "parsing_error": None})
 
     def invoke(self, messages):
         return AIMessage(content="Hello.")
@@ -33,7 +33,7 @@ def app_for(tmp_path):
 
 def state_for():
     state = {"messages": [HumanMessage(content="hello")], "run_id": "p2-integration"}
-    return {**state, "execution_state": build_execution_state(state)}
+    return {**state, "execution_state": CortexController.start_execution(state["run_id"])}
 
 
 def test_production_graph_starts_at_controller_and_authorizes_create(tmp_path):

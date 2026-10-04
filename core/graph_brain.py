@@ -6,8 +6,7 @@ from core.brain import BrainService
 from core.brain_provider import LangChainBrainProvider
 from core.graph_node_helpers import response_with_usage
 from core.graph_authorization import require_brain_authorization
-from core.protocol.bridge import build_brain_input, with_cursor
-from core.protocol.enums import WorkerRole
+from core.protocol.bridge import build_brain_input
 from core.state import AgentState
 
 
@@ -33,7 +32,7 @@ def create_brain_node(
 
         outcome = service.run(brain_input)
 
-        execution_state = with_cursor(authorized_state, current_worker=WorkerRole.BRAIN)
+        execution_state = authorized_state
         if brain_input.last_tool_result is not None:
             execution_state = execution_state.model_copy(update={
                 "working": execution_state.working.model_copy(update={"last_tool_result": None}),

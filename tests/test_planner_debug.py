@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessage
 
 from core.planner_contract import PlannerProposal
 from core.planner_provider import LangChainPlannerProvider
-from core.planner_routing import planner_routing_decision
+from core.planner_routing import LangChainPlannerRouter, RouterDecisionSchema
 
 
 PROPOSAL = {
@@ -56,11 +56,11 @@ def test_router_writes_one_exchange_record(monkeypatch, capsys):
         response_metadata={"model": "router", "done_reason": "stop"},
         usage_metadata={"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
     )
-    llm = LLM({"raw": raw, "parsed": type("Route", (), {"route": "info"})(),
+    llm = LLM({"raw": raw, "parsed": RouterDecisionSchema(route="info"),
                "parsing_error": None})
     path = _records(monkeypatch, "planner-route.jsonl")
 
-    decision = planner_routing_decision("list files", router_llm=llm, show_raw_llm=True)
+    decision = LangChainPlannerRouter(router_llm=llm, show_raw_llm=True).route("list files")
 
     assert decision.route == "info"
     records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]

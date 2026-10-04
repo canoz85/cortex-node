@@ -7,11 +7,11 @@ from langchain_core.messages import HumanMessage
 
 from core.graph_controller import create_controller_node
 from core.graph_planner import create_planner_node
-from core.planner_routing import RoutingDecision
-from core.runtime.controller_transition import apply_controller_decision_to_state
+from core.planner import PlannerRoute
+from core.protocol.controller import apply_controller_decision_to_state
 from core.runtime.execution_driver import WorkerDispatchError
 from core.planner import PlannerService
-from core.protocol.bridge import build_controller_input, build_planner_input
+from core.protocol.bridge import build_controller_input
 from core.protocol.controller import CortexController
 from core.protocol.enums import (
     BrainOutcome, ControllerDecisionType, ExecutionPhase, ExecutionStatus,
@@ -92,7 +92,7 @@ def test_initial_controller_authorizes_create_without_revision_facts():
     assert request.base_plan is request.interrupted_step is request.trigger is None
     assert request.completed_steps == request.completed_step_ids == request.evidence_json == ()
     authorized = apply_controller_decision_to_state(state["execution_state"], decision)
-    assert build_planner_input({"execution_state": authorized}) == request
+    assert authorized.protocol_visible.planning_request == request
     assert state["execution_state"].protocol_visible.planning_request is None
 
 
@@ -151,7 +151,7 @@ class FakePlannerRouter:
         self.route_value = route
 
     def route(self, user_request: str):
-        return RoutingDecision(route=self.route_value)
+        return PlannerRoute(route=self.route_value)
 
 class FakeProvider:
     def __init__(self, content=None, route="info"):
@@ -189,12 +189,11 @@ def test_revise_prompt_contains_facts_and_enforced_ceiling(trigger):
     assert "Do not repeat completed work" in context
     payload = json.loads(context.split("\n", 1)[1])
     assert payload["operation"] == "revise"
-    assert payload["base_revision"] == 3
-    assert payload["completed_steps"][0]["step_id"] == "done"
-    assert payload["interrupted_step"]["step_id"] == "active"
+    assert payload["base_plan"]["revision"] == 3
+    assert payload["base_plan"]["steps"][0]["step_id"] == "done"
     assert payload["trigger"] == trigger.value
     assert payload["reason"] == request.reason
-    assert payload["capabilities"]["unavailable_tools"] == ["write_file"]
+    assert "capabilities" not in payload
     assert payload["suggested_constraints"] == list(request.suggested_constraints)
     progress = payload["previous_execution_progress"]
     failed = progress["action_groups"][-1]
@@ -203,11 +202,7 @@ def test_revise_prompt_contains_facts_and_enforced_ceiling(trigger):
     assert failed["occurrence_count"] == 3
     assert failed["failure_count"] == 3
     assert failed["semantic_conclusion"] == "unknown"
-    assert payload["raw_evidence"] == {
-        "authoritative_record_count": 4,
-        "included_in_prompt": False,
-        "reason": "Durable raw history is represented by the bounded deterministic progress projection.",
-    }
+    assert "raw_evidence" not in payload
     assert request.model_dump_json() == before
 
 
@@ -228,7 +223,7 @@ def test_worker_consumption_through_controller_planner_controller(trigger, conte
     class RAG:
         def format_context(self, **kwargs):
             return ""
-    node = create_planner_node(planner_service=planner(provider), rag_service=RAG(), rag_top_k=1, tools_set=set())
+    node = create_planner_node(planner_service=planner(provider), rag_service=RAG(), rag_top_k=1)
     output = node(planning_state)
     next_state = {**planning_state, **output}
     ci = build_controller_input(next_state)
@@ -253,7 +248,7 @@ def test_request_serializes_and_resume_reuses_authorization(revise):
     applied = apply_controller_decision_to_state(state["execution_state"], decision)
     restored = ExecutionState.model_validate_json(applied.model_dump_json())
     assert restored == applied
-    request = build_planner_input({"execution_state": restored})
+    request = restored.protocol_visible.planning_request
     assert request.progress == decision.planning_request.progress
     resumed = ctrl.decide(build_controller_input({"execution_state": restored}))
     assert resumed.planning_request == request
@@ -263,10 +258,8 @@ def test_request_serializes_and_resume_reuses_authorization(revise):
 
 def test_adapter_rejects_missing_and_stale_authorizations():
     state = initial_state()
-    with pytest.raises(ValueError, match="Controller-authorized"):
-        build_planner_input(state)
     provider = FakeProvider()
-    node = create_planner_node(planner_service=planner(provider), rag_service=None, rag_top_k=1, tools_set=set())
+    node = create_planner_node(planner_service=planner(provider), rag_service=None, rag_top_k=1)
     with pytest.raises(WorkerDispatchError, match="Controller authorization"):
         node(state)
     assert provider.messages == []
@@ -275,8 +268,8 @@ def test_adapter_rejects_missing_and_stale_authorizations():
     applied = apply_controller_decision_to_state(original["execution_state"], decision)
     stale = applied.model_copy(update={"protocol_visible": applied.protocol_visible.model_copy(update={
         "active_plan": applied.protocol_visible.active_plan.model_copy(update={"revision": 4})})})
-    with pytest.raises(ValueError, match="base revision"):
-        build_planner_input({"execution_state": stale})
+    with pytest.raises(WorkerDispatchError, match="revision") :
+        node({"execution_state": stale, "controller_decision": decision})
 
 
 def test_create_cannot_revise_and_request_snapshots_are_detached():

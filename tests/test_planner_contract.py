@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from core.planner import PLANNER_SYSTEM_PROMPT
-from core.planner_contract import PlannerProposal, PlannerProposalResultType, ProposedStep
+from core.planner_contract import PlannerInvalidOutputError, PlannerProposal, PlannerProposalResultType, ProposedStep
 from core.planner_provider import _extract_planner_proposal
 
 
@@ -55,7 +55,7 @@ def test_removed_failure_category_is_forbidden_extra_input():
         })
 
 
-def test_raw_schema_valid_json_fallback_remains_supported():
+def test_raw_json_is_never_reparsed_after_structured_output_failure():
     exchange = {
         "raw": SimpleNamespace(content=(
             '{"result":"NO_PLAN_REQUIRED","objective":"","steps":[],'
@@ -65,10 +65,8 @@ def test_raw_schema_valid_json_fallback_remains_supported():
         "parsing_error": ValueError("native parser failed"),
     }
 
-    proposal = _extract_planner_proposal(exchange)
-
-    assert proposal.result == PlannerProposalResultType.NO_PLAN_REQUIRED
-    assert proposal.message == "The direct answer."
+    with pytest.raises(PlannerInvalidOutputError, match="native parser failed"):
+        _extract_planner_proposal(exchange)
 
 
 def test_result_contract_includes_every_canonical_shape_and_ownership_rule():
@@ -83,5 +81,5 @@ def test_result_contract_includes_every_canonical_shape_and_ownership_rule():
     assert '"result": "NO_PLAN_REQUIRED"' in prompt
     assert '"result": "NEEDS_INPUT"' in prompt
     assert '"result": "PLANNING_FAILED"' in prompt
-    assert "Provider failures and invalid model output are not PLANNING_FAILED" in prompt
+    assert "Provider failures and invalid model output are handled outside this result contract" in prompt
     assert "Do not add fields outside the schema." in prompt

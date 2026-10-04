@@ -29,20 +29,12 @@ def _extract_planner_proposal(exchange) -> PlannerProposal:
 
         return PlannerProposal.model_validate(parsed)
 
-    raw = exchange.get("raw")
-    content = (raw.content or "").strip() if raw is not None else ""
-
-    if content:
-        try:
-            print("PLANNER DEBUG: raw JSON fallback used")
-            return PlannerProposal.model_validate_json(content)
-        except ValidationError:
-            pass
-
     parsing_error = exchange.get("parsing_error")
 
     if parsing_error is not None:
-        raise parsing_error
+        raise PlannerInvalidOutputError(
+            f"Planner structured output failed parsing: {parsing_error}"
+        ) from parsing_error
 
     raise PlannerInvalidOutputError(
         "Planner structured output contained no valid proposal"
@@ -71,14 +63,9 @@ class LangChainPlannerProvider:
 
         try:
 
-            try:
-                structured = self.planner_llm.with_structured_output(
-                    PlannerProposal, method="json_schema", include_raw=True,
-                )
-            except TypeError:
-                structured = self.planner_llm.with_structured_output(
-                    PlannerProposal, method="json_schema", include_raw=True
-                )
+            structured = self.planner_llm.with_structured_output(
+                PlannerProposal, method="json_schema", include_raw=True,
+            )
             exchange = structured.invoke(provider_messages)
             add_response_usage(exchange, worker="planner")
 

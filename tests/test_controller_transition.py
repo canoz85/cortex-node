@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from core.protocol.controller import apply_controller_decision_to_state
+
 from core.protocol.enums import ControllerDecisionType, ExecutionPhase, WorkerRole
 from core.protocol.models import (
     ControllerDecision,
@@ -15,7 +17,6 @@ from core.protocol.models import (
 )
 from core.runtime.controller_transition import (
     ControllerCoordinator,
-    apply_controller_decision_to_state,
 )
 
 

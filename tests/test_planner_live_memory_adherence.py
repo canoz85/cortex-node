@@ -8,7 +8,7 @@ from langchain_ollama import ChatOllama
 
 from core.planner import PlannerService
 from core.planner_provider import LangChainPlannerProvider
-from core.planner_routing import RoutingDecision
+from core.planner import PlannerRoute
 from core.protocol.controller import CortexController
 from core.protocol.enums import PlannerOutcome, WorkerRole
 from core.protocol.models import (
@@ -16,7 +16,7 @@ from core.protocol.models import (
     ExecutionIdentity, ExecutionState, PlannerMemoryContext, PlannerMemoryFact,
     PlanningCapabilities, ProtocolVisibleState,
 )
-from core.runtime.controller_transition import apply_controller_decision_to_state
+from core.protocol.controller import apply_controller_decision_to_state
 from main import DEFAULT_SETTINGS
 
 
@@ -57,7 +57,7 @@ def test_real_planner_resolves_memory_into_accepted_step_before_tools(tmp_path, 
             self.route_value = route
 
         def route(self, user_request: str):
-            return RoutingDecision(route=self.route_value)
+            return PlannerRoute(route=self.route_value)
 
     class LiveProvider:
         raw_proposal = None

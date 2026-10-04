@@ -24,6 +24,14 @@ from .models import (
     ControllerDecision,
     ControllerInput,
     ExecutionCursor,
+    ExecutionIdentity,
+    ExecutionState,
+    ProtocolVisibleState,
+    AsyncJobPolicy,
+    AcceptedRequirement,
+    ResolvedCoverage,
+    CoverageAssessment,
+    FinalizationResult,
     ExactCollection,
     ExecutionPlan,
     ExecutionStep,
@@ -48,6 +56,15 @@ class CortexController:
     The Controller owns execution decisions but never executes workers.
     It evaluates protocol inputs and returns the next legal continuation.
     """
+
+    @staticmethod
+    def start_execution(execution_id: str, async_policy: AsyncJobPolicy | None = None) -> ExecutionState:
+        """Create the initial protocol state without interpreting graph fields."""
+        return ExecutionState(protocol_visible=ProtocolVisibleState(
+            identity=ExecutionIdentity(execution_id=execution_id, protocol_version="1.0"),
+            cursor=ExecutionCursor(),
+            async_policy=async_policy or AsyncJobPolicy(),
+        ))
 
     def __init__(
         self,
@@ -97,14 +114,6 @@ class CortexController:
 
         if controller_input.async_wake_job_id is not None:
             return self._decide_from_async_wake(controller_input)
-
-        # print("=== CONTROLLER INPUT ===")
-        # print("planner_result:", controller_input.planner_result)
-        # print("brain_result:", controller_input.brain_result)
-        # print("tool_result:", controller_input.tool_result)
-        # print("active_step:", controller_input.active_step.step_id if controller_input.active_step else None)
-        # print("cursor.step_id:", controller_input.cursor.step_id)
-        # print("========================")
 
         if (
             controller_input.cursor.controller_iteration is not None
@@ -219,22 +228,24 @@ class CortexController:
     ) -> ControllerDecision:
         clarification = controller_input.planning_clarification
         if clarification is not None:
-            if controller_input.context.user_message_count <= clarification.observed_user_message_count:
+            if not controller_input.user_input or not controller_input.user_input.strip():
                 return self._pause(
                     controller_input.cursor, reason="needs_input",
                     reconciliation_required=False,
                 )
-            clarification_context = controller_input.context.model_copy(update={
-                "user_request": clarification.original_user_request,
-                "clarification": controller_input.context.user_request,
+            previous = clarification.request
+            self._validate_planning_request(controller_input, previous)
+            clarification_context = previous.context.model_copy(update={
+                "clarification_question": clarification.prompt,
+                "clarification": controller_input.user_input,
             })
             resumed = controller_input.model_copy(update={"context": clarification_context})
             request = self._build_planning_request(
-                resumed, operation=clarification.operation,
-                planner_route=clarification.planner_route,
-                trigger=clarification.trigger,
-                reason=clarification.replan_reason,
-                suggested_constraints=clarification.suggested_constraints,
+                resumed, operation=previous.operation,
+                planner_route=previous.planner_route,
+                trigger=previous.trigger,
+                reason=previous.reason,
+                suggested_constraints=previous.suggested_constraints,
             )
             return self._planning_dispatch(resumed, request, "Planner clarification received.").model_copy(
                 update={"clear_planning_clarification": True})
@@ -320,7 +331,6 @@ class CortexController:
                             reconciliation_required=True,
                             reason=controller_input.completion_validation_error or "completion_requirement_not_validated")
 
-                # next_step = self._find_next_pending_step(controller_input)
                 next_step = next(
                     (step for step in plan.steps if step.status == StepStatus.PENDING),
                         None,
@@ -357,14 +367,10 @@ class CortexController:
                 request = controller_input.planning_request
                 prompt = planner_result.message.strip()[:2000]
                 marker = PlanningClarification(
-                    prompt=prompt, source_request_id=request.request_id,
-                    episode_id=request.episode_id, operation=request.operation,
-                    planner_route=planner_result.planner_route,
-                    original_user_request=request.context.user_request,
-                    observed_user_message_count=controller_input.context.user_message_count,
-                    base_plan_id=request.base_plan_id, base_revision=request.base_revision,
-                    trigger=request.trigger, replan_reason=request.reason,
-                    suggested_constraints=request.suggested_constraints,
+                    prompt=prompt,
+                    request=request.model_copy(update={
+                        "planner_route": request.planner_route or planner_result.planner_route,
+                    }),
                 )
                 return self._pause(
                     controller_input.cursor, reason="needs_input",
@@ -379,7 +385,7 @@ class CortexController:
                     } and request.attempt < request.max_attempts):
                     retry_request = self._build_planning_request(
                         controller_input, operation=request.operation,
-                        planner_route=request.planner_route,
+                        planner_route=request.planner_route or planner_result.planner_route,
                         trigger=request.trigger, reason=request.reason,
                         suggested_constraints=request.suggested_constraints,
                         episode_id=request.episode_id, attempt=request.attempt + 1,
@@ -1137,6 +1143,10 @@ class CortexController:
             NAMESPACE_URL, f"{context.identity.execution_id}:planning-episode:{sequence}"
         ))
         revision = operation == PlanningOperation.REVISE
+        previous = context.planning_request or (
+            context.planning_clarification.request
+            if context.planning_clarification is not None else None
+        )
         plan = context.active_plan if revision else None
         completed_ids = tuple(dict.fromkeys((
             *context.completed_step_ids,
@@ -1150,8 +1160,14 @@ class CortexController:
             episode_id=episode_id, attempt=attempt, max_attempts=2,
             identity=context.identity, operation=operation,
             planner_route=planner_route,
-            context=(context_override or context.context).model_copy(update={"role": WorkerRole.PLANNER}),
-            capabilities=self._planning_capabilities,
+            context=(context_override or context.context).model_copy(update={
+                "role": WorkerRole.PLANNER,
+                "planner_memory_context": (
+                    (context_override or context.context).planner_memory_context
+                    or context.planner_memory_context
+                ),
+            }),
+            capabilities=previous.capabilities if previous is not None else self._planning_capabilities,
             sequence=sequence, created_at_utc=self._as_utc(self._now_utc()),
             base_plan=plan.model_copy(deep=True) if plan else None,
             base_plan_id=plan.plan_id if plan else None,
@@ -1161,7 +1177,9 @@ class CortexController:
                                   if step.step_id in completed_ids) if plan else (),
             interrupted_step=context.active_step.model_copy(deep=True) if revision and context.active_step else None,
             trigger=trigger, reason=reason, suggested_constraints=suggested_constraints,
-            evidence_json=evidence, failure_json=failure.model_dump_json() if failure else None,
+            evidence_json=evidence,
+            failure_json=(failure.model_dump_json() if failure is not None
+                          else previous.failure_json if previous is not None and revision else None),
             progress=build_planner_progress(
                 context.identity.execution_id,
                 context.tool_execution_history if revision else (),
@@ -1179,7 +1197,6 @@ class CortexController:
             context, operation=PlanningOperation.REVISE, trigger=trigger,
             reason=failure_reason, suggested_constraints=suggested_constraints, failure=failure,
         )
-        # Preserve Stage 1's Controller-owned failed-step transition for both sources.
         failed_plan = self._replace_plan_step(plan, step.model_copy(update={"status": StepStatus.FAILED}))
         return self._planning_dispatch(context, request, reason).model_copy(update={
             "accepted_plan": failed_plan, "failed_step_id": step.step_id,
@@ -1416,33 +1433,6 @@ class CortexController:
 
         return None
     
-    def _find_next_pending_step(
-        self,
-        controller_input: ControllerInput,
-    ) -> ExecutionStep | None:
-        """Return the next executable step in the active plan."""
-
-        plan = controller_input.active_plan
-        if plan is None:
-            return None
-
-        completed = set(
-            controller_input.context.completed_step_ids
-            if hasattr(controller_input.context, "completed_step_ids")
-            else ()
-        )
-
-        for step in plan.steps:
-            if step.step_id in completed:
-                continue
-
-            if step.status == StepStatus.COMPLETED:
-                continue
-
-            return step
-
-        return None
-
     def _advance_to_next_step(
         self,
         controller_input: ControllerInput,
@@ -1523,3 +1513,212 @@ class CortexController:
             **update,
             "controller_iteration": (cursor.controller_iteration or 0) + 1,
         })
+
+
+def apply_controller_decision_to_state(
+    execution_state: ExecutionState,
+    decision: ControllerDecision,
+) -> ExecutionState:
+    """Apply one immutable Controller decision to immutable execution state."""
+
+    protocol_visible = execution_state.protocol_visible
+    cursor = decision.cursor if decision.cursor is not None else protocol_visible.cursor
+    active_plan = (
+        decision.accepted_plan
+        if decision.accepted_plan is not None
+        else protocol_visible.active_plan
+    )
+    accepted_direct_response = decision.accepted_direct_response
+    if accepted_direct_response is not None:
+        pending = protocol_visible.planning_request
+        if (
+            pending is None
+            or accepted_direct_response.execution_id != protocol_visible.identity.execution_id
+            or accepted_direct_response.request_id != pending.request_id
+            or active_plan is not None
+            or not decision.terminal
+        ):
+            raise ValueError("accepted direct response is not bound to this terminal planning request")
+
+    authorized_context = (
+        decision.planning_request.context
+        if decision.planning_request is not None
+        else protocol_visible.planning_request.context
+        if protocol_visible.planning_request is not None else None
+    )
+
+    completed_step_ids = protocol_visible.completed_step_ids
+    completion_provenance = protocol_visible.completion_provenance
+    if (
+        decision.completed_step_id is not None
+        and decision.completed_step_id not in completed_step_ids
+    ):
+        completed_step_ids = (*completed_step_ids, decision.completed_step_id)
+
+    if decision.completion_evidence is not None:
+        provenance = decision.completion_evidence
+        if decision.completed_step_id != provenance.step_id:
+            raise ValueError("completion provenance does not match completed step")
+        scope = (
+            provenance.execution_id,
+            provenance.plan_id,
+            provenance.plan_revision,
+            provenance.step_id,
+        )
+        existing = next(
+            (
+                item
+                for item in completion_provenance
+                if (
+                    item.execution_id,
+                    item.plan_id,
+                    item.plan_revision,
+                    item.step_id,
+                )
+                == scope
+            ),
+            None,
+        )
+        if existing is not None and existing != provenance:
+            raise ValueError("accepted completion provenance cannot change")
+        if existing is None:
+            completion_provenance = (*completion_provenance, provenance)
+
+    if decision.clear_pending_tool_request:
+        pending_tool_request = None
+    else:
+        pending_tool_request = (
+            decision.pending_tool_request
+            if decision.pending_tool_request is not None
+            else protocol_visible.pending_tool_request
+        )
+
+    should_clear_active_step = decision.clear_active_step
+    active_step = None
+    if not should_clear_active_step:
+        step_id = decision.next_step_id or (
+            protocol_visible.active_step.step_id
+            if protocol_visible.active_step is not None
+            else None
+        )
+        if active_plan is not None and step_id is not None:
+            active_step = next(
+                (step for step in active_plan.steps if step.step_id == step_id),
+                None,
+            )
+
+    synchronized_step_id = None
+    if active_step is not None:
+        synchronized_step_id = active_step.step_id
+    elif not should_clear_active_step and decision.next_step_id is not None:
+        synchronized_step_id = decision.next_step_id
+
+    synchronized_cursor = cursor.model_copy(
+        update={
+            "phase": cursor.phase,
+            "current_worker": decision.next_worker or cursor.current_worker,
+            "step_id": synchronized_step_id,
+            "plan_revision": (
+                active_plan.revision
+                if active_plan is not None
+                else cursor.plan_revision
+            ),
+            "step_attempt": active_step.attempt if active_step is not None else None,
+        }
+    )
+
+    return execution_state.model_copy(
+        update={
+            "protocol_visible": protocol_visible.model_copy(
+                update={
+                    "status": decision.execution_status,
+                    "original_user_request": (
+                        authorized_context.user_request
+                        if authorized_context is not None
+                        else protocol_visible.original_user_request
+                    ),
+                    "clarification": (
+                        authorized_context.clarification
+                        if authorized_context is not None
+                        else protocol_visible.clarification
+                    ),
+                    "cancellation_source": (
+                        decision.cancellation_source
+                        if decision.cancellation_source is not None
+                        else protocol_visible.cancellation_source
+                    ),
+                    "cursor": synchronized_cursor,
+                    "active_plan": active_plan,
+                    "accepted_direct_response": accepted_direct_response,
+                    "planning_request": (
+                        None
+                        if decision.clear_planning_request or decision.terminal
+                        else decision.planning_request
+                        or protocol_visible.planning_request
+                    ),
+                    "planning_sequence": (
+                        decision.planning_request.sequence
+                        if decision.planning_request
+                        else protocol_visible.planning_sequence
+                    ),
+                    "planning_clarification": (
+                        None
+                        if decision.clear_planning_clarification or decision.terminal
+                        else decision.planning_clarification
+                        or protocol_visible.planning_clarification
+                    ),
+                    "active_step": active_step,
+                    "pending_tool_request": pending_tool_request,
+                    "completed_step_ids": completed_step_ids,
+                    "completion_provenance": completion_provenance,
+                    "retry": (
+                        decision.retry
+                        if decision.retry is not None
+                        else protocol_visible.retry
+                    ),
+                }
+            ),
+            "working": (
+                execution_state.working.model_copy(update={"last_tool_result": None})
+                if decision.consume_tool_result
+                else execution_state.working
+            ),
+        }
+    )
+
+
+def record_completion_state(
+    state: ExecutionState, decision: ControllerDecision, *,
+    bindings: tuple[AcceptedRequirement, ...],
+    resolutions: tuple[ResolvedCoverage, ...],
+    assessment: CoverageAssessment | None,
+) -> ExecutionState:
+    """Commit completion observations only against the applied authorization."""
+    protocol = state.protocol_visible
+    if protocol.status != decision.execution_status:
+        raise ValueError("completion observations require the applied Controller decision")
+    if decision.accepted_plan is not None and protocol.active_plan != decision.accepted_plan:
+        raise ValueError("completion bindings require the Controller-accepted plan")
+    return state.model_copy(update={
+        "protocol_visible": protocol.model_copy(update={
+            "resolved_coverages": resolutions,
+            "accepted_requirements": (
+                bindings if decision.accepted_plan is not None
+                else protocol.accepted_requirements
+            ),
+        }),
+        "working": state.working.model_copy(update={"coverage_assessment": assessment}),
+    })
+
+
+def record_finalization(state: ExecutionState, result: FinalizationResult) -> ExecutionState:
+    """Attach reporting to its already-terminal Controller execution."""
+    protocol = state.protocol_visible
+    summary = result.execution_summary
+    if (protocol.status == ExecutionStatus.NON_TERMINAL
+            or summary.execution_id != protocol.identity.execution_id
+            or summary.status != protocol.status):
+        raise ValueError("finalization does not match the terminal execution")
+    return state.model_copy(update={
+        "protocol_visible": protocol.model_copy(update={"summary": summary}),
+    })

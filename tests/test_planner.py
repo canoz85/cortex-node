@@ -207,6 +207,7 @@ def test_preserved_clarification_route_skips_router_and_plans_original_request()
         planner_route="info",
         context=ExecutionContext(
             user_request="Workspace içindeki şu dosyayı oku ve özetle.",
+            clarification_question="Hangi dosyayı okumalıyım?",
             clarification="Readme.md",
             role=WorkerRole.PLANNER,
         ),
@@ -220,8 +221,18 @@ def test_preserved_clarification_route_skips_router_and_plans_original_request()
     assert result.proposed_plan.steps[0].primary_tool == "read_file"
     assert provider.messages[0][-1].content == request.context.user_request
     structured_context = provider.messages[0][-2].content
-    assert '"user_request": "Workspace içindeki şu dosyayı oku ve özetle."' in structured_context
-    assert '"clarification": "Readme.md"' in structured_context
+    context_payload = json.loads(structured_context.split("\n", 1)[1])["context"]
+    assert "user_request" not in context_payload
+    assert context_payload["clarification_question"] == "Hangi dosyayı okumalıyım?"
+    assert context_payload["clarification"] == "Readme.md"
+    assert "human message is the original Controller-authorized request" in structured_context
+    assert "context.clarification_question is the Planner's previous NEEDS_INPUT" in structured_context
+    assert "context.clarification is the user's answer to that question" in structured_context
+    assert "Interpret the human request, clarification_question, and clarification together" in structured_context
+    assert "do not ask again for information it supplies" in structured_context
+    assert "does not authorize unrelated or expanded work" in structured_context
+    assert "route, capabilities, operation, and Controller constraints" in structured_context
+    assert "only if the combined original request and clarification are still insufficient" in structured_context
 
 
 def test_new_request_and_existing_replan_still_route_normally():
@@ -239,23 +250,28 @@ def test_new_request_and_existing_replan_still_route_normally():
     planner.run(planner_input(active_plan=base))
 
     assert router.calls == ["create a file", "create a file"]
+    assert [call[-1].content for call in planner.provider.messages] == [
+        "create a file",
+        "create a file",
+    ]
 
 
-def _planner_facing_tool_sets(provider: FakeProvider) -> tuple[set[str], set[str]]:
+def _planner_facing_tools(provider: FakeProvider) -> set[str]:
     messages = provider.messages[0]
     prompt_section = messages[0].content.split(
         "AVAILABLE TOOLS FOR THIS REQUEST", 1
-    )[1].split("PLANNING RULES:", 1)[0]
+    )[1].split("STEP SEMANTICS:", 1)[0]
     prompt_tools = {
         line.removeprefix("- ").strip()
         for line in prompt_section.splitlines()
         if line.startswith("- ") and "No tool access" not in line
     }
     context = json.loads(messages[-2].content.split("\n", 1)[1])
-    return prompt_tools, set(context["capabilities"]["available_tools"])
+    assert "capabilities" not in context
+    return prompt_tools
 
 
-def test_info_planner_prompt_and_structured_context_share_authorized_tools():
+def test_info_planner_prompt_and_validation_use_one_authorized_tool_set():
     provider = FakeProvider({
         "result": "PLAN_PROPOSED",
         "objective": "Inspect",
@@ -271,8 +287,7 @@ def test_info_planner_prompt_and_structured_context_share_authorized_tools():
     request = planner_input()
     result = service(provider, route="info").run(request)
 
-    prompt_tools, context_tools = _planner_facing_tool_sets(provider)
-    assert prompt_tools == context_tools
+    prompt_tools = _planner_facing_tools(provider)
     assert "write_file" not in prompt_tools
     assert result.outcome == PlannerOutcome.EXECUTION_PLAN
     assert result.proposed_plan.available_tools == tuple(sorted(prompt_tools))
@@ -294,9 +309,8 @@ def test_info_planner_cannot_validate_tool_outside_authorized_set():
 
     result = service(provider, route="info").run(planner_input())
 
-    prompt_tools, context_tools = _planner_facing_tool_sets(provider)
-    assert prompt_tools == context_tools
-    assert "write_file" not in context_tools
+    prompt_tools = _planner_facing_tools(provider)
+    assert "write_file" not in prompt_tools
     assert result.outcome == PlannerOutcome.FAILED
     assert result.failure_category == PlanningFailureCategory.INVALID_OUTPUT
     assert "primary_tool 'write_file' is unknown" in result.message
@@ -313,31 +327,18 @@ def test_empty_authorized_set_is_consistent_and_can_return_unplannable():
 
     result = service(provider, route="info").run(request)
 
-    prompt_tools, context_tools = _planner_facing_tool_sets(provider)
-    assert prompt_tools == context_tools == set()
+    assert _planner_facing_tools(provider) == set()
     assert result.outcome == PlannerOutcome.FAILED
     assert result.failure_category == PlanningFailureCategory.UNPLANNABLE
 
 
 def test_planner_prompt_requires_plan_outcomes_in_responsible_steps():
     provider = FakeProvider()
-
     service(provider).run(planner_input())
-
-    prompt = " ".join(
-        provider.messages[0][0].content.split()
-    )
-
+    prompt = provider.messages[0][0].content
     assert "Preserve every requested outcome" in prompt
-    assert (
-        "never leave an execution-relevant outcome only in the plan objective"
-        in prompt
-    )
-    assert (
-        "include that required outcome in that step's title or description"
-        in prompt
-    )
-    assert "rather than creating a separate step" in prompt
+    assert "responsible step's title or description" in prompt
+    assert "Reasoning over tool evidence belongs to the same step" in prompt
 
 
 def test_planner_prompt_distinguishes_known_memory_values_from_runtime_discovery():
@@ -373,21 +374,8 @@ def test_planner_prompt_distinguishes_known_memory_values_from_runtime_discovery
         provider.messages[0][-2].content.split()
     )
 
-    assert "background context for authority" in system_prompt
-    assert (
-        "within the current Controller-authorized request"
-        in system_prompt
-    )
-    assert (
-        "put the concrete value in the responsible step's title or description"
-        in system_prompt
-    )
-    assert "not prohibited tool-argument detail" in system_prompt
-    assert "genuinely unknown during planning" in system_prompt
-    assert (
-        "must not be deferred merely because a tool could rediscover it"
-        in system_prompt
-    )
+    assert "Planner memory is background context only" in system_prompt
+    assert "Any value required for execution" in system_prompt
 
     assert "background context for authority" in context_prompt
     assert (
@@ -547,7 +535,7 @@ def test_list_files_uses_authorized_live_discovery_without_ambient_rag():
         result.proposed_plan.steps[0].primary_tool
         == "list_files"
     )
-    assert result.planning_rationale == "Execution mode: info."
+    assert result.planner_route == "info"
     assert retrieval_calls == []
 
     assert all(
@@ -726,7 +714,7 @@ def test_runtime_intent_without_matching_authorized_capability_keeps_retrieval()
     )
 
 
-def test_revise_knowledge_request_remains_eligible_after_route_override():
+def test_revise_preserves_direct_route_and_skips_ambient_retrieval():
     base = ExecutionPlan(
         plan_id="accepted",
         revision=3,
@@ -766,13 +754,7 @@ def test_revise_knowledge_request_remains_eligible_after_route_override():
         ),
     )
 
-    assert retrieval_calls == [
-        request.context.user_request
-    ]
-    assert (
-        provider.messages[0][1].content
-        == "revision knowledge"
-    )
+    assert retrieval_calls == []
 
 
 @pytest.mark.parametrize(
@@ -789,27 +771,12 @@ def test_direct_routes_remain_ambient_rag_ineligible(route):
     )
 
 
-def test_planner_prompt_states_ambient_knowledge_authority():
+def test_planner_context_includes_retrieved_background_once():
     provider = FakeProvider()
-
-    service(provider).run(
-        planner_input(),
-        retrieve=lambda _: ("background",),
-    )
-
-    prompt = " ".join(
-        provider.messages[0][0].content.split()
-    )
-
-    assert (
-        "Retrieved knowledge is background planning context and may be stale"
-        in prompt
-    )
-    assert (
-        "must not replace live runtime discovery"
-        in prompt
-    )
-    assert "authorized runtime capability" in prompt
+    service(provider).run(planner_input(), retrieve=lambda _: ("background",))
+    messages = provider.messages[0]
+    assert sum(m.content == "background" for m in messages) == 1
+    assert "retrieval_messages" not in json.loads(messages[-2].content.split("\n", 1)[1])["context"]
 
 
 def test_valid_independent_steps():
@@ -1190,8 +1157,9 @@ def test_revise_preserves_request_and_versions_candidate():
 
     context = provider.messages[0][-2].content
 
-    assert '"completed_step_ids": ["done"]' in context
-    assert '"base_revision": 3' in context
+    payload = json.loads(context.split("\n", 1)[1])
+    assert payload["base_plan"]["revision"] == 3
+    assert payload["base_plan"]["steps"][0]["step_id"] == "done"
 
 
 def test_numbered_prose_has_no_compatibility_parser():
@@ -1330,29 +1298,12 @@ def test_one_step_can_represent_repeated_primary_tool_invocations():
 
 
 def test_prompt_defers_dynamic_arguments_and_batching_to_brain():
-    provider = FakeProvider(
-        discovery_dependent_proposal()
-    )
-
-    result = service(provider).run(
-        planner_input()
-    )
-
+    provider = FakeProvider(discovery_dependent_proposal())
+    result = service(provider).run(planner_input())
     prompt = provider.messages[0][0].content
-
     assert result.outcome == PlannerOutcome.EXECUTION_PLAN
-    assert (
-        "A logical step may invoke its primary tool repeatedly"
-        in prompt
-    )
-    assert (
-        "Arguments may come from dependency evidence"
-        in prompt
-    )
-    assert (
-        "Runtime-discoverable arguments or item identities are not grounds"
-        in prompt
-    )
+    assert "One logical step may invoke its primary tool repeatedly" in prompt
+    assert "Do not create separate steps only because item identities" in prompt
     assert "tool arguments" not in ProposedStep.model_fields
 
 
@@ -1391,9 +1342,9 @@ def test_core_prompt_prefers_direct_tool_and_keeps_reasoning_in_brain():
 
     assert result.outcome == PlannerOutcome.EXECUTION_PLAN
     assert len(result.proposed_plan.steps) == 1
-    assert "Prefer one direct tool" in prompt
+    assert "Prefer direct tools" in prompt
     assert (
-        "summarization, and transformation over tool results belong to Brain"
+        "Reasoning over tool evidence belongs to the same step"
         in prompt
     )
 

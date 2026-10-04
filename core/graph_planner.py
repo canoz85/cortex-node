@@ -6,9 +6,6 @@ from core.graph_context import retrieval_message
 from core.planner import PlannerService
 from core.planner_provider import LangChainPlannerProvider
 from core.planner_routing import LangChainPlannerRouter
-from core.protocol.bridge import build_planner_input
-from core.protocol.models import PlannerMemoryContext
-from core.runtime.execution_driver import WorkerDispatchError
 from core.state import AgentState
 from core.logging.live_status import current_live_status
 
@@ -19,7 +16,6 @@ def create_planner_node(
     router_llm=None,
     rag_service,
     rag_top_k: int,
-    tools_set: set[str],
     show_raw_llm: bool = False,
     planner_service: PlannerService | None = None,
 ):
@@ -52,26 +48,6 @@ def create_planner_node(
                     else ""
                 ),
             )
-        planner_input = build_planner_input(state)
-
-        if planner_input != authorized_request:
-            raise WorkerDispatchError(
-                "Planner input does not match Controller authorization"
-            )
-
-        memory_context = state.get("planner_memory_context")
-
-        if isinstance(memory_context, PlannerMemoryContext):
-            planner_input = planner_input.model_copy(
-                update={
-                    "context": planner_input.context.model_copy(
-                        update={
-                            "planner_memory_context": memory_context,
-                        }
-                    ),
-                }
-            )
-
         retrieval_messages = []
 
         def retrieve(user_request: str) -> tuple[str, ...]:
@@ -88,7 +64,7 @@ def create_planner_node(
             )
 
         result = service.run(
-            planner_input,
+            authorized_request,
             retrieve=retrieve,
         )
 

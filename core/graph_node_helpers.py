@@ -1,9 +1,6 @@
-import json
-
 from langchain_core.messages import AIMessage
 
 from core.models import TokenUsage
-from core.protocol.models import ToolRequest
 from tools.info_ops import update_token_usage
 
 
@@ -14,7 +11,5 @@ def response_with_usage(state: dict, response: AIMessage) -> dict:
     update_token_usage(usage.model_dump())
     return {
         "messages": [response],
-        "steps": state.get("steps", 0) + 1,
         "token_usage": usage,
-        "tool_text_retry_used": False,
     }

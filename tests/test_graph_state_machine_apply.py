@@ -2,7 +2,7 @@ import pytest
 
 from core.protocol.bridge import build_controller_input
 from core.protocol.controller import CortexController
-from core.runtime.controller_transition import apply_controller_decision_to_state
+from core.protocol.controller import apply_controller_decision_to_state
 from core.protocol.enums import (
     BrainOutcome,
     ControllerDecisionType,

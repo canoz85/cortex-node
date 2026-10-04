@@ -433,7 +433,7 @@ def test_graph_node_observation_is_applied_only_to_selected_boundaries():
     _register_state_node(
         workflow,
         "brain",
-        lambda _state: {"steps": 1},
+        lambda _state: {"run_id": "node-result"},
         resource_observer=observer,
     )
     workflow.set_entry_point("brain")
@@ -441,7 +441,7 @@ def test_graph_node_observation_is_applied_only_to_selected_boundaries():
 
     result = workflow.compile().invoke({"messages": [], "run_id": "run-1"})
 
-    assert result["steps"] == 1
+    assert result["run_id"] == "node-result"
     assert observer.calls == [
         ("graph_node", "brain", {"run_id": "run-1"}),
     ]

@@ -16,7 +16,7 @@ from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, SYSTEM_PROMPT_TE
 from core.graph_controller import create_controller_node
 from core.models import ToolOutputEnvelope as TransportToolResult
 from core.protocol.bridge import (
-    _legacy_brain_result_to_model, brain_result_to_legacy, build_brain_input,
+    build_brain_input,
     build_controller_input,
 )
 from core.protocol.enums import BrainOutcomeKind as Kind, ControllerDecisionType, ExecutionPhase, ExecutionStatus, PlannerOutcome, StepStatus, WorkerRole
@@ -51,7 +51,7 @@ def authorize_brain(state):
 def node(**kwargs):
     return create_brain_node(
         brain_llm=None, executable_tools=[], agent_system_prompt="active",
-        casual_system_prompt="casual", tools_set={"read_file"},
+        casual_system_prompt="casual",
         show_raw_llm=False, **kwargs,
     )
 
@@ -73,7 +73,6 @@ def test_adapter_only_translates_input_output_and_consumed_tool_evidence():
     update = node(brain_service=Service())(original)
     assert invocations == [build_brain_input(original)]
     assert update["brain_result"] is outcome
-    assert update["steps"] == 3
     assert update["token_usage"].total_tokens == 8
     assert update["messages"][0].tool_calls == [{"name": "read_file", "args": {"path": "a"}, "id": "domain-id", "type": "tool_call"}]
     assert update["execution_state"].working.last_tool_result is None
@@ -90,7 +89,6 @@ def test_adapter_only_translates_input_output_and_consumed_tool_evidence():
     BrainOutcome(outcome=Kind.INVALID_OUTPUT, error_code="invalid", message="Bad output"),
 ])
 def test_bridge_preserves_typed_payloads_without_reparsing_messages(outcome):
-    assert _legacy_brain_result_to_model(brain_result_to_legacy(outcome)) == outcome
     value = build_controller_input({
         "execution_state": execution_state(), "messages": [AIMessage(content="STEP COMPLETED: misleading")],
         "brain_result": outcome,
@@ -116,7 +114,7 @@ def test_prompt_examples_are_complete_json_envelopes(kind):
 
 @pytest.mark.parametrize("direct", [False, True])
 @pytest.mark.parametrize("supports_native_tool_calls", [True, False])
-def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct, supports_native_tool_calls):
+def test_graph_brain_execution_with_injected_planner_result(direct, supports_native_tool_calls):
     calls = []
     tool_calls = []
     tool_node_bindings = []
@@ -189,10 +187,10 @@ def test_current_graph_runs_typed_brain_tool_completion_and_final_answer(direct,
 
         brain = create_brain_node(**{name: kwargs[name] for name in (
             "brain_llm", "executable_tools", "agent_system_prompt",
-            "casual_system_prompt", "tools_set", "show_raw_llm",
+            "casual_system_prompt", "show_raw_llm",
             "supports_native_tool_calls",
         )})
-        return observe_controller, planner, brain, create_capture_tool_output_node(), lambda _state: {}
+        return observe_controller, planner, brain, create_capture_tool_output_node()
 
     def tool_factory(_tools):
         tool_node_bindings.extend(_tools)

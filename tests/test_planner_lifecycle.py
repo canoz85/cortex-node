@@ -3,7 +3,7 @@
 from langchain_core.messages import HumanMessage
 
 from core.protocol.bridge import build_brain_input
-from core.runtime.controller_transition import apply_controller_decision_to_state
+from core.protocol.controller import apply_controller_decision_to_state
 from core.protocol.controller import CortexController
 from core.protocol.enums import (
     ControllerDecisionType, ExecutionPhase, ExecutionStatus, PlannerOutcome,
@@ -19,8 +19,8 @@ from core.protocol.models import (
 IDENTITY = ExecutionIdentity(execution_id="p5", protocol_version="1")
 
 
-def context(*, text="Do the work", count=1):
-    return ExecutionContext(user_request=text, user_message_count=count)
+def context(*, text="Do the work"):
+    return ExecutionContext(user_request=text)
 
 
 def initial_input(**updates):
@@ -76,7 +76,7 @@ def test_needs_input_pauses_and_new_user_input_authorizes_a_new_episode():
     )))
     assert paused.decision_type == ControllerDecisionType.PAUSE
     assert paused.cursor.phase == ExecutionPhase.WAITING
-    assert paused.planning_clarification.source_request_id == request.request_id
+    assert paused.planning_clarification.request.request_id == request.request_id
     assert paused.clear_planning_request
 
     state = apply_controller_decision_to_state(
@@ -89,7 +89,7 @@ def test_needs_input_pauses_and_new_user_input_authorizes_a_new_episode():
     marker = restored.protocol_visible.planning_clarification
     assert restored.protocol_visible.planning_request is None
     assert marker.prompt == "Which target should be inspected?"
-    assert marker.planner_route == "info"
+    assert marker.request.planner_route == "info"
 
     waiting = ctrl.decide(initial_input(
         cursor=restored.protocol_visible.cursor,
@@ -98,9 +98,13 @@ def test_needs_input_pauses_and_new_user_input_authorizes_a_new_episode():
     assert waiting.decision_type == ControllerDecisionType.PAUSE
     assert waiting.planning_request is None
 
-    resumed = ctrl.decide(initial_input(
+    # Recreating the Controller with a broader registry cannot expand the
+    # authorization retained by the paused execution.
+    resumed = CortexController(20, planning_capabilities=PlanningCapabilities(
+        available_tools=("read_file", "write_file"),
+    )).decide(initial_input(
         cursor=restored.protocol_visible.cursor,
-        context=context(text="The src directory", count=2),
+        context=context(text="The src directory"), user_input="The src directory",
         planning_sequence=request.sequence, planning_clarification=marker,
     ))
     new_request = resumed.planning_request
@@ -110,6 +114,7 @@ def test_needs_input_pauses_and_new_user_input_authorizes_a_new_episode():
     assert new_request.sequence == request.sequence + 1
     assert new_request.episode_id != request.episode_id
     assert new_request.context.user_request == "Do the work"
+    assert new_request.context.clarification_question == marker.prompt
     assert new_request.context.clarification == "The src directory"
     assert new_request.planner_route == "info"
     assert new_request.capabilities == capabilities
@@ -185,6 +190,41 @@ def test_retryable_failures_have_two_attempts_and_unplannable_does_not_retry():
     )))
     assert unplannable.decision_type == ControllerDecisionType.TERMINATE
     assert unplannable.reason == "unplannable"
+
+
+def test_revise_clarification_preserves_operation_base_and_failure_context():
+    from core.protocol.models import ToolResult
+
+    plan = ExecutionPlan(plan_id="accepted", revision=2, steps=(
+        ExecutionStep(step_id="s", title="Inspect"),
+    ))
+    ctrl = CortexController(20, planning_capabilities=PlanningCapabilities(
+        available_tools=("read_file",),
+    ))
+    base = initial_input(active_plan=plan)
+    failure = ToolResult(request_id="failed-read", success=False, message="Permission denied")
+    request = ctrl._build_planning_request(
+        base, operation=PlanningOperation.REVISE, trigger="brain_requested",
+        reason="Need another source", failure=failure,
+    )
+    dispatch = ctrl._planning_dispatch(base, request, "Revise")
+    paused = ctrl.decide(result_input(dispatch, request, PlannerResult(
+        outcome=PlannerOutcome.CLARIFICATION_REQUIRED,
+        request_id=request.request_id, planner_route="info", message="Which other file?",
+    ), active_plan=plan))
+    resumed = ctrl.decide(initial_input(
+        cursor=paused.cursor, active_plan=plan, planning_sequence=request.sequence,
+        planning_clarification=paused.planning_clarification, user_input="README.md",
+    )).planning_request
+    assert resumed.operation == PlanningOperation.REVISE
+    assert (resumed.base_plan_id, resumed.base_revision) == (plan.plan_id, plan.revision)
+    assert resumed.reason == request.reason
+    assert resumed.failure_json == request.failure_json
+    assert resumed.context.user_request == request.context.user_request
+    assert resumed.context.clarification_question == "Which other file?"
+    assert resumed.context.clarification == "README.md"
+    assert resumed.planner_route == "info"
+    assert resumed.capabilities == request.capabilities
 
 
 def test_planner_result_binding_rejects_stale_and_unbound_results():

@@ -1,4 +1,4 @@
-"""Immutable protocol-oriented data contracts for gradual runtime migration.
+"""Immutable execution protocol contracts.
 
 These models provide a typed contract layer aligned with CEP/CIS semantics while
 remaining independent from current runtime orchestration modules.
@@ -32,7 +32,6 @@ from .enums import (
     PlannerOutcome,
     PlanningFailureCategory,
     PlanningOperation,
-    PlanningPauseReason,
     ReplanTrigger,
     StepStatus,
     WorkerRole,
@@ -44,7 +43,6 @@ JsonValue = dict[str, Any] | list[Any] | str | int | float | bool | None
 StepIdList = tuple[str, ...]
 MessageList = tuple[str, ...]
 ConstraintList = tuple[str, ...]
-RetrievalContext = tuple[str, ...]
 
 class ImmutableProtocolModel(BaseModel):
     """Base class for frozen, serialization-friendly protocol model contracts.
@@ -493,6 +491,8 @@ class ControllerInput(ImmutableProtocolModel):
     identity: ExecutionIdentity
     cursor: ExecutionCursor
     context: "ExecutionContext"
+    user_input: str | None = None
+    planner_memory_context: PlannerMemoryContext | None = None
     active_plan: ExecutionPlan | None = None
     active_step: ExecutionStep | None = None
     pending_tool_request: ToolRequest | None = None
@@ -790,21 +790,6 @@ class PlanningRequest(ImmutableProtocolModel):
         return self
 
 
-class PlannerInput(ImmutableProtocolModel):
-    """Controller-governed input contract for planner execution.
-
-    Protocol purpose: define legal planner input envelope.
-    Runtime purpose: assemble role-scoped planning context without direct worker coupling.
-    Ownership: prepared by runtime services under controller authority.
-    Visibility: Protocol-visible envelope with scoped runtime context.
-    """
-
-    identity: ExecutionIdentity
-    context: "ExecutionContext"
-    active_plan: ExecutionPlan | None = None
-    completed_step_ids: StepIdList = Field(default_factory=tuple)
-    retry: RetryMetadata = Field(default_factory=RetryMetadata)
-
 class PlannerResult(ImmutableProtocolModel):
     """Typed outcome contract emitted by planner runtime realization.
 
@@ -820,8 +805,6 @@ class PlannerResult(ImmutableProtocolModel):
     proposed_plan: ExecutionPlan | None = None
     message: str = ""
     direct_response_content: str | None = Field(default=None, min_length=1, max_length=4000)
-    planning_rationale: str = ""
-    change_summary: str = ""
     failure_category: PlanningFailureCategory | None = None
 
     @model_validator(mode="after")
@@ -951,19 +934,8 @@ class CheckpointState(ImmutableProtocolModel):
 class PlanningClarification(ImmutableProtocolModel):
     """Durable Controller-owned wait marker for Planner clarification."""
 
-    reason: PlanningPauseReason = PlanningPauseReason.NEEDS_INPUT
     prompt: str = Field(min_length=1, max_length=2000)
-    source_request_id: str = Field(min_length=1)
-    episode_id: str = Field(min_length=1)
-    operation: PlanningOperation
-    planner_route: Literal["conversation", "info", "action", "clarify"] | None = None
-    original_user_request: str = Field(min_length=1)
-    observed_user_message_count: int = Field(ge=1)
-    base_plan_id: str | None = None
-    base_revision: int | None = None
-    trigger: ReplanTrigger | None = None
-    replan_reason: str = ""
-    suggested_constraints: ConstraintList = ()
+    request: PlanningRequest
 
 
 class ProtocolVisibleState(ImmutableProtocolModel):
@@ -1017,21 +989,13 @@ class WorkingState(ImmutableProtocolModel):
     Ownership: runtime services under controller governance.
     Visibility: Working State.
 
-    Note: generic dictionaries are reserved for temporary runtime orchestration
-    hints and must not be treated as accepted protocol facts.
     """
 
-    retrieval_context: RetrievalContext = Field(default_factory=tuple)
     last_tool_result: ToolResult | None = None
     tool_execution_history: tuple[ToolExecutionRecord, ...] = Field(default_factory=tuple)
     repeat_fail_count: int = 0
     coverage_assessment: CoverageAssessment | None = None
     cancel_requested: bool = False
-    routing_metadata: dict[str, JsonValue] = Field(default_factory=dict)
-    planner_metadata: dict[str, JsonValue] = Field(default_factory=dict)
-    debug_metadata: dict[str, JsonValue] = Field(default_factory=dict)
-    capture_state: dict[str, JsonValue] = Field(default_factory=dict)
-    orchestration_metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class ExecutionState(ImmutableProtocolModel):
@@ -1071,7 +1035,7 @@ class PlannerMemoryQuestion(ImmutableProtocolModel):
 
 
 class PlannerMemoryContext(ImmutableProtocolModel):
-    """Ephemeral Planner-only projection; never stored in ProtocolVisibleState."""
+    """Bounded background memory included in Controller-authorized planning."""
 
     user_facts: tuple[PlannerMemoryFact, ...] = ()
     project_facts: tuple[PlannerMemoryFact, ...] = ()
@@ -1091,8 +1055,8 @@ class ExecutionContext(ImmutableProtocolModel):
     user_request: str = Field(min_length=1)
     retrieval_messages: MessageList = Field(default_factory=tuple)
     recent_history: MessageList = Field(default_factory=tuple)
+    clarification_question: str | None = None
     clarification: str | None = None
-    user_message_count: int = Field(default=1, ge=1)
     role: WorkerRole = WorkerRole.BRAIN
     planner_memory_context: PlannerMemoryContext | None = None
 

@@ -14,7 +14,8 @@ from core.planner import planning_request_context
 from core.planner import PlannerService
 from core.planner_contract import PlannerProposal, PlannerProposalResultType
 from core.planner_memory import PlannerMemoryLimits, project_planner_memory
-from core.planner_routing import RoutingDecision
+from core.planner import PlannerRoute
+from core.protocol.models import PlannerMemoryContext
 from core.protocol.bridge import build_brain_input, build_controller_input
 from core.protocol.enums import (
     ExecutionPhase, PlannerOutcome, PlanningOperation, ReplanTrigger, WorkerRole,
@@ -140,7 +141,8 @@ def authorized_state(*, revise=False, projection=None):
         created_at_utc=datetime(2026, 1, 1, tzinfo=timezone.utc),
         operation=operation, identity=identity,
         context=ExecutionContext(user_request="Use long answers instead", role=WorkerRole.PLANNER,
-                                 recent_history=("Earlier question",)),
+                                 recent_history=("Earlier question",),
+                                 planner_memory_context=projection or project_planner_memory(memory())),
         capabilities=PlanningCapabilities(available_tools=("list_files",)),
         base_plan=plan, base_plan_id=plan.plan_id if plan else None,
         base_revision=plan.revision if plan else None,
@@ -176,21 +178,21 @@ class SpyPlanner:
 
 
 @pytest.mark.parametrize("revise", [False, True])
-def test_authorized_planner_receives_ephemeral_context_without_protocol_mutation(revise):
+def test_planner_consumes_authorized_memory_snapshot_without_graph_injection(revise):
     state, original_request = authorized_state(revise=revise)
+    state["planner_memory_context"] = PlannerMemoryContext()
     spy = SpyPlanner()
-    node = create_planner_node(planner_service=spy, rag_service=None, rag_top_k=1,
-                               tools_set={"list_files"})
+    node = create_planner_node(planner_service=spy, rag_service=None, rag_top_k=1)
     result = node(state)
     assert result["planner_result"].request_id == original_request.request_id
     received = spy.requests[0]
-    assert received.context.planner_memory_context == state["planner_memory_context"]
+    assert received.context.planner_memory_context == original_request.context.planner_memory_context
     assert received.context.user_request == "Use long answers instead"
     assert received.context.recent_history == ("Earlier question",)
     assert received.operation == original_request.operation
-    assert original_request.context.planner_memory_context is None
+    assert received is original_request
+    assert received.context.planner_memory_context != state["planner_memory_context"]
     assert state["execution_state"].protocol_visible.planning_request == original_request
-    assert "Use concise answers" not in state["execution_state"].protocol_visible.model_dump_json()
     rendered = planning_request_context(received)
     assert '"planner_memory_context"' in rendered
     assert "current user_request is the active instruction" in rendered
@@ -206,7 +208,7 @@ def test_projection_does_not_enter_brain_or_finalizer_context():
     state, _ = authorized_state()
     assert build_brain_input(state).context.planner_memory_context is None
     assert build_controller_input(state).context.planner_memory_context is None
-    assert state["execution_state"].protocol_visible.planning_request.context.planner_memory_context is None
+    assert state["execution_state"].protocol_visible.planning_request.context.planner_memory_context is not None
     with pytest.raises(ValueError, match="Planner-only"):
         ExecutionContext(user_request="x", role=WorkerRole.BRAIN,
                          planner_memory_context=state["planner_memory_context"])
@@ -224,9 +226,11 @@ def test_current_request_and_memory_use_one_existing_planner_generation(route):
     class FakePlannerRouter:
         def __init__(self, route: str = "action"):
             self.route_value = route
+            self.calls = 0
 
         def route(self, user_request: str):
-            return RoutingDecision(route=self.route_value)
+            self.calls += 1
+            return PlannerRoute(route=self.route_value)
         
 
     class Provider:
@@ -244,9 +248,10 @@ def test_current_request_and_memory_use_one_existing_planner_generation(route):
             )
 
     provider = Provider()
-    service = PlannerService(provider=provider, router=FakePlannerRouter(), mutating_tools=set())
+    router = FakePlannerRouter(route)
+    service = PlannerService(provider=provider, router=router, mutating_tools=set())
     service.run(worker_request)
-    assert provider.routes == provider.generations == 1
+    assert router.calls == provider.generations == 1
     assert provider.messages[-1].role == "human"
     assert provider.messages[-1].content == "Use long answers instead"
     context_message = provider.messages[-2].content

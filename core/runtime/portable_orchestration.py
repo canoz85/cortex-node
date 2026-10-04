@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from core.completion import CompletionService
 from core.planner_revision import RevisionRejection, reconcile_revision
 from core.protocol.completion_identity import accepted_step
+from core.protocol.controller import record_completion_state
 from core.protocol.enums import ControllerDecisionType, PlanningOperation
 from core.protocol.models import ControllerInput, ExecutionState, FinalizationResult
 from core.runtime.execution_driver import ExecutionDriver, ExecutionDriverTurn
@@ -119,15 +120,10 @@ class PortableExecutionRuntime:
                 bindings=bindings,
             )
 
-        transitioned = transitioned.model_copy(update={
-            "protocol_visible": next_protocol.model_copy(update={
-                "resolved_coverages": frozen,
-                "accepted_requirements": bindings,
-            }),
-            "working": transitioned.working.model_copy(update={
-                "coverage_assessment": assessment,
-            }),
-        })
+        transitioned = record_completion_state(
+            transitioned, decision, bindings=bindings,
+            resolutions=frozen, assessment=assessment,
+        )
         worker_result = None
         terminal_dispatch_error = None
         dispatchable = decision.decision_type in {

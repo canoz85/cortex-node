@@ -44,7 +44,6 @@ def create_graph_nodes(
         show_raw_llm=show_raw_llm,
         rag_service=rag_service,
         rag_top_k=rag_top_k,
-        tools_set=tools_set,
     )
     capture_tool_output_node = create_capture_tool_output_node()
 

@@ -92,9 +92,6 @@ class PlanningFailureCategory(StrEnum):
     UNPLANNABLE = "UNPLANNABLE"
 
 
-class PlanningPauseReason(StrEnum):
-    NEEDS_INPUT = "needs_input"
-
 class BrainOutcomeKind(StrEnum):
     """Framework-neutral Brain result discriminants."""
 

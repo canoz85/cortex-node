@@ -535,7 +535,8 @@ flowchart TD
     BI --> BR[BrainResult]
     BR --> TRQ[ToolRequest]
     TRQ --> TRS[ToolResult]
-    EI --> PI[PlannerInput]
+    EI --> C[Controller]
+    C --> PI[PlanningRequest]
     EP --> PI
     PI --> PR[PlannerResult]
     EI --> FI[FinalizationRequest]

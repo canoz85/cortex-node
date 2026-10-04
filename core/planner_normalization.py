@@ -46,10 +46,8 @@ def _validate_graph(step_ids: tuple[str, ...], dependencies: dict[str, tuple[str
 
 def normalize_planner_proposal(
     content: object, planner_input: PlanningRequest, *, route: str,
-    effective_tools: frozenset[str] | None = None,
 ) -> PlannerResult:
     """Validate a proposal and convert it to the existing PlannerResult path."""
-    rationale = f"Execution mode: {route}."
     try:
         proposal = PlannerProposal.model_validate(content)
     except (ValidationError, TypeError, ValueError, AttributeError) as exc:
@@ -61,13 +59,11 @@ def normalize_planner_proposal(
         return PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=planner_input.request_id,
                              planner_route=route,
                              message=semantic_content or "No execution plan required.",
-                             direct_response_content=semantic_content,
-                             planning_rationale=rationale)
+                             direct_response_content=semantic_content)
     if proposal.result == PlannerProposalResultType.NEEDS_INPUT:
         return PlannerResult(outcome=PlannerOutcome.CLARIFICATION_REQUIRED, request_id=planner_input.request_id,
                              planner_route=route,
-                             message=proposal.message.strip(),
-                             planning_rationale=rationale)
+                             message=proposal.message.strip())
     if proposal.result == PlannerProposalResultType.PLANNING_FAILED:
         return planner_failure(planner_input.request_id, PlanningFailureCategory.UNPLANNABLE,
                                proposal.message, route=route)
@@ -83,8 +79,7 @@ def normalize_planner_proposal(
         dependencies = {step.step_id.strip(): tuple(ref.strip() for ref in step.dependencies)
                         for step in proposal.steps}
         _validate_graph(ids, dependencies)
-        available = set(effective_tools if effective_tools is not None
-                        else planner_input.capabilities.available_tools)
+        available = set(planner_input.capabilities.available_tools)
         unavailable = set(planner_input.capabilities.unavailable_tools)
         for step in proposal.steps:
             if not step.title.strip() or not step.description.strip():
@@ -115,8 +110,7 @@ def normalize_planner_proposal(
         return PlannerResult(outcome=PlannerOutcome.EXECUTION_PLAN,
                              request_id=planner_input.request_id, planner_route=route,
                              proposed_plan=plan,
-                             message=proposal.message or "Plan generated successfully.",
-                             planning_rationale=rationale)
+                             message=proposal.message or "Plan generated successfully.")
     except (ValueError, TypeError, AttributeError) as exc:
         return planner_failure(planner_input.request_id, PlanningFailureCategory.INVALID_OUTPUT,
                                f"Planner proposal is invalid: {exc}", route=route)

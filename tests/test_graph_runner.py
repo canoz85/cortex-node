@@ -32,14 +32,17 @@ class FakeApp:
             yield event
 
 
-def test_run_prompt_exposes_paused_clarification_and_reuses_execution_on_reply(capsys):
+def test_run_prompt_transports_injected_pause_and_execution_reference_on_reply(capsys):
+    from core.protocol.controller import CortexController
+    from core.protocol.models import ControllerInput, ExecutionContext
+    request = CortexController(20).decide(ControllerInput(
+        identity=ExecutionIdentity(execution_id="mqtt-run", protocol_version="1"),
+        cursor=ExecutionCursor(),
+        context=ExecutionContext(user_request="Connect to the MQTT broker"),
+    )).planning_request
     marker = PlanningClarification(
         prompt="Which MQTT password should I use?",
-        source_request_id="request-1",
-        episode_id="episode-1",
-        operation=PlanningOperation.CREATE,
-        original_user_request="Connect to the MQTT broker",
-        observed_user_message_count=1,
+        request=request,
     )
     cursor = ExecutionCursor(
         phase=ExecutionPhase.WAITING,
@@ -72,7 +75,7 @@ def test_run_prompt_exposes_paused_clarification_and_reuses_execution_on_reply(c
 
     history, _ = run_prompt(
         app,
-        marker.original_user_request,
+        marker.request.context.user_request,
         run_id="mqtt-run",
         clarification_sink=sink,
     )
@@ -91,7 +94,7 @@ def test_run_prompt_exposes_paused_clarification_and_reuses_execution_on_reply(c
     assert resumed_app.initial_state["execution_state"] is execution_state
     assert resumed_app.initial_state["run_id"] == "mqtt-run"
     assert [message.content for message in resumed_app.initial_state["messages"]][-2:] == [
-        marker.original_user_request,
+        marker.request.context.user_request,
         "secret-value",
     ]
 
@@ -164,7 +167,7 @@ def test_run_prompt_renders_portable_controller_tool_result_concisely(capsys):
     assert execution_state.working.tool_execution_history[-1].result is result
 
 
-def test_run_prompt_handles_tool_flow(capsys):
+def test_run_prompt_renders_injected_tool_flow_events(capsys):
     planner_event = {
         "planner": {
             "steps": 1,
