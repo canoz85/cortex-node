@@ -1,7 +1,6 @@
 """Framework-neutral Brain execution-reasoning service."""
 
 import json
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -9,64 +8,12 @@ from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import BrainInput, BrainOutcome
 
 
-BRAIN_OUTPUT_PROTOCOL = """BRAIN OUTCOME CONTRACT:
-Return exactly one outcome object.
-Do not include explanations, prose, markdown fences, or text before or after the outcome.
+BRAIN_OUTPUT_PROTOCOL = """BRAIN NATIVE CALL CONTRACT:
+Return exactly one native call: an authorized executable tool or
+brain_step_completed, brain_step_failed, brain_replan_requested.
+Put arguments in the native call and leave content empty.
+Do not return JSON outcome envelopes, textual lifecycle outcomes, or function-call syntax.
 """
-
-
-def build_brain_output_protocol(*, supports_native_tool_calls: bool, tools_enabled: bool) -> str:
-    if not tools_enabled:
-        return BRAIN_OUTPUT_PROTOCOL + (
-            'Answer format: natural user-facing text.\n'
-            'Tools are disabled.\n'
-        )
-    if supports_native_tool_calls:
-        return (
-            "BRAIN OUTCOME CONTRACT:\n"
-            "Return exactly one native call: either an executable tool or one of "
-            "brain_step_completed, brain_step_failed, brain_replan_requested.\n"
-            "Before choosing a call, evaluate successful current_attempts against the active step. "
-            "Success means the tool ran successfully, not necessarily that its evidence is complete. "
-            "Treat evidence_complete=false, integrity.is_truncated=true, or pagination.has_more=true "
-            "as incomplete and continue with the tool's supported offset, start, range, cursor, or "
-            "other continuation arguments. If complete evidence satisfies the step, call brain_step_completed. "
-            "Call an executable tool only when new evidence or action is still required. "
-            "A continuation call with different continuation arguments is not a duplicate. Do not repeat "
-            "a successful tool call with identical arguments unless new evidence makes repetition necessary.\n"
-            "These lifecycle actions are provided native tools, just like the executable tools. "
-            "Invoke brain_step_completed for STEP_COMPLETED, brain_step_failed for STEP_FAILED, "
-            "or brain_replan_requested for REPLAN_REQUESTED.\n"
-            "Put the selected tool's arguments in the native tool call. Leave content empty. "
-            "Do not return an outcome object or write a tool name and arguments as text.\n"
-            "Lifecycle actions describe only the active step. For completion, provide only "
-            "the semantic completion message; runtime binds provenance deterministically.\n"
-            "Use an executable tool to continue the same valid step without restructuring the plan. "
-            "Use brain_replan_requested when a changed plan may still achieve the overall objective; "
-            "this asks Controller to authorize Planner revision and needs no repeated-failure threshold. "
-            "Use brain_step_failed only when no reasonable revised plan could achieve the request; "
-            "Controller may retry the same step and ultimately terminate the execution.\n"
-        )
-    return BRAIN_OUTPUT_PROTOCOL + (
-        "Before choosing an outcome, evaluate successful current_attempts against the active step.\n"
-        "Success means the tool ran successfully, not necessarily that its evidence is complete.\n"
-        "Treat evidence_complete=false, integrity.is_truncated=true, or pagination.has_more=true as incomplete; "
-        "continue with supported offset, start, range, cursor, or other continuation arguments.\n"
-        "If complete evidence satisfies the step, return STEP_COMPLETED.\n"
-        "Request an executable tool only when new evidence or action is still required.\n"
-        "Continuation calls with different continuation arguments are not duplicates. Do not repeat a successful "
-        "tool call with identical arguments unless new evidence makes repetition necessary.\n"
-        "Outcome formats:\n"
-        '{"kind":"STEP_COMPLETED","step_id":"active-id","message":"completion summary"}\n'
-        '{"kind":"STEP_FAILED","step_id":"active-id","message":"failure reason"}\n'
-        '{"kind":"REPLAN_REQUESTED","step_id":"active-id","reason":"reason","constraints":[]}\n'
-        "step_id identifies the supplied step. Runtime binds completion provenance.\n"
-        "TOOL_REQUESTED continues the same valid step without restructuring the plan.\n"
-        "REPLAN_REQUESTED asks Controller to authorize Planner revision when a changed plan may still work; repeated failures are not required.\n"
-        "STEP_FAILED means no reasonable revised plan could achieve the request; Controller may retry the same step and ultimately terminate.\n"
-            'Tool format: JSON using the available tool schema.\n'
-            '{"kind":"TOOL_REQUESTED","tool":{"name":"available_tool_name","arguments":{}}}\n'
-    )
 
 
 @dataclass(frozen=True)
@@ -76,11 +23,8 @@ class BrainMessage:
 
 
 class BrainProvider(Protocol):
-    # Deployment capability; never inferred from model output or a failed call.
-    supports_native_tool_calls: bool
-
     def generate(
-        self, brain_input: BrainInput, messages: tuple[BrainMessage, ...], *, tools_enabled: bool,
+        self, brain_input: BrainInput, messages: tuple[BrainMessage, ...],
     ) -> BrainOutcome:
         """Invoke a model and normalize its output before returning."""
         ...
@@ -89,11 +33,9 @@ class BrainProvider(Protocol):
 class BrainService:
     def __init__(
         self, *, provider: BrainProvider, agent_system_prompt: str,
-        casual_system_prompt: str,
     ):
         self.provider = provider
         self.agent_system_prompt = agent_system_prompt
-        self.casual_system_prompt = casual_system_prompt
 
     def run(self, brain_input: BrainInput) -> BrainOutcome:
 
@@ -110,47 +52,24 @@ class BrainService:
                 outcome=BrainOutcomeKind.FINAL_ANSWER_READY,
                 message="Finalization requested.",
             )
-        
-        tools_enabled = brain_input.active_step is not None
-        output_protocol = build_brain_output_protocol(
-            supports_native_tool_calls=self.provider.supports_native_tool_calls,
-            tools_enabled=tools_enabled,
-        )
+
+        if brain_input.active_step is None:
+            return BrainOutcome(
+                outcome=BrainOutcomeKind.INVALID_OUTPUT,
+                error_code="active_step_required", message="Brain requires an authorized active step.",
+            )
         messages = _build_execution_messages(
-            system_prompt=self.agent_system_prompt if tools_enabled else self.casual_system_prompt,
-            brain_input=brain_input,
-            retrieval_messages=(),
+            system_prompt=self.agent_system_prompt, brain_input=brain_input,
         )
-        # The Controller-issued active step is the task turn, after policy and
-        # contextual data. Never put the overall user request in that position.
-        messages.insert(len(messages) - 1 if tools_enabled else len(messages),
-                        BrainMessage(role="system", content=output_protocol))
-        return self.provider.generate(brain_input, tuple(messages), tools_enabled=tools_enabled)
+        messages.insert(-1, BrainMessage(role="system", content=BRAIN_OUTPUT_PROTOCOL))
+        return self.provider.generate(brain_input, tuple(messages))
 
-
-def _build_context_messages(
-    *,
-    system_prompt: str,    retrieval_messages: Sequence[BrainMessage],
-    user_request: str,
-) -> list[BrainMessage]:
-
-    context_messages: list[BrainMessage] = [
-        BrainMessage(role="system", content=system_prompt),
-        *retrieval_messages,
-    ]
-    
-    if user_request:
-        context_messages.append(
-            BrainMessage(role="human", content=user_request)
-        )
-
-    return context_messages
 
 def _build_step_progress_messages(
     *,
     brain_input: BrainInput,
 ) -> list[BrainMessage]:
-    
+
     history = brain_input.tool_execution_history
     if not history:
         return []
@@ -258,38 +177,19 @@ def _build_step_progress_messages(
 
     def success_record(record: Any) -> dict[str, Any]:
         result = record.result
-        evidence_complete = not (
-            result.integrity.is_truncated
-            or (result.pagination is not None and result.pagination.has_more)
-        )
         payload: dict[str, Any] = {
             "tool": record.tool_name,
             "args": bounded_value(record.arguments),
             "success": True,
-            "evidence_complete": evidence_complete,
         }
 
-        # if record.tool_name == "read_file":
-        #     rendered = (result.rendered_output or "").strip()
-
-        #     if rendered:
-        #         payload["evidence"] = rendered
-        #     elif result.data is not None:
-        #         payload["evidence"] = result.data
-        # else:
-        #     evidence = evidence_for(record)
-        #     if evidence is not None:
-        #         payload["evidence"] = evidence
         evidence = evidence_for(record)
         if evidence is not None:
             payload["evidence"] = evidence
 
-        if getattr(result, "integrity", None) and result.integrity.is_truncated:
-            payload["integrity"] = {
-                "is_truncated": True,
-                "original_bytes": result.integrity.original_bytes,
-                "captured_bytes": result.integrity.captured_bytes,
-            }
+        integrity = result.integrity.model_dump(exclude_defaults=True)
+        if integrity:
+            payload["integrity"] = integrity
 
         if getattr(result, "pagination", None) and result.pagination:
             payload["pagination"] = {
@@ -297,6 +197,7 @@ def _build_step_progress_messages(
                 "offset": result.pagination.offset,
                 "limit": result.pagination.limit,
                 "total_items": result.pagination.total_items,
+                "returned_items": result.pagination.returned_items,
             }
 
         if getattr(record, "artifacts", None) and record.artifacts:
@@ -333,27 +234,11 @@ def _build_step_progress_messages(
                 error["details"] = bounded_value(details)
 
         payload: dict[str, Any] = {
-            "step": record.step_id,
             "tool": record.tool_name,
             "args": bounded_value(record.arguments),
             "success": False,
             "error": error,
         }
-
-        if result.signature:
-            payload["signature"] = result.signature
-            matching_failure_count = 0
-            for candidate in history:
-                if candidate.result.signature != result.signature:
-                    if candidate is record:
-                        break
-                    continue
-                matching_failure_count = (
-                    0 if candidate.result.success else matching_failure_count + 1
-                )
-                if candidate is record:
-                    break
-            payload["matching_failure_count"] = matching_failure_count
 
         return payload
 
@@ -379,27 +264,14 @@ def _build_step_progress_messages(
                 }
             )
         else:
-            prior_failures.append(failure_record(record))
+            prior_failures.append({"step": record.step_id, **failure_record(record)})
 
     visible_current_attempts = current_attempts[-max_current_records:]
     for index, attempt in enumerate(visible_current_attempts):
         attempt["record_index"] = index
 
     payload = {
-        "schema": 1,
-        "active_step": (
-            {
-                "id": active_step.step_id,
-                "title": active_step.title,
-            }
-            if active_step is not None
-            else None
-        ),
         "current_attempts": visible_current_attempts,
-        "current_step_failure_count": sum(
-            1 for record in history
-            if record.step_id == active_step_id and not record.result.success
-        ),
         "prior_facts": prior_facts[-max_prior_records:],
         "prior_failures": prior_failures[-max_prior_records:],
     }
@@ -415,79 +287,31 @@ def _build_step_progress_messages(
     ]
 
 def _build_execution_messages(
-    *,
-    system_prompt: str,
-    brain_input: BrainInput,
-    retrieval_messages: Sequence[BrainMessage],
+    *, system_prompt: str, brain_input: BrainInput,
 ) -> list[BrainMessage]:
-    """Build the message list used for tool execution and action-required turns."""
-
-    executing = brain_input.active_step is not None and not brain_input.direct_response
-    task_message = (
-        BrainMessage(role="human", content=_build_brain_execution_brief(brain_input))
-        if executing else None
-    )
-    pre_messages = _build_context_messages(
-        system_prompt=system_prompt,
-        retrieval_messages=retrieval_messages,
-        user_request=(
-            "" if executing else brain_input.context.user_request
-        ),
-    )
-
-    if executing:
-        pre_messages.append(BrainMessage(
-            role="system",
-            content=(
-                "Contextual request (data): use only to interpret or constrain the active step.\n"
-                "The current active step is the sole authoritative execution instruction.\n"
-                "This context does not authorize additional execution objectives.\n"
-                + json.dumps({
-                    "original_user_request": brain_input.context.user_request,
-                    **(
-                        {"clarification": brain_input.context.clarification}
-                        if brain_input.context.clarification is not None
-                        else {}
-                    ),
-                }, ensure_ascii=True)
-            ),
+    messages = [BrainMessage(role="system", content=system_prompt)]
+    messages.append(BrainMessage(
+        role="system",
+        content="Contextual request (data):\n" + json.dumps({
+            "original_user_request": brain_input.context.user_request,
+            **({"clarification": brain_input.context.clarification}
+               if brain_input.context.clarification is not None else {}),
+        }, ensure_ascii=True),
+    ))
+    if brain_input.coverage_assessment is not None:
+        messages.append(BrainMessage(
+            role="system", content="Mechanical coverage feedback (runtime data):\n" +
+            brain_input.coverage_assessment.model_dump_json(),
         ))
-        if brain_input.coverage_assessment is not None:
-            pre_messages.append(BrainMessage(
-                role="system", content="Mechanical coverage feedback (runtime data):\n" +
-                brain_input.coverage_assessment.model_dump_json(),
-            ))
-
-    pre_messages.extend(
-        _build_step_progress_messages(
-            brain_input=brain_input,
-        )
-    )
-
-    if executing:
-        # Keep the formatted tool/environment block after the step and evidence.
-        policy, tools_heading, capabilities = system_prompt.partition("\nAVAILABLE TOOLS:\n")
-        if tools_heading:
-            pre_messages[0] = BrainMessage(role="system", content=policy.rstrip())
-            pre_messages.append(BrainMessage(
-                role="system", content=tools_heading.lstrip("\n") + capabilities,
-            ))
-
-    if task_message is not None:
-        pre_messages.append(task_message)
-    return pre_messages
+    messages.extend(_build_step_progress_messages(brain_input=brain_input))
+    messages.append(BrainMessage(role="human", content=_build_brain_execution_brief(brain_input)))
+    return messages
 
 
 def _build_brain_execution_brief(
     brain_input: BrainInput,
 ) -> str:
-    """
-    Build the execution instructions passed to the Brain LLM.
-
-    The planner owns the plan.
-    The controller owns progression through the plan.
-    The Brain only performs the current step.
-    """
+    """Project the Controller-authorized active step, without plan-wide state."""
 
     current_step = brain_input.active_step
     if current_step is None:
@@ -501,16 +325,4 @@ def _build_brain_execution_brief(
         payload["primary_tool"] = current_step.primary_tool
     if current_step.completion_requirement is not None:
         payload["completion_requirement"] = current_step.completion_requirement.model_dump(mode="json")
-    plan = brain_input.active_plan
-    if plan is not None:
-        payload["accepted_plan_context"] = {
-            "steps": [
-                {
-                    "step_id": step.step_id,
-                    "status": step.status.value,
-                    "depends_on_step_ids": list(step.depends_on_step_ids),
-                }
-                for step in plan.steps
-            ],
-        }
     return "Active step:\n" + json.dumps(payload, ensure_ascii=True)

@@ -6,7 +6,7 @@ import pytest
 from langchain_ollama import ChatOllama
 from ollama._types import ChatRequest
 
-from core.brain import BrainMessage, BrainService, build_brain_output_protocol
+from core.brain import BrainMessage, BrainService, BRAIN_OUTPUT_PROTOCOL
 from core.brain_provider import LangChainBrainProvider, LIFECYCLE_ACTION_SCHEMAS
 from core.protocol.enums import BrainOutcomeKind as Kind
 from tools.git_ops import get_git_tools
@@ -51,8 +51,8 @@ def test_native_actions_survive_real_ollama_boundary(name, args, kind, retry):
     replies = ([{"content": 'brain_step_completed{"message":"Done"}'}]
                if retry else []) + [native(name, args)]
     provider, requests = boundary(replies)
-    protocol = build_brain_output_protocol(supports_native_tool_calls=True, tools_enabled=True)
-    outcome = provider.generate(git_brain_input(), (BrainMessage("system", protocol),), tools_enabled=True)
+    protocol = BRAIN_OUTPUT_PROTOCOL
+    outcome = provider.generate(git_brain_input(), (BrainMessage("system", protocol),))
     assert outcome.kind == kind
     assert len(requests) == (2 if retry else 1)
     for request in requests:
@@ -60,11 +60,19 @@ def test_native_actions_survive_real_ollama_boundary(name, args, kind, retry):
         assert schemas["git_status"]["parameters"]["properties"] == {}
         for schema in LIFECYCLE_ACTION_SCHEMAS:
             actual = schemas[schema["function"]["name"]]
-            # The installed Ollama SDK drops additionalProperties, but retains
-            # every argument, array item type, and required field.
-            expected = {k: v for k, v in schema["function"]["parameters"].items()
-                        if k != "additionalProperties"}
-            assert actual["parameters"] == expected
+            # Ollama retains top-level arguments but strips nested object schemas
+            # and validation keywords. Normalization must enforce those locally.
+            expected = schema["function"]["parameters"]
+            parameters = actual["parameters"]
+            assert parameters["type"] == "object"
+            assert parameters["required"] == expected["required"]
+            assert parameters["properties"].keys() == expected["properties"].keys()
+            for field, definition in expected["properties"].items():
+                transported = parameters["properties"][field]
+                assert transported["type"] == definition["type"]
+                assert transported["description"] == definition["description"]
+                if definition["type"] == "array":
+                    assert transported["items"] == definition["items"]
         assert "tool_choice" not in request
     if retry:
         assert requests[0]["tools"] == requests[1]["tools"]
@@ -72,26 +80,23 @@ def test_native_actions_survive_real_ollama_boundary(name, args, kind, retry):
         assert requests[1]["messages"][-2]["role"] == "assistant"
         assert requests[1]["messages"][-2]["content"].startswith('brain_step_completed{')
         correction = requests[1]["messages"][-1]["content"]
-        assert "Lifecycle actions returned in content are text" in correction
-        assert "Keep the same active-step decision" in correction
+        assert "previous response contained no native call and was not accepted" in correction
+        assert "exactly one native tool call" in correction
+        assert "same active-step decision" not in correction
 
 
 def test_exhausted_textual_pseudo_calls_are_typed_failure():
     provider, requests = boundary([{"content": 'brain_step_completed{"message":"Done"}'}] * 2)
-    outcome = provider.generate(git_brain_input(), (), tools_enabled=True)
+    outcome = provider.generate(git_brain_input(), ())
     assert outcome.kind == Kind.INVALID_OUTPUT
-    assert outcome.error_code == "expected_structured_outcome"
+    assert outcome.error_code == "unexpected_response_content"
     assert len(requests) == 2
     assert requests[0]["tools"] == requests[1]["tools"]
 
 
 def test_native_protocol_does_not_ask_for_textual_outcome_object():
-    native_protocol = build_brain_output_protocol(supports_native_tool_calls=True, tools_enabled=True)
-    compatibility = build_brain_output_protocol(supports_native_tool_calls=False, tools_enabled=True)
-    assert "Return exactly one outcome object." not in native_protocol
-    assert "Leave content empty" in native_protocol
-    assert "Return exactly one outcome object." in compatibility
-    assert '\"kind\":\"STEP_COMPLETED\"' in compatibility
+    assert "Return exactly one native call" in BRAIN_OUTPUT_PROTOCOL
+    assert '"kind"' not in BRAIN_OUTPUT_PROTOCOL
 
 
 def test_active_task_is_last_user_turn_at_ollama_boundary_without_filtering_tools():
@@ -105,14 +110,13 @@ def test_active_task_is_last_user_turn_at_ollama_boundary_without_filtering_tool
             "user_request": "Inspect status, then inspect diffs and summarize changes",
         }),
     })
-    result = BrainService(provider=provider, agent_system_prompt="Execute only the active step",
-                          casual_system_prompt="Converse").run(context)
+    result = BrainService(provider=provider, agent_system_prompt="Execute only the active step").run(context)
     assert result.kind == Kind.TOOL_REQUESTED
     request = requests[0]
     assert request["messages"][-1]["role"] == "user"
     assert '"primary_tool": "git_status"' in request["messages"][-1]["content"]
     assert context.context.user_request not in request["messages"][-1]["content"]
-    assert request["messages"][-2]["content"].startswith("BRAIN OUTCOME CONTRACT:")
+    assert request["messages"][-2]["content"].startswith("BRAIN NATIVE CALL CONTRACT:")
     assert any(context.context.user_request in m["content"] and m["role"] == "system"
                for m in request["messages"])
     assert {t["function"]["name"] for t in request["tools"]} == {

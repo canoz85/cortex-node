@@ -12,18 +12,15 @@ from core.state import AgentState
 
 def create_brain_node(
     *, brain_llm, executable_tools, agent_system_prompt: str,
-    casual_system_prompt: str,  show_raw_llm: bool,
+    show_raw_llm: bool,
     brain_service: BrainService | None = None,
-    supports_native_tool_calls: bool = True,
 ):
     service = brain_service or BrainService(
         provider=LangChainBrainProvider(
             brain_llm=brain_llm, executable_tools=executable_tools,
             show_raw_llm=show_raw_llm,
-            supports_native_tool_calls=supports_native_tool_calls,
         ),
         agent_system_prompt=agent_system_prompt,
-        casual_system_prompt=casual_system_prompt,
     )
 
     def brain_node(state: AgentState):

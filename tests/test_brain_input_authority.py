@@ -7,6 +7,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from core.brain import BrainService
+from core.graph_constants import SYSTEM_PROMPT_TEMPLATE
 from core.brain_provider import LangChainBrainProvider
 from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import (
@@ -36,8 +37,7 @@ def setup():
             brain_llm=model,
             executable_tools=[SimpleNamespace(name="list_files"), SimpleNamespace(name="read_file")],
         ),
-        agent_system_prompt="Execute the active step",
-        casual_system_prompt="Converse",
+        agent_system_prompt=SYSTEM_PROMPT_TEMPLATE.format(model="test", workspace_dir="workspace", knowledge_dir="knowledge"),
     )
     steps = (
         ExecutionStep(step_id="s1", title="Inspect workspace", description="Use list_files"),
@@ -63,15 +63,14 @@ def test_execution_request_is_context_and_only_current_step_is_instruction():
     assert [m for m in messages if isinstance(m, HumanMessage)] == [messages[-1]]
     assert messages[-1].content.startswith("Active step:")
     block = next(m.content for m in messages if m.content.startswith("Contextual request (data):"))
-    assert "sole authoritative execution instruction" in block
-    assert "only to interpret or constrain" in block
+    assert "The active step is the sole execution objective" in messages[0].content
     assert json.loads(block.splitlines()[-1]) == {"original_user_request": context.context.user_request}
     brief = next(m.content for m in messages if m.content.startswith("Active step:"))
     payload = json.loads(brief.split("\n", 1)[1])
     assert payload["step_id"] == "s1"
     assert payload["title"] == "Inspect workspace"
     assert payload["description"] == "Use list_files"
-    assert payload["attempt"] == context.active_step.attempt
+    assert "accepted_plan_context" not in payload
     rendered = "\n".join(m.content for m in messages)
     assert context.active_plan.objective not in rendered
     assert context.active_plan.steps[1].description not in rendered
@@ -217,12 +216,11 @@ def test_successful_read_is_grounded_before_brain_can_repeat_the_same_call():
             "tool": "read_file",
             "args": {"path": ".cortex_session.json"},
             "success": True,
-            "evidence_complete": True,
             "evidence": {"path": ".cortex_session.json", "content": "session evidence"},
             "record_index": 0,
         }
-        assert "If complete evidence satisfies the step, call brain_step_completed." in rendered
-        assert "Do not repeat a successful tool call with identical arguments" in rendered
+        assert "Call brain_step_completed only when complete evidence satisfies the active step." in rendered
+        assert "Do not repeat an identical successful call" in rendered
         return AIMessage(content="", tool_calls=[{
             "name": "brain_step_completed",
             "id": "complete-from-read",
@@ -272,10 +270,9 @@ def test_truncated_read_continues_with_new_offset_before_completion():
         )
         attempt = json.loads(evidence_message.split("\n", 1)[1])["current_attempts"][-1]
         assert attempt["success"] is True
-        assert attempt["evidence_complete"] is False
         assert attempt["integrity"]["is_truncated"] is True
         assert attempt["pagination"]["has_more"] is True
-        assert "continuation call with different continuation arguments is not a duplicate" in rendered
+        assert "a continuation, not an identical call" in rendered
         return AIMessage(content="", tool_calls=[{
             "name": "read_file", "id": "read-rest",
             "args": {"path": "large.txt", "offset": 10000, "limit": 10000},
@@ -315,7 +312,7 @@ def test_truncated_read_continues_with_new_offset_before_completion():
             if message.content.startswith("Execution evidence v1:")
         )
         attempts = json.loads(evidence_message.split("\n", 1)[1])["current_attempts"]
-        assert [attempt["evidence_complete"] for attempt in attempts] == [False, True]
+        assert attempts[0]["integrity"]["is_truncated"] is True
         assert attempts[-1]["pagination"]["has_more"] is False
         return AIMessage(content="", tool_calls=[{
             "name": "brain_step_completed", "id": "complete-large-read",

@@ -20,11 +20,9 @@ def create_graph_nodes(
     rag_service: WorkspaceRAG,
     rag_top_k: int,
     agent_system_prompt: str,
-    casual_system_prompt: str,
     sap_system_prompt: str | None,
     tools_set: set[str],
     show_raw_llm: bool,
-    supports_native_tool_calls: bool = True,
     worker_ports=None,
 ):
 
@@ -51,9 +49,7 @@ def create_graph_nodes(
         brain_llm=brain_llm,
         executable_tools=executable_tools,
         agent_system_prompt=agent_system_prompt,
-        casual_system_prompt=casual_system_prompt,
         show_raw_llm=show_raw_llm,
-        supports_native_tool_calls=supports_native_tool_calls,
     )
 
     return controller_node, planner_node, brain_node, capture_tool_output_node

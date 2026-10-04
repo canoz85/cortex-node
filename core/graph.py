@@ -10,10 +10,9 @@ from langgraph.graph import StateGraph
 from langgraph.graph.state import END
 from langgraph.prebuilt import ToolNode
 
-from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE
+from core.graph_constants import MAX_REASONING_STEPS, SYSTEM_PROMPT_TEMPLATE
 from core.graph_authorization import require_tool_authorization
 from core.graph_nodes import create_graph_nodes
-from core.brain_provider import text_tool_definitions
 from core.graph_routing import route_after_controller
 from core.graph_worker_runtime import GraphWorkerRuntimePorts
 from core.graph_runner import run_prompt
@@ -299,7 +298,6 @@ def build_app(
     checkpointer_factory: Callable[[], Any] = InMemorySaver,
     gpu_resource_policy: GpuResourcePolicy | None = None,
     gpu_resource_coordinator: GpuResourceCoordinator | None = None,
-    supports_native_tool_calls: bool = True,
 ) -> CheckpointedGraphApp:
     app_root = project_root or Path(__file__).resolve().parents[1]
     workspace_root = Path(workspace_dir).resolve()
@@ -323,23 +321,11 @@ def build_app(
         resource_coordinator=resource_coordinator,
     )
     tool_names = set(_tool_names(tools))
-    tool_prompt_text = "\n".join(
-        f"- {name}"
-        for name in sorted(tool_names)
-    )
-
-    if not supports_native_tool_calls:
-        tool_prompt_text = text_tool_definitions(tools)
-
     agent_system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         model=model,
         workspace_dir=workspace_root_str,
         knowledge_dir=str(knowledge_root),
-        max_steps=MAX_REASONING_STEPS,
-        available_tools=tool_prompt_text,
     )
-
-    casual_system_prompt = CASUAL_SYSTEM_PROMPT_TEMPLATE
 
     planner_llm = chat_model_factory(model_planner, 0)
     brain_llm = chat_model_factory(model, 0)
@@ -357,11 +343,9 @@ def build_app(
         rag_service=rag_service,
         rag_top_k=rag_top_k,
         agent_system_prompt=agent_system_prompt,
-        casual_system_prompt=casual_system_prompt,
         sap_system_prompt=sap_system_prompt,
         tools_set=tool_names,
         show_raw_llm=show_raw_llm,
-        supports_native_tool_calls=supports_native_tool_calls,
         worker_ports=worker_ports,
     )
 

@@ -16,70 +16,27 @@ SYSTEM_CAPABILITIES_TEXT = """SYSTEM CAPABILITIES & AVAILABLE TOOL CATEGORIES:
 - Vision & Generation: Inspecting/describing images and executing ComfyUI generation workflows.
 - System Info: Real-time clock, agent status, token usages."""
 
-SYSTEM_PROMPT_TEMPLATE = """You are CortexNode Brain, an execution worker for the current active step.
+SYSTEM_PROMPT_TEMPLATE = """You are CortexNode Brain, an execution worker.
 
-Your responsibility is to determine the next action required to make progress on the active step.
-
-The active step is the sole authoritative execution objective.
-Use the original user request only to interpret or constrain that step.
-
-Use the available evidence to determine what has already been accomplished and what remains.
-
-Before requesting a tool, evaluate successful current_attempts against the active step. Tool success
-means the call ran successfully, not necessarily that its evidence is complete. Treat
-evidence_complete=false, integrity.is_truncated=true, or pagination.has_more=true as incomplete and
-continue using the tool's supported offset, start, range, cursor, or other continuation arguments.
-Continuation calls with different continuation arguments are not duplicates. Return STEP_COMPLETED
-only when the evidence required by the active step is complete. Request a tool only when new evidence
-or action is still required, and do not repeat a successful call with identical arguments unless new
-evidence makes repetition necessary.
-
-If additional work or evidence is required and an available tool can provide it, request that tool
-when the active-step objective remains valid and no plan restructuring is required. Supporting tools
-are allowed; primary_tool is a non-exclusive planning hint, not an allowlist.
-Insufficient evidence alone is not a failure.
-
-Return STEP_COMPLETED only when the active step is satisfied by the available evidence.
-When returning STEP_COMPLETED, the completion message must contain the semantic result
-produced by the active step, using the available evidence.
-Do not use the completion message merely to state that the work was completed when the
-active step requires an observable result, finding, interpretation, summary, comparison,
-calculation, or other semantic output.
-Preserve the result needed by downstream execution or finalization. For example, if the
-active step requires summarizing inspected items, include the summaries themselves rather
-than only saying that the items were summarized.
-The completion message is the Controller-visible semantic result of the step.
-Completion evidence separately establishes the provenance supporting that result.
-When that result is an exact collection already present in structured tool data,
-reference its tool request and data path as exact_collection instead of copying or
-rewriting its members. The Controller binds the exact members from tool evidence.
-Return REPLAN_REQUESTED when the active strategy or assumptions are no longer viable, but the overall
-user objective may still be achievable and correct continuation requires changing the accepted plan.
-This asks the Controller to authorize Planner revision. It does not require repeated identical failures.
-If the user explicitly requires replanning after a strategy fails, honor that condition when it fails.
-Return STEP_FAILED only when the active step and overall objective cannot reasonably be completed with
-the available tools, inputs, permissions, or reachable state, and no materially different plan would
-reasonably make the request achievable. STEP_FAILED may cause the Controller to retry the same step and,
-when its retry budget is exhausted, terminates the execution as failed. Do not return STEP_FAILED when a
-materially different plan could still satisfy the overall request; return REPLAN_REQUESTED instead.
-
-Prior facts may be used as inputs for choosing the next action.
-
-AVAILABLE TOOLS:
-{available_tools}
+The active step is the sole execution objective. The original user request and clarification
+are context only; they may interpret or constrain the step, not authorize other work.
+Inspect accumulated evidence before acting. Tool success does not imply step success.
+Call an authorized executable tool only when it materially advances the active step;
+primary_tool is a hint, and relevant supporting tools are allowed.
+Continue incomplete, truncated or paginated evidence with the tool's supported continuation
+arguments. A changed offset, range or cursor is a continuation, not an identical call.
+Do not repeat an identical successful call without new evidence that justifies it.
+Call brain_step_completed only when complete evidence satisfies the active step.
+Call brain_replan_requested when the strategy or plan must change but the objective may
+remain achievable; no repeated-failure threshold is required.
+Call brain_step_failed only when no reasonable revised plan or tool path can achieve
+the objective. Insufficient evidence alone is not failure.
 
 ENVIRONMENT:
 Model: {model}
 Sandbox workspace: {workspace_dir}
 Knowledge folder: {knowledge_dir}
-
 """
-
-CASUAL_SYSTEM_PROMPT_TEMPLATE = """You are CortexNode, a helpful and friendly assistant for software developers in CONVERSATION MODE.
-
-Rules:
-- Respond to the user following the BRAIN OUTCOME CONTRACT.
-- Use provided history if needed."""
 
 
 BASE_GENERAL_TOOLS = {

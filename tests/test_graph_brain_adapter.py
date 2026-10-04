@@ -1,18 +1,15 @@
 """Brain graph adapter, prompt contract, and execution flow integration tests."""
 
-import json
 from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
-from core.brain import build_brain_output_protocol
 from core.finalizer import Finalizer
 from core.graph import build_app
 from core.graph_brain import create_brain_node
 from core.graph_capture import create_capture_tool_output_node
-from core.graph_constants import CASUAL_SYSTEM_PROMPT_TEMPLATE, SYSTEM_PROMPT_TEMPLATE
 from core.graph_controller import create_controller_node
 from core.models import ToolOutputEnvelope as TransportToolResult
 from core.protocol.bridge import (
@@ -51,7 +48,6 @@ def authorize_brain(state):
 def node(**kwargs):
     return create_brain_node(
         brain_llm=None, executable_tools=[], agent_system_prompt="active",
-        casual_system_prompt="casual",
         show_raw_llm=False, **kwargs,
     )
 
@@ -96,24 +92,7 @@ def test_bridge_preserves_typed_payloads_without_reparsing_messages(outcome):
     assert value.brain_result is outcome
 
 
-def test_all_brain_prompts_align_with_the_outcome_contract():
-    assert "Output capability is specified" not in SYSTEM_PROMPT_TEMPLATE
-    assert "BRAIN OUTCOME CONTRACT" in CASUAL_SYSTEM_PROMPT_TEMPLATE
-    for prompt in (SYSTEM_PROMPT_TEMPLATE, CASUAL_SYSTEM_PROMPT_TEMPLATE):
-        assert "STEP COMPLETED" not in prompt
-        assert "STEP FAILED" not in prompt
-        assert "starting with" not in prompt
-
-
-@pytest.mark.parametrize("kind", [Kind.TOOL_REQUESTED, Kind.STEP_COMPLETED, Kind.REPLAN_REQUESTED, Kind.STEP_FAILED])
-def test_prompt_examples_are_complete_json_envelopes(kind):
-    protocol = build_brain_output_protocol(supports_native_tool_calls=False, tools_enabled=True)
-    examples = [json.loads(line) for line in protocol.splitlines() if line.startswith("{")]
-    assert any(example["kind"] == kind.name or Kind.__members__[example["kind"]] == kind for example in examples)
-
-
-@pytest.mark.parametrize("supports_native_tool_calls", [True, False])
-def test_graph_brain_execution_with_injected_planner_result(supports_native_tool_calls):
+def test_graph_brain_execution_with_injected_planner_result():
     calls = []
     tool_calls = []
     tool_node_bindings = []
@@ -125,7 +104,6 @@ def test_graph_brain_execution_with_injected_planner_result(supports_native_tool
             self.tool_enabled = tool_enabled
 
         def bind_tools(self, tools):
-            assert supports_native_tool_calls
             bindings.append(tools)
             return Model(tool_enabled=True)
 
@@ -134,20 +112,14 @@ def test_graph_brain_execution_with_injected_planner_result(supports_native_tool
             calls.append((self.tool_enabled, rendered))
             if any(message.content.startswith("Active step:") for message in messages):
                 if "Execution evidence v1:" not in rendered:
-                    if supports_native_tool_calls:
-                        return AIMessage(content="", tool_calls=[{
-                            "name": "read_file", "args": {"path": "a.py"}, "id": "native-call-id",
-                        }])
-                    return AIMessage(content='{"name":"read_file","arguments":{"path":"a.py"}}')
-                if supports_native_tool_calls:
                     return AIMessage(content="", tool_calls=[{
-                        "name": "brain_step_completed",
-                        "args": {"message": "File read"},
-                        "id": "native-completion-id",
+                        "name": "read_file", "args": {"path": "a.py"}, "id": "native-call-id",
                     }])
-                return AIMessage(content=json.dumps({
-                    "kind": "STEP_COMPLETED", "step_id": "s1", "message": "File read",
-                }))
+                return AIMessage(content="", tool_calls=[{
+                    "name": "brain_step_completed",
+                    "args": {"message": "File read"},
+                    "id": "native-completion-id",
+                }])
             return AIMessage(content="File contents reported")
 
     @tool
@@ -184,8 +156,7 @@ def test_graph_brain_execution_with_injected_planner_result(supports_native_tool
 
         brain = create_brain_node(**{name: kwargs[name] for name in (
             "brain_llm", "executable_tools", "agent_system_prompt",
-            "casual_system_prompt", "show_raw_llm",
-            "supports_native_tool_calls",
+            "show_raw_llm",
         )})
         return observe_controller, planner, brain, create_capture_tool_output_node()
 
@@ -207,7 +178,6 @@ def test_graph_brain_execution_with_injected_planner_result(supports_native_tool
         rag_factory=lambda *_args: object(), tool_list_factory=lambda *_args: [read_file],
         chat_model_factory=lambda *_args: Model(), graph_nodes_factory=graph_nodes_factory,
         tool_node_factory=tool_factory, project_root=Path("."),
-        supports_native_tool_calls=supports_native_tool_calls,
     )
     result = app.invoke({
         "messages": [HumanMessage(content="Read a.py")], "steps": 0,
@@ -223,24 +193,17 @@ def test_graph_brain_execution_with_injected_planner_result(supports_native_tool
     assert protocol.active_step is None
     assert result["messages"][-1].content == "File contents reported"
     assert len(tool_calls) == 1
-    assert [enabled for enabled, _ in calls] == [supports_native_tool_calls, supports_native_tool_calls]
-    assert len(bindings) == (2 if supports_native_tool_calls else 0)
+    assert [enabled for enabled, _ in calls] == [True, True]
+    assert len(bindings) == 2
     assert tool_node_bindings == [read_file]
-    if supports_native_tool_calls:
-        assert bindings[0][0] is read_file
-        assert {item["function"]["name"] for item in bindings[0][1:]} == {
-            "brain_step_completed", "brain_step_failed", "brain_replan_requested",
-        }
-    assert all("BRAIN OUTCOME CONTRACT" in prompt for _, prompt in calls)
-    if supports_native_tool_calls:
-        assert "Return exactly one native call" in calls[0][1]
-        assert "brain_step_completed" in calls[0][1]
-        assert '"kind":"TOOL_REQUESTED"' not in calls[0][1]
-    else:
-        assert "Tool format: JSON" in calls[0][1]
-        assert '"kind":"TOOL_REQUESTED"' in calls[0][1]
-        assert '"parameters"' in calls[0][1]
-        assert '"path"' in calls[0][1]
+    assert bindings[0][0] is read_file
+    assert {item["function"]["name"] for item in bindings[0][1:]} == {
+        "brain_step_completed", "brain_step_failed", "brain_replan_requested",
+    }
+    assert all("BRAIN NATIVE CALL CONTRACT" in prompt for _, prompt in calls)
+    assert "Return exactly one native call" in calls[0][1]
+    assert "brain_step_completed" in calls[0][1]
+    assert '"kind":"TOOL_REQUESTED"' not in calls[0][1]
     assert "Execution evidence v1:" in calls[-1][1]
     assert protocol.completion_provenance[0].tool_request_ids == (tool_calls[0].request_id,)
     assert protocol.completed_step_ids == ("s1",)

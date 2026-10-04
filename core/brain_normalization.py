@@ -1,17 +1,15 @@
 """One defensive boundary from model/provider output to domain BrainOutcome.
 
-Only complete, unambiguous envelopes are executable. Prose is never searched for
-JSON, tool names, or lifecycle markers. This module is internal to the provider
+Exactly one native call is executable. Text and provider envelopes are never
+parsed for tools or lifecycle outcomes. This module is internal to the provider
 adapter; no raw response is returned by the Brain service.
 """
 
-import ast
 import hashlib
 import json
-import re
 from collections.abc import Mapping
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from core.protocol.enums import BrainOutcomeKind as Kind, StepStatus
 from core.protocol.models import (
@@ -22,21 +20,6 @@ from core.protocol.models import (
 
 class InvalidBrainOutput(ValueError):
     pass
-
-
-def _json(text: str):
-    def unique_pairs(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise InvalidBrainOutput("duplicate_json_key")
-            result[key] = value
-        return result
-
-    def invalid_constant(_value):
-        raise InvalidBrainOutput("non_finite_json_number")
-
-    return json.loads(text, object_pairs_hook=unique_pairs, parse_constant=invalid_constant)
 
 
 def _field(value, name, default=None):
@@ -63,7 +46,7 @@ def _exact_collection(value) -> ExactCollection | None:
     source_record_index = value.get("source_record_index")
     if isinstance(source_record_index, bool) or not isinstance(source_record_index, int):
         raise InvalidBrainOutput("invalid_exact_collection_source_record_index")
-    path = value.get("data_path", [])
+    path = value.get("data_path")
     if (
         not isinstance(path, list)
         or any(
@@ -82,38 +65,14 @@ def _exact_collection(value) -> ExactCollection | None:
     )
 
 
-def _step_id(payload: dict, brain_input: BrainInput) -> str:
-    step_id = _text(payload.get("step_id"), "step_id")
-    if brain_input.active_step is None or step_id != brain_input.active_step.step_id:
-        raise InvalidBrainOutput("step_id_does_not_match_active_step")
-    return step_id
-
 def _parse_call(call) -> tuple[str, dict]:
     if not isinstance(call, dict):
         raise InvalidBrainOutput("invalid_tool_call")
-
-    if "function" in call:
-        _only_fields(call, {"id", "type", "function"})
-        call = call["function"]
-
-        if not isinstance(call, dict):
-            raise InvalidBrainOutput("invalid_tool_function")
-
-    _only_fields(call, {"id", "type", "name", "arguments", "args"})
-
+    _only_fields(call, {"id", "type", "name", "args"})
     name = _text(call.get("name"), "tool_name")
-
-    if "arguments" in call and "args" in call:
-        raise InvalidBrainOutput("ambiguous_tool_arguments")
-
-    arguments = call.get("arguments", call.get("args", {}))
-
-    if isinstance(arguments, str):
-        arguments = _json(arguments)
-
+    arguments = call.get("args")
     if not isinstance(arguments, dict):
         raise InvalidBrainOutput("tool_arguments_must_be_object")
-
     return name, arguments
 
 def _tool_request(
@@ -166,22 +125,6 @@ def _tool_requested_outcome(
         message="Brain requested tool execution.",
     )
 
-def _tool_outcome(
-    calls,
-    brain_input: BrainInput,
-    allowed_tools: set[str],
-) -> BrainOutcome:
-    if not isinstance(calls, (list, tuple)) or len(calls) != 1:
-        raise InvalidBrainOutput("exactly_one_tool_call_required")
-
-    name, arguments = _parse_call(calls[0])
-
-    return _tool_requested_outcome(
-        name=name,
-        arguments=arguments,
-        brain_input=brain_input,
-        allowed_tools=allowed_tools,
-    )
 
 def _native_outcome(
     calls, brain_input: BrainInput, allowed_tools: set[str],
@@ -234,270 +177,28 @@ def _native_outcome(
     raise InvalidBrainOutput("unknown_tool")
 
 
-def _structured(
-    payload, brain_input: BrainInput, allowed_tools: set[str], *, allow_text_tool_calls: bool,
-) -> BrainOutcome:
-    if not isinstance(payload, dict):
-        raise InvalidBrainOutput("outcome_must_be_object")
-    if "kind" not in payload:
-        if "tool_calls" in payload:
-            if not allow_text_tool_calls:
-                raise InvalidBrainOutput("native_tool_call_required")
-            _only_fields(payload, {"tool_calls"})
-            return _tool_outcome(payload["tool_calls"], brain_input, allowed_tools)
-        if "name" in payload or "function" in payload:
-            if not allow_text_tool_calls:
-                raise InvalidBrainOutput("native_tool_call_required")
-            return _tool_outcome([payload], brain_input, allowed_tools)
-        raise InvalidBrainOutput("missing_outcome_kind")
-
-    raw_kind = payload["kind"]
-    if not isinstance(raw_kind, str):
-        raise InvalidBrainOutput("invalid_outcome_kind")
-    kind = Kind.__members__.get(raw_kind)
-    if kind is None:
-        kind = Kind(raw_kind)
-
-    if kind == Kind.TOOL_REQUESTED:
-        if not allow_text_tool_calls:
-            raise InvalidBrainOutput("native_tool_call_required")
-        _only_fields(payload, {"kind", "tool", "step_id"})
-        if "step_id" in payload:
-            _step_id(payload, brain_input)
-        return _tool_outcome([payload.get("tool")], brain_input, allowed_tools)
-    if kind in {Kind.STEP_COMPLETED, Kind.STEP_FAILED, Kind.REPLAN_REQUESTED} and not allow_text_tool_calls:
-        raise InvalidBrainOutput("native_lifecycle_call_required")
-    if kind == Kind.FINAL_ANSWER_READY:
-        raise InvalidBrainOutput("brain_final_answer_unsupported")
-    if kind == Kind.STEP_COMPLETED:
-        _only_fields(payload, {"kind", "step_id", "message", "exact_collection"})
-        step_id = _step_id(payload, brain_input)
-        summary = _text(payload.get("message"), "message")
-        return BrainOutcome(
-            outcome=kind, step_id=step_id, message=summary,
-            completion_evidence=StepCompletionEvidence(
-                step_id=step_id,
-                summary=summary,
-                exact_collection=_exact_collection(payload.get("exact_collection")),
-            ),
-            proposed_step_status=StepStatus.COMPLETED,
-        )
-    if kind == Kind.REPLAN_REQUESTED:
-        _only_fields(payload, {"kind", "step_id", "reason", "constraints"})
-        step_id = _step_id(payload, brain_input)
-        reason = _text(payload.get("reason"), "reason")
-        constraints = payload.get("constraints", [])
-        if not isinstance(constraints, list) or any(not isinstance(item, str) for item in constraints):
-            raise InvalidBrainOutput("invalid_replan_constraints")
-        return BrainOutcome(
-            outcome=kind, step_id=step_id, message=reason,
-            replan_request=ReplanRequest(reason=reason, failed_step_id=step_id, constraints=tuple(constraints)),
-        )
-    if kind == Kind.STEP_FAILED:
-        _only_fields(payload, {"kind", "step_id", "message"})
-        return BrainOutcome(
-            outcome=kind, step_id=_step_id(payload, brain_input),
-            message=_text(payload.get("message"), "message"), proposed_step_status=StepStatus.FAILED,
-        )
-    if kind in {Kind.INVALID_OUTPUT, Kind.PROVIDER_FAILURE}:
-        _only_fields(payload, {"kind", "message"})
-        return BrainOutcome(outcome=kind, message=_text(payload.get("message"), "message"), error_code=kind.value)
-    raise InvalidBrainOutput("unsupported_model_outcome")
-
-
-def _content_text(content) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if not isinstance(block, dict) or block.get("type", "text") not in {"text", "output_text"}:
-                raise InvalidBrainOutput("unsupported_content_block")
-            text = block.get("text", block.get("content", block.get("value")))
-            if not isinstance(text, str):
-                raise InvalidBrainOutput("invalid_text_block")
-            parts.append(text)
-        return "\n".join(parts)
-    raise InvalidBrainOutput("unsupported_content")
-
-
-def _text_outcome(
-    text: str, brain_input: BrainInput, allowed_tools: set[str], *, allow_text_tool_calls: bool,
-) -> BrainOutcome:
-    stripped = text.strip()
-    if not stripped:
-        raise InvalidBrainOutput("empty_response")
-    candidate = stripped
-    if candidate.startswith("```"):
-        # A whole fenced envelope is accepted; missing fences and trailing prose
-        # are not repaired or silently discarded.
-        match = re.fullmatch(r"```(?:json|python)?\s*\n?(.*?)\n?```", candidate, re.DOTALL | re.IGNORECASE)
-        if match is None:
-            raise InvalidBrainOutput("invalid_fenced_envelope")
-        candidate = match.group(1).strip()
-    if candidate.startswith(("{", "[")):
-        payload = _json(candidate)
-        return _structured(payload, brain_input, allowed_tools, allow_text_tool_calls=allow_text_tool_calls)
-    # Preserve complete keyword-only function text from non-tool-capable models.
-    # Never search within prose or guess arguments from a partial call.
-    if re.match(r"^[A-Za-z_]\w*\s*\(", candidate):
-        if not allow_text_tool_calls:
-            raise InvalidBrainOutput("native_tool_call_required")
-        expression = ast.parse(candidate, mode="eval").body
-        if not isinstance(expression, ast.Call) or not isinstance(expression.func, ast.Name) or expression.args:
-            raise InvalidBrainOutput("invalid_function_tool_call")
-        args = {}
-        for keyword in expression.keywords:
-            if keyword.arg is None or keyword.arg in args:
-                raise InvalidBrainOutput("ambiguous_function_arguments")
-            args[keyword.arg] = ast.literal_eval(keyword.value)
-        return _tool_outcome([{"name": expression.func.id, "args": args}], brain_input, allowed_tools)
-    if brain_input.active_plan is None:
-        # Preserve Stage 1's missing-plan classification, independently of text.
-        return BrainOutcome(outcome=Kind.STEP_FAILED, message=text, error_code="missing_execution_plan")
-    raise InvalidBrainOutput("expected_structured_outcome")
-
-def _unwrap_provider_output(raw: object):
-    if isinstance(raw, Mapping) and "parsing_error" in raw:
-        if raw["parsing_error"] is not None or raw.get("parsed") is None:
-            raise InvalidBrainOutput("structured_output_failure")
-
-        parsed = raw["parsed"]
-        if isinstance(parsed, BaseModel):
-            parsed = parsed.model_dump(mode="json")
-
-        if _field(raw.get("raw"), "tool_calls"):
-            raise InvalidBrainOutput("ambiguous_structured_and_native_output")
-
-        return parsed
-
-    if isinstance(raw, Mapping) and "choices" in raw:
-        if len(raw["choices"]) != 1:
-            raise InvalidBrainOutput("ambiguous_provider_choices")
-        return raw["choices"][0]["message"]
-
-    if isinstance(raw, Mapping) and isinstance(raw.get("message"), Mapping):
-        return raw["message"]
-
-    return raw
-
-def _normalize_native_output(
-    raw,
-    brain_input: BrainInput,
-    allowed_tools: set[str],
-) -> BrainOutcome | None:
-    if _field(raw, "invalid_tool_calls"):
-        raise InvalidBrainOutput("invalid_native_tool_call")
-
-    native = _field(raw, "tool_calls")
-    additional = _field(raw, "additional_kwargs", {}) or {}
-    encoded_native = additional.get("tool_calls")
-
-    if native and encoded_native:
-        left = _native_outcome(native, brain_input, allowed_tools)
-        right = _native_outcome(encoded_native, brain_input, allowed_tools)
-
-        if left != right:
-            raise InvalidBrainOutput("conflicting_native_tool_calls")
-
-    calls = native or encoded_native
-    if not calls:
-        return None
-
-    content = raw if isinstance(raw, str) else _field(raw, "content", "")
-    text = _content_text("" if content is None else content).strip()
-
-    if (
-        text.startswith(("{", "[", "```"))
-        or re.match(r"^[A-Za-z_]\w*\s*\(", text)
-    ):
-        raise InvalidBrainOutput("ambiguous_native_and_structured_output")
-
-    return _native_outcome(
-        calls,
-        brain_input,
-        allowed_tools,
-    )
-
-def _normalize_text_output(
-    raw,
-    brain_input: BrainInput,
-    allowed_tools: set[str],
-    *,
-    allow_text_tool_calls: bool,
-) -> BrainOutcome:
-    if isinstance(raw, Mapping) and any(
-        key in raw for key in ("kind", "name", "function")
-    ):
-        return _structured(
-            dict(raw),
-            brain_input,
-            allowed_tools,
-            allow_text_tool_calls=allow_text_tool_calls,
-        )
-
-    content = raw if isinstance(raw, str) else _field(raw, "content", "")
-
-    return _text_outcome(
-        _content_text(content),
-        brain_input,
-        allowed_tools,
-        allow_text_tool_calls=allow_text_tool_calls,
-    )
-
 def normalize_brain_output(
-    raw: object,
-    brain_input: BrainInput,
-    allowed_tools: set[str],
-    *,
-    allow_text_tool_calls: bool = False,
+    raw: object, brain_input: BrainInput, allowed_tools: set[str],
 ) -> BrainOutcome:
-    """Normalize once. Text tool compatibility requires explicit provider opt-in."""
-
+    """Consume only the provider's canonical native call channel; never recover text."""
     try:
-        raw = _unwrap_provider_output(raw)
-
-        native_outcome = _normalize_native_output(
-            raw,
-            brain_input,
-            allowed_tools,
-        )
-
-        if native_outcome is not None:
-            return native_outcome
-
-        return _normalize_text_output(
-            raw,
-            brain_input,
-            allowed_tools,
-            allow_text_tool_calls=allow_text_tool_calls,
-        )
-
-    except (
-        ValueError,
-        TypeError,
-        KeyError,
-        AttributeError,
-        SyntaxError,
-        RecursionError,
-    ) as exc:
-        code = (
-            str(exc)
-            if isinstance(exc, InvalidBrainOutput)
-            else "malformed_model_output"
-        )
-
+        if getattr(raw, "invalid_tool_calls", None):
+            raise InvalidBrainOutput("invalid_native_tool_call")
+        if getattr(raw, "content", None):
+            raise InvalidBrainOutput("unexpected_response_content")
+        calls = getattr(raw, "tool_calls", None)
+        if not calls:
+            raise InvalidBrainOutput("native_tool_call_required")
+        return _native_outcome(calls, brain_input, allowed_tools)
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
+        code = str(exc) if isinstance(exc, InvalidBrainOutput) else "malformed_model_output"
         return BrainOutcome(
-            outcome=Kind.INVALID_OUTPUT,
-            error_code=code,
-            step_id=(
-                brain_input.active_step.step_id
-                if brain_input.active_step
-                else None
-            ),
+            outcome=Kind.INVALID_OUTPUT, error_code=code,
+            step_id=brain_input.active_step.step_id if brain_input.active_step else None,
             message=f"Brain returned invalid output ({code}).",
         )
-    
+
+
 def normalize_brain_usage(raw: object) -> BrainUsage:
     """Ignore malformed accounting metadata without changing a valid outcome."""
     metadata = _field(raw, "response_metadata", {}) or {}
