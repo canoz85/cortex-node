@@ -50,6 +50,10 @@ from core.planner_revision import RevisionRejection, reconcile_revision
 from core.planner_progress import build_planner_progress
 
 
+class InvalidExactCollection(ValueError):
+    """An untrusted Brain collection reference cannot bind to tool evidence."""
+
+
 class CortexController:
     """Protocol decision engine.
 
@@ -588,6 +592,23 @@ class CortexController:
                 controller_input.identity, plan, active_step,
                 controller_input.tool_execution_history,
             )
+            try:
+                exact_collection = self._bind_exact_collection(
+                    semantic.exact_collection if semantic is not None else None,
+                    records,
+                )
+            except InvalidExactCollection as exc:
+                # Reject the entire completion through the malformed-output path.
+                # Scope and Controller invariant errors remain outside this boundary.
+                rejected = BrainResult(
+                    outcome=BrainOutcome.INVALID_OUTPUT,
+                    step_id=brain_result.step_id,
+                    message=str(exc),
+                    error_code="invalid_exact_collection",
+                )
+                return self._decide_from_brain(controller_input.model_copy(
+                    update={"brain_result": rejected},
+                ))
             bound = StepCompletionEvidence(
                 execution_id=controller_input.identity.execution_id,
                 plan_id=plan.plan_id,
@@ -597,10 +618,7 @@ class CortexController:
                 or "Step completed.",
                 tool_request_ids=tuple(record.result.request_id for record in records),
                 evidence_id=evidence_identity(records),
-                exact_collection=self._bind_exact_collection(
-                    semantic.exact_collection if semantic is not None else None,
-                    records,
-                ),
+                exact_collection=exact_collection,
             )
             brain_result = brain_result.model_copy(update={"completion_evidence": bound})
             controller_input = controller_input.model_copy(update={"brain_result": brain_result})
@@ -772,24 +790,24 @@ class CortexController:
             return None
         visible_records = records[-24:]
         if proposal.source_record_index >= len(visible_records):
-            raise ValueError("exact collection source record is unavailable")
+            raise InvalidExactCollection("exact collection source record is unavailable")
         record = visible_records[proposal.source_record_index]
         if not record.result.success:
-            raise ValueError("exact collection source is not accepted tool evidence")
+            raise InvalidExactCollection("exact collection source is not accepted tool evidence")
 
         value = record.result.data
         for part in proposal.data_path:
             if isinstance(part, int) and not isinstance(part, bool):
                 if not isinstance(value, (list, tuple)) or not (-len(value) <= part < len(value)):
-                    raise ValueError("exact collection data path is invalid")
+                    raise InvalidExactCollection("exact collection data path is invalid")
                 value = value[part]
             else:
                 if not isinstance(value, dict) or part not in value:
-                    raise ValueError("exact collection data path is invalid")
+                    raise InvalidExactCollection("exact collection data path is invalid")
                 value = value[part]
 
         if not isinstance(value, (list, tuple)):
-            raise ValueError("exact collection source must resolve to a collection")
+            raise InvalidExactCollection("exact collection source must resolve to a collection")
         return proposal.model_copy(update={
             "source_request_id": record.result.request_id,
             "items": tuple(value),

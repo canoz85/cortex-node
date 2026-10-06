@@ -66,11 +66,9 @@ def test_exact_collection_reference_is_bound_from_structured_tool_evidence():
         "id": "complete-1",
         "args": {
             "message": "Workspace files collected.",
-            "exact_collection": {
-                "source_record_index": 0,
-                "data_path": ["entries"],
-                "label": "Files",
-            },
+            "exact_collection_source_record_index": 0,
+            "exact_collection_data_path": ["entries"],
+            "exact_collection_label": "Files",
         },
     }]))
     record = ToolExecutionRecord(
@@ -97,6 +95,131 @@ def test_exact_collection_reference_is_bound_from_structured_tool_evidence():
     assert exact.source_request_id == "list-1"
     assert exact.source_record_index == 0
     assert exact.data_path == ("entries",)
+
+
+@pytest.mark.parametrize("source_index,path,success,reason", [
+    (1, ["entries"], True, "source record is unavailable"),
+    (0, ["stdout"], True, "must resolve to a collection"),
+    (0, ["missing"], True, "data path is invalid"),
+    (0, ["entries"], False, "not accepted tool evidence"),
+])
+def test_invalid_exact_collection_rejects_completion_through_retry_lifecycle(
+    source_index, path, success, reason,
+):
+    context = brain_input()
+    outcome = normalize(native_action("brain_step_completed", {
+        "message": "Found files.",
+        "exact_collection_source_record_index": source_index, "exact_collection_data_path": path,
+    }))
+    assert outcome.kind == Kind.STEP_COMPLETED
+    record = ToolExecutionRecord(
+        execution_id=context.identity.execution_id,
+        plan_id=context.active_plan.plan_id,
+        plan_revision=context.active_plan.revision,
+        step_id=context.active_step.step_id,
+        tool_name="list_files",
+        result=ToolResult(request_id="list-1", success=success, message="Listed.",
+                          data={"entries": ["a.py"], "stdout": "a.py"}),
+    )
+    value = controller_input(context, outcome).model_copy(update={
+        "tool_execution_history": (record,),
+    })
+    controller = CortexController(24)
+    decision = controller.decide(value)
+    assert decision.decision_type == Decision.DISPATCH_BRAIN
+    assert decision.reason == "retry_step"
+    assert decision.retry.retry_count == 1
+    assert decision.retry.last_error_code == "invalid_exact_collection"
+    assert reason in decision.failure_reason
+    assert decision.completed_step_id is None
+    assert decision.completion_evidence is None
+    assert decision.accepted_plan.steps[0].status == StepStatus.ACTIVE
+    assert '"source_record_index"' not in decision.model_dump_json()
+
+    exhausted = controller.decide(value.model_copy(update={"retry": decision.retry}))
+    assert exhausted.reason == "step_failed_retries_exhausted"
+    assert exhausted.execution_status == ExecutionStatus.FAILED
+    assert exhausted.accepted_plan.steps[0].status == StepStatus.FAILED
+    assert exhausted.completion_evidence is None
+
+
+def test_unrelated_binding_value_error_still_raises(monkeypatch):
+    def invariant_failure(proposal, records):
+        raise ValueError("Controller internal invariant")
+
+    monkeypatch.setattr(CortexController, "_bind_exact_collection", staticmethod(invariant_failure))
+    with pytest.raises(ValueError, match="Controller internal invariant"):
+        CortexController(24).decide(controller_input(brain_input(), normalize(completion())))
+
+
+def test_exact_collection_schema_describes_structured_evidence_only():
+    schema = LIFECYCLE_ACTION_SCHEMAS[0]["function"]["parameters"]["properties"]["exact_collection_source_record_index"]
+    description = schema["description"]
+    for requirement in (
+        "resolves directly to a structured array/list", "already present in tool result data",
+        "stdout, rendered text, prose", "inferred/extracted from text",
+        "omit all exact_collection arguments", "displayed eligible evidence record",
+    ):
+        assert requirement in description
+
+
+@pytest.mark.parametrize("proposal", [
+    {"exact_collection_label": "Files"},
+    {"exact_collection_data_path": []},
+    {"exact_collection_source_record_index": None, "exact_collection_data_path": []},
+    {"exact_collection_source_record_index": True, "exact_collection_data_path": []},
+    {"exact_collection_source_record_index": -1, "exact_collection_data_path": []},
+    {"exact_collection_source_record_index": 0, "exact_collection_data_path": [False]},
+    {"exact_collection_source_record_index": 0, "exact_collection_data_path": [], "exact_collection_label": ""},
+    {"exact_collection": {"source_record_index": 0, "data_path": []}},
+])
+def test_flat_collection_arguments_remain_strict(proposal):
+    outcome = normalize(native_action("brain_step_completed", {"message": "Files", **proposal}))
+    assert outcome.kind == Kind.INVALID_OUTPUT
+    assert outcome.completion_evidence is None
+
+
+def test_flat_completion_schema_survives_ollama_http_serialization():
+    import httpx
+    from langchain_ollama import ChatOllama
+    from langchain_core.messages import HumanMessage
+
+    captured = []
+
+    def capture(request):
+        assert request.method == "POST"
+        assert request.url.path == "/api/chat"
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "model": "qwen3.8:27b", "done": True,
+            "message": {"role": "assistant", "content": "inspection"},
+        })
+
+    model = ChatOllama(model="qwen3.8:27b", temperature=0)
+    original_http = model._client._client
+    try:
+        with httpx.Client(base_url="http://localhost:11434", transport=httpx.MockTransport(capture)) as client:
+            model._client._client = client
+            model.bind_tools(list(LIFECYCLE_ACTION_SCHEMAS)).invoke(
+                [HumanMessage(content="Schema serialization inspection.")], stream=False,
+            )
+    finally:
+        model._client._client = original_http
+        original_http.close()
+
+    tool = captured[0]["tools"][0]
+    parameters = tool["function"]["parameters"]
+    assert parameters["required"] == ["message"]
+    properties = parameters["properties"]
+    assert set(properties) == {
+        "message", "exact_collection_source_record_index",
+        "exact_collection_data_path", "exact_collection_label",
+    }
+    expected = LIFECYCLE_ACTION_SCHEMAS[0]["function"]["parameters"]["properties"]
+    for name in properties:
+        assert properties[name]["type"] == expected[name]["type"]
+        assert properties[name]["description"] == expected[name]["description"]
+    assert properties["exact_collection_data_path"]["items"] == expected["exact_collection_data_path"]["items"]
 
 
 @pytest.mark.parametrize("raw", [
@@ -536,7 +659,7 @@ def test_tool_output_schema_cannot_redefine_model_facing_completion_contract():
     contract = messages[-2].content
     assert messages[-2].type == "system"
     assert messages[-1].type == "human"
-    assert contract.startswith("BRAIN NATIVE CALL CONTRACT:")
+    assert contract.lstrip().startswith("BRAIN NATIVE CALL CONTRACT:")
     assert "tool_request_ids" not in contract
     assert "brain_step_completed" in contract
     assert '{"kind":"STEP_COMPLETED"' not in contract
@@ -687,7 +810,7 @@ def test_brain_requires_an_authorized_active_step_without_invoking_provider():
 
 def test_native_collection_reference_requires_its_schema_fields():
     result = normalize(native_action("brain_step_completed", {
-        "message": "Found records", "exact_collection": {"source_record_index": 0},
+        "message": "Found records", "exact_collection_source_record_index": 0,
     }))
     assert result.kind == Kind.INVALID_OUTPUT
     assert result.error_code == "invalid_exact_collection_data_path"

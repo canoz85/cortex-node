@@ -116,7 +116,7 @@ def test_active_task_is_last_user_turn_at_ollama_boundary_without_filtering_tool
     assert request["messages"][-1]["role"] == "user"
     assert '"primary_tool": "git_status"' in request["messages"][-1]["content"]
     assert context.context.user_request not in request["messages"][-1]["content"]
-    assert request["messages"][-2]["content"].startswith("BRAIN NATIVE CALL CONTRACT:")
+    assert request["messages"][-2]["content"].lstrip().startswith("BRAIN NATIVE CALL CONTRACT:")
     assert any(context.context.user_request in m["content"] and m["role"] == "system"
                for m in request["messages"])
     assert {t["function"]["name"] for t in request["tools"]} == {

@@ -219,7 +219,7 @@ def test_successful_read_is_grounded_before_brain_can_repeat_the_same_call():
             "evidence": {"path": ".cortex_session.json", "content": "session evidence"},
             "record_index": 0,
         }
-        assert "Call brain_step_completed only when complete evidence satisfies the active step." in rendered
+        assert "Call brain_step_completed only when the available evidence fully satisfies the active step." in rendered
         assert "Do not repeat an identical successful call" in rendered
         return AIMessage(content="", tool_calls=[{
             "name": "brain_step_completed",

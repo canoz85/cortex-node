@@ -133,7 +133,7 @@ def _native_outcome(
         raise InvalidBrainOutput("exactly_one_tool_call_required")
     if brain_input.direct_response or brain_input.active_step is None:
         raise InvalidBrainOutput("native_call_requires_active_step")
-    name, arguments = _parse_call(calls[0])
+    name, arguments, exact_collection = validate_native_call(calls[0], allowed_tools)
     if name in allowed_tools:
         return _tool_requested_outcome(
             name=name,
@@ -144,9 +144,7 @@ def _native_outcome(
 
     step_id = brain_input.active_step.step_id
     if name == "brain_step_completed":
-        _only_fields(arguments, {"message", "exact_collection"})
-        summary = _text(arguments.get("message"), "message")
-        exact_collection = _exact_collection(arguments.get("exact_collection"))
+        summary = arguments["message"]
         return BrainOutcome(
             outcome=Kind.STEP_COMPLETED, step_id=step_id, message=summary,
             completion_evidence=StepCompletionEvidence(
@@ -156,18 +154,14 @@ def _native_outcome(
             proposed_step_status=StepStatus.COMPLETED,
         )
     if name == "brain_step_failed":
-        _only_fields(arguments, {"message"})
         return BrainOutcome(
             outcome=Kind.STEP_FAILED, step_id=step_id,
-            message=_text(arguments.get("message"), "message"),
+            message=arguments["message"],
             proposed_step_status=StepStatus.FAILED,
         )
     if name == "brain_replan_requested":
-        _only_fields(arguments, {"reason", "constraints"})
-        reason = _text(arguments.get("reason"), "reason")
-        constraints = arguments.get("constraints")
-        if not isinstance(constraints, list) or any(not isinstance(item, str) for item in constraints):
-            raise InvalidBrainOutput("invalid_replan_constraints")
+        reason = arguments["reason"]
+        constraints = arguments["constraints"]
         return BrainOutcome(
             outcome=Kind.REPLAN_REQUESTED, step_id=step_id, message=reason,
             replan_request=ReplanRequest(
@@ -175,6 +169,42 @@ def _native_outcome(
             ),
         )
     raise InvalidBrainOutput("unknown_tool")
+
+
+def validate_native_call(
+    call, allowed_tools: set[str],
+) -> tuple[str, dict, ExactCollection | None]:
+    """Validate a candidate without creating an outcome or ToolRequest ID."""
+    name, arguments = _parse_call(call)
+    exact_collection = None
+    if name in allowed_tools:
+        return name, arguments, None
+    if name == "brain_step_completed":
+        collection_fields = {
+            "exact_collection_source_record_index": "source_record_index",
+            "exact_collection_data_path": "data_path",
+            "exact_collection_label": "label",
+        }
+        _only_fields(arguments, {"message", *collection_fields})
+        _text(arguments.get("message"), "message")
+        proposal = {
+            internal: arguments[external]
+            for external, internal in collection_fields.items()
+            if external in arguments
+        }
+        exact_collection = _exact_collection(proposal if proposal else None)
+    elif name == "brain_step_failed":
+        _only_fields(arguments, {"message"})
+        _text(arguments.get("message"), "message")
+    elif name == "brain_replan_requested":
+        _only_fields(arguments, {"reason", "constraints"})
+        _text(arguments.get("reason"), "reason")
+        constraints = arguments.get("constraints")
+        if not isinstance(constraints, list) or any(not isinstance(item, str) for item in constraints):
+            raise InvalidBrainOutput("invalid_replan_constraints")
+    else:
+        raise InvalidBrainOutput("unknown_tool")
+    return name, arguments, exact_collection
 
 
 def normalize_brain_output(

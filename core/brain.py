@@ -7,14 +7,12 @@ from typing import Any, Protocol
 from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import BrainInput, BrainOutcome
 
-
-BRAIN_OUTPUT_PROTOCOL = """BRAIN NATIVE CALL CONTRACT:
-Return exactly one native call: an authorized executable tool or
-brain_step_completed, brain_step_failed, brain_replan_requested.
+BRAIN_OUTPUT_PROTOCOL = """
+BRAIN NATIVE CALL CONTRACT: Return exactly one native call: an authorized executable tool or brain_step_completed, brain_step_failed, brain_replan_requested.
+Choose one next action for this turn even when several tool calls would be useful.
 Put arguments in the native call and leave content empty.
 Do not return JSON outcome envelopes, textual lifecycle outcomes, or function-call syntax.
 """
-
 
 @dataclass(frozen=True)
 class BrainMessage:
