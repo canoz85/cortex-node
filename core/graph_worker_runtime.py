@@ -5,6 +5,7 @@ from __future__ import annotations
 from core.protocol.models import BrainResult, PlannerResult, PlanningRequest, ToolResult
 from core.runtime.execution_driver import WorkerDispatchError
 from core.runtime.tool_result_integration import integrate_tool_result
+from core.graph_authorization import batch_member_transport
 
 
 def _invoke(node, state):
@@ -63,7 +64,7 @@ class GraphWorkerRuntimePorts:
 
     def execute_authorized(self, value, execution_state, decision):
         if self._tool_runtime is None:
-            state = self._authorized_state(execution_state, decision)
+            state = batch_member_transport(self._authorized_state(execution_state, decision))
             tool_update = _invoke(self._tool, state)
             transported = {**state, **tool_update}
             capture_update = _invoke(self._capture, transported)

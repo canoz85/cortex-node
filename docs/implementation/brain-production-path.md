@@ -2,13 +2,15 @@
 
 Brain execution uses this path:
 
-`Controller-authorized BrainInput → graph_brain adapter → BrainService messages → LangChainBrainProvider → exactly one native call → BrainOutcome → Controller`
+`Controller-authorized BrainInput → graph_brain adapter → BrainService messages → LangChainBrainProvider → one native action → BrainOutcome → Controller`
 
 The adapter still transports the typed result and tool request. Brain proposes an action;
 Controller accepts it and owns scheduling, retries, replanning and lifecycle transitions.
 Direct-response and finished-plan modes request finalization without invoking Brain's model.
 An input without an active step or a finalization mode is invalid without model invocation.
-Internal BrainOutcome, ToolRequest, ReplanRequest and protocol schemas remain unchanged.
+BrainOutcome carries either one ToolRequest or an exclusive ordered ToolRequest tuple.
+ToolRequest and ReplanRequest schemas remain unchanged. See
+[sequential read_file actions](brain-read-file-batch.md) for Controller continuation state.
 
 ## Deployment evidence
 
@@ -35,8 +37,8 @@ No live model-adherence tuning was performed in this cleanup.
 | Provider envelopes, function wrappers, string arguments, encoded additional_kwargs calls | Removed from Brain normalization. LangChain's canonical native `tool_calls` channel is required; its SDK performs ordinary provider transport adaptation. |
 | `_ensure_native_call()` | Intentionally retained as one bounded protocol correction, described below. |
 
-The normalizer accepts exactly one canonical call with dictionary arguments and empty
-content. It rejects invalid_tool_calls, unknown tools, multiple calls, mixed content,
+The normalizer accepts one canonical action with dictionary arguments and empty
+content. It rejects invalid_tool_calls, unknown tools, disallowed groups, mixed content,
 unexpected lifecycle arguments and malformed collection references. No raw-output repair
 or alternative channel search occurs. Usage metadata extraction remains accounting only.
 Unused casual-mode prompt construction and forwarding-only native-tool wrappers were deleted.
@@ -54,7 +56,7 @@ execution identity or an accepted plan dump to the model.
 | --- | --- | --- |
 | accepted_plan_context: every step, status, dependency | Controller's accepted plan | Removed. Controller schedules; Brain executes the active step. The provider still reads the plan's tool ceiling internally. |
 | active step | Controller | One final human message: step_id, title, description, optional primary_tool and completion_requirement. |
-| current_attempts | Controller-accepted tool history | Retained, bounded to 24 current-step records. Needed for evidence, continuation and repeated-call avoidance. |
+| current_attempts | Controller-accepted tool history | Retained, bounded to MAX_CURRENT_ATTEMPT_RECORDS current-step records. Needed for evidence, continuation and repeated-call avoidance. |
 | prior_facts | Controller-accepted tool history | Retained, bounded to 36 successful prior records. Earlier steps may have produced inputs for this step. |
 | prior_failures | Controller-accepted tool history | Retained, bounded to 36 failed prior records. A revised step must not blindly retry known failed paths. |
 | current_step_failure_count | Controller's retry/history policy | Removed from messages. It is not a Brain threshold for replan versus failure. |
@@ -92,7 +94,7 @@ Production message order is:
 
 The execution policy carries behavioral rules: objective authority, evidence inspection,
 tool relevance, continuation, avoiding identical successful calls, and completion/replan/fail
-distinctions. The output contract carries exactly-one-call and empty-content requirements.
+distinctions. The output contract carries one-native-action and empty-content requirements.
 Schemas carry argument semantics, including the evidence-grounded semantic completion result.
 These replace overlapping instructions in the old system prompt, branch builder and tool
 descriptions. Removed material includes textual/JSON output examples, duplicate lifecycle
@@ -124,8 +126,9 @@ parses the rejected content or asks the model to preserve an inferred decision.
 
 This is an explicit second model invocation, not strict single-invocation semantics. It is
 valuable for a transport-contract omission before a semantic proposal exists. Every actual
-invocation is counted and logged. Exceptions, malformed native calls, multiple calls and
-unknown calls do not trigger this correction. After its bounded correction, normalization
+invocation is counted and logged. Permitted homogeneous read_file groups are accepted.
+Valid disallowed groups receive one correction asking for one action. Exceptions,
+malformed/unknown calls and invalid arguments do not trigger correction. After its bounded correction, normalization
 returns a typed failure; Controller owns subsequent execution retry policy.
 
 ## Remaining boundary limitation

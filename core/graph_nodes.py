@@ -11,6 +11,7 @@ from core.graph_planner import create_planner_node
 from core.protocol.models import PlanningCapabilities
 
 from core.rag import WorkspaceRAG
+from tools.registry import ToolRegistry
 
 def create_graph_nodes(
     *,
@@ -25,7 +26,9 @@ def create_graph_nodes(
     show_raw_llm: bool,
     worker_ports=None,
 ):
-
+    # Validate the supplied Controller ceiling without expanding it to inventory.
+    registry = ToolRegistry.from_tools(executable_tools)
+    registry.resolve(tools_set)
     controller_node = create_controller_node(
         planning_capabilities=PlanningCapabilities(available_tools=tuple(sorted(tools_set))),
         completion_service=CompletionService({

@@ -24,6 +24,7 @@ from core.models import (
     WriteFileResult,
 )
 from tools.sandbox_paths import resolve_safe_path, resolve_workspace
+from tools.registry import get_tool_argument_schema
 
 
 def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
@@ -88,7 +89,7 @@ def get_file_tools(workspace_dir: str, knowledge_dir: str | None = None):
             return result.to_tool_output()
 
 
-    @tool("read_file", args_schema=ReadFileRequest)
+    @tool("read_file", args_schema=get_tool_argument_schema("read_file"))
     def read_file(path: str, offset: int = 0, limit: int = 10000) -> str:
         """Read a UTF-8 text file from inside the sandbox workspace with offset and limit support."""
         try:

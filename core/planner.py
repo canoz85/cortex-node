@@ -8,7 +8,8 @@ import json
 import re
 
 from core.planner_contract import PlannerInvalidOutputError, PlannerProposal
-from core.planner_normalization import normalize_planner_proposal, planner_failure
+from core.planner_normalization import MAX_PROPOSED_STEPS, normalize_planner_proposal, planner_failure
+from core.planner_feedback import PLANNER_RETRY_FEEDBACK_PREFIX
 from core.protocol.models import PlanningRequest, PlannerResult
 from core.protocol.enums import PlanningFailureCategory, PlanningOperation
 
@@ -120,6 +121,7 @@ derived result.
 PLANNING RULES:
 
 1. Produce the smallest valid plan.
+   A plan may contain at most {max_proposed_steps} steps.
 
 2. Preserve every requested outcome in the responsible step's title or description.
 
@@ -218,7 +220,7 @@ Follow the bound schema exactly.
 Do not omit required fields.
 Do not rename fields.
 Do not add fields outside the schema.
-"""
+""".replace("{max_proposed_steps}", str(MAX_PROPOSED_STEPS))
 
 
 COMFYUI_PLANNING_GUIDANCE = """CAPABILITY-SPECIFIC GUIDANCE — COMFYUI GENERATION:
@@ -233,6 +235,7 @@ class PlannerMessage:
     role: str
     content: str
     execution_id: str | None = None
+    available_tools: tuple[str, ...] = ()
 
 @dataclass(frozen=True)
 class PlannerRoute:
@@ -368,11 +371,22 @@ class PlannerService:
                 route=routing.route,
             )
 
+        retry_feedback = tuple(
+            text for text in authorized_input.context.retrieval_messages
+            if authorized_input.attempt > 1 and text.startswith(PLANNER_RETRY_FEEDBACK_PREFIX)
+        )
+        if retrieve is None:
+            # Context-supplied feedback is rendered once, separately from knowledge.
+            retrieval = tuple(text for text in retrieval if text not in retry_feedback)
         messages = (
-            PlannerMessage("system", prompt, execution_id),
+            PlannerMessage("system", prompt, execution_id, tuple(sorted(authorized_tools))),
             *(
                 PlannerMessage("system", text, execution_id)
                 for text in retrieval
+            ),
+            *(
+                PlannerMessage("system", text + "\nReturn one corrected Planner proposal.", execution_id)
+                for text in retry_feedback
             ),
             PlannerMessage(
                 "system", planning_request_context(authorized_input), execution_id,

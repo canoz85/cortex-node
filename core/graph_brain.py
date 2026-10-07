@@ -35,8 +35,8 @@ def create_brain_node(
                 "working": execution_state.working.model_copy(update={"last_tool_result": None}),
             })
 
-        # Recreate provider transport only outside the service boundary. ToolNode
-        # sees exactly the domain request Controller will accept, with the same ID.
+        # Single-call transport stays unchanged. Batch transport is projected
+        # from each Controller authorization, never from the full proposal.
         request = outcome.tool_request
         response = AIMessage(
             content=outcome.message,

@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 
 from core.brain import BrainMessage, BrainService, _build_execution_messages
+from core.brain_evidence_policy import MAX_CURRENT_ATTEMPT_RECORDS
 from core.graph_brain import create_brain_node
 from core.brain_normalization import normalize_brain_output, normalize_brain_usage
 from core.brain_provider import LIFECYCLE_ACTION_SCHEMAS, LangChainBrainProvider
@@ -294,11 +295,11 @@ def test_reasoning_only_completion_requires_no_evidence_identifiers():
 
 
 def test_only_visible_current_step_records_receive_refs():
-    context = evidence_context(count=25)
+    context = evidence_context(count=MAX_CURRENT_ATTEMPT_RECORDS + 1)
     payload = evidence_prompt(context)
-    assert len(payload["current_attempts"]) == 24
+    assert len(payload["current_attempts"]) == MAX_CURRENT_ATTEMPT_RECORDS
     assert all("evidence_ref" not in record and "request_id" not in record for record in payload["current_attempts"])
-    assert [record["record_index"] for record in payload["current_attempts"]] == list(range(24))
+    assert [record["record_index"] for record in payload["current_attempts"]] == list(range(MAX_CURRENT_ATTEMPT_RECORDS))
 
 
 @pytest.mark.parametrize("kind", list(Kind))
@@ -589,7 +590,7 @@ def test_execution_prompt_is_step_scoped_and_has_one_native_contract():
     assert set(brief) == {"step_id", "title", "description"}
     rendered = "\n".join(m.content for m in messages)
     assert rendered.count("The active step is the sole execution objective") == 1
-    assert rendered.count("Return exactly one native call") == 1
+    assert rendered.count("Return one native action") == 1
     assert '"kind":"STEP_COMPLETED"' not in rendered
     assert "semantic result" not in SYSTEM_PROMPT_TEMPLATE
     assert "semantic result" in LIFECYCLE_ACTION_SCHEMAS[0]["function"]["parameters"]["properties"]["message"]["description"]
@@ -672,7 +673,7 @@ def test_service_instructs_one_native_mechanism_and_returns_the_domain_request()
     assert result.kind == Kind.TOOL_REQUESTED
     assert result.tool_request.arguments == {"path": "a.py"}
     assert len(model.calls) == 1
-    assert "Return exactly one native call" in model.calls[0][-2].content
+    assert "Return one native action" in model.calls[0][-2].content
 
 
 @pytest.mark.parametrize(("name", "arguments", "kind"), [

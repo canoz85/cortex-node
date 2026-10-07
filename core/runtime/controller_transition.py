@@ -44,6 +44,16 @@ class ControllerCoordinator:
             raise ValueError("ControllerInput identity does not match ExecutionState")
         if controller_input.cursor != protocol.cursor:
             raise ValueError("ControllerInput cursor does not match ExecutionState")
+        if controller_input.tool_request_continuation != protocol.tool_request_continuation:
+            raise ValueError("ControllerInput tool continuation does not match ExecutionState")
+        proposal = controller_input.brain_result
+        if protocol.tool_request_continuation is not None or (
+            proposal is not None and proposal.tool_requests is not None
+        ):
+            if (controller_input.active_plan != protocol.active_plan
+                    or controller_input.active_step != protocol.active_step
+                    or controller_input.pending_tool_request != protocol.pending_tool_request):
+                raise ValueError("ControllerInput batch scope does not match ExecutionState")
 
         decision = self._controller.decide(controller_input)
         updated_state = _apply_controller_decision_to_state(execution_state, decision)

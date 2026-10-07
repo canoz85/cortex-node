@@ -95,7 +95,7 @@ def test_exhausted_textual_pseudo_calls_are_typed_failure():
 
 
 def test_native_protocol_does_not_ask_for_textual_outcome_object():
-    assert "Return exactly one native call" in BRAIN_OUTPUT_PROTOCOL
+    assert "Return one native action" in BRAIN_OUTPUT_PROTOCOL
     assert '"kind"' not in BRAIN_OUTPUT_PROTOCOL
 
 

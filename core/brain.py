@@ -6,11 +6,14 @@ from typing import Any, Protocol
 
 from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import BrainInput, BrainOutcome
+from core.protocol.completion_identity import eligible_records
+from core.brain_batch_policy import MAX_READ_FILE_BATCH
+from core.brain_evidence_policy import MAX_CURRENT_ATTEMPT_RECORDS
 
-BRAIN_OUTPUT_PROTOCOL = """
-BRAIN NATIVE CALL CONTRACT: Return exactly one native call: an authorized executable tool or brain_step_completed, brain_step_failed, brain_replan_requested.
-Choose one next action for this turn even when several tool calls would be useful.
-Put arguments in the native call and leave content empty.
+BRAIN_OUTPUT_PROTOCOL = f"""
+BRAIN NATIVE CALL CONTRACT: Return one native action: an authorized executable tool or brain_step_completed, brain_step_failed, brain_replan_requested.
+A native action is one native call or, only when the runtime permits it, a homogeneous batch of at most {MAX_READ_FILE_BATCH} independent calls to the same read-only tool.
+Put arguments in native calls and leave content empty.
 Do not return JSON outcome envelopes, textual lifecycle outcomes, or function-call syntax.
 """
 
@@ -72,13 +75,16 @@ def _build_step_progress_messages(
     if not history:
         return []
 
-    max_current_records = 24
     max_prior_records = 36
     max_text_chars = 10000
     max_list_items = 100
 
     active_step = brain_input.active_step
     active_step_id = active_step.step_id if active_step is not None else None
+    eligible_current_records = (
+        {id(record) for record in eligible_records(brain_input.identity, brain_input.active_plan, history)}
+        if brain_input.active_plan is not None else None
+    )
 
     def truncate_text(value: str) -> tuple[str, bool]:
         text = value.strip()
@@ -248,6 +254,12 @@ def _build_step_progress_messages(
         result = record.result
 
         if record.step_id == active_step_id:
+            # Captured runtime records carry scope. Match Controller provenance
+            # filtering before assigning visible indexes. Historical unscoped
+            # transport evidence retains its existing display-only behavior.
+            if (eligible_current_records is not None and record.execution_id is not None
+                    and id(record) not in eligible_current_records):
+                continue
             if result.success:
                 current_attempts.append(success_record(record))
             else:
@@ -264,7 +276,7 @@ def _build_step_progress_messages(
         else:
             prior_failures.append({"step": record.step_id, **failure_record(record)})
 
-    visible_current_attempts = current_attempts[-max_current_records:]
+    visible_current_attempts = current_attempts[-MAX_CURRENT_ATTEMPT_RECORDS:]
     for index, attempt in enumerate(visible_current_attempts):
         attempt["record_index"] = index
 

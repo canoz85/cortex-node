@@ -127,6 +127,7 @@ def build_controller_input(
         active_plan=protocol.active_plan,
         active_step=protocol.active_step,
         pending_tool_request=protocol.pending_tool_request,
+        tool_request_continuation=protocol.tool_request_continuation,
         planner_result=planner_result,
         brain_result=brain_result,
         tool_result=tool_result,

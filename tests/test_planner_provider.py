@@ -80,7 +80,7 @@ def test_planner_provider_writes_one_plan_exchange(monkeypatch, tmp_path, capsys
     from core.planner import PlannerMessage
 
     result = provider.generate((
-        PlannerMessage("system", "Plan safely", "exec-1"),
+        PlannerMessage("system", "Plan safely", "exec-1", ("list_files",)),
         PlannerMessage("human", "inspect", "exec-1"),
     ))
 
@@ -104,7 +104,7 @@ def test_infrastructure_failures_are_normalized_at_provider_boundary(failure, ex
 
     class Model:
         def with_structured_output(self, schema, *, method, include_raw):
-            assert schema is PlannerProposal
+            assert issubclass(schema, PlannerProposal)
             assert method == "json_schema" and include_raw
 
             def invoke(messages):

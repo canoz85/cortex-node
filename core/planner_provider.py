@@ -5,13 +5,36 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import ValidationError
 
 from core.planner import PlannerMessage
-from core.planner_contract import PlannerInvalidOutputError, PlannerProposal
+from core.planner_contract import PlannerInvalidOutputError, PlannerProposal, authorized_planner_schema
+from core.planner_normalization import MAX_PROPOSED_STEPS
 from core.debug import log_llm_exchange
 from core.logging.live_status import add_response_usage
 from core.logging.live_status import current_live_status
 
 
-def _extract_planner_proposal(exchange) -> PlannerProposal:
+def _schema_diagnostic(error: Exception) -> str:
+    # LangChain wraps Pydantic errors; inspect structured errors, never their text.
+    if isinstance(error, OutputParserException) and error.__cause__ is not None:
+        error = error.__cause__
+    if isinstance(error, ValidationError):
+        for issue in error.errors(include_input=False, include_url=False):
+            location = issue["loc"]
+            if location == ("steps",) and issue["type"] == "too_long":
+                if issue.get("ctx", {}).get("max_length") == 0:
+                    return "No executable steps are allowed without authorized tools"
+                return f"PLAN_PROPOSED exceeds the {MAX_PROPOSED_STEPS}-step limit"
+            if location and location[-1] == "primary_tool" and issue["type"] == "literal_error":
+                return "primary_tool must be one of the currently authorized tools"
+            if issue["type"] == "missing":
+                return "Planner proposal is missing required fields"
+            if issue["type"] in {"string_too_short", "string_type"}:
+                return "Required Planner semantic fields must be non-empty strings"
+            if issue["type"] == "extra_forbidden":
+                return "Planner proposal contains unsupported fields"
+    return "Planner output did not match the required proposal schema."
+
+
+def _extract_planner_proposal(exchange, proposal_schema=PlannerProposal) -> PlannerProposal:
     is_envelope = (
         isinstance(exchange, dict)
         and "raw" in exchange
@@ -19,21 +42,21 @@ def _extract_planner_proposal(exchange) -> PlannerProposal:
     )
 
     if not is_envelope:
-        return PlannerProposal.model_validate(exchange)
+        return proposal_schema.model_validate(exchange)
 
     parsed = exchange.get("parsed")
 
     if parsed is not None:
         if isinstance(parsed, PlannerProposal):
-            return parsed
+            parsed = parsed.model_dump()
 
-        return PlannerProposal.model_validate(parsed)
+        return proposal_schema.model_validate(parsed)
 
     parsing_error = exchange.get("parsing_error")
 
     if parsing_error is not None:
         raise PlannerInvalidOutputError(
-            f"Planner structured output failed parsing: {parsing_error}"
+            _schema_diagnostic(parsing_error)
         ) from parsing_error
 
     raise PlannerInvalidOutputError(
@@ -63,8 +86,12 @@ class LangChainPlannerProvider:
 
         try:
 
+            proposal_schema = authorized_planner_schema(
+                messages[0].available_tools if messages else (),
+                max_steps=MAX_PROPOSED_STEPS,
+            )
             structured = self.planner_llm.with_structured_output(
-                PlannerProposal, method="json_schema", include_raw=True,
+                proposal_schema, method="json_schema", include_raw=True,
             )
             exchange = structured.invoke(provider_messages)
             add_response_usage(exchange, worker="planner")
@@ -79,11 +106,11 @@ class LangChainPlannerProvider:
                 enabled=self.show_raw_llm,
             )
                 
-            return _extract_planner_proposal(exchange)
+            return _extract_planner_proposal(exchange, proposal_schema)
 
         except PlannerInvalidOutputError:
             raise
         except (ValidationError, OutputParserException) as exc:
             raise PlannerInvalidOutputError(
-                f"Planner output failed schema validation: {exc}"
+                _schema_diagnostic(exc)
             ) from exc

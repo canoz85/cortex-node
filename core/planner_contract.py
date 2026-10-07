@@ -1,7 +1,8 @@
 """Provider-facing structured Planner proposal contract."""
 
 from enum import Enum
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field, create_model, model_validator
 
 
 class PlannerProposalResultType(str, Enum):
@@ -58,3 +59,25 @@ class PlannerProposal(BaseModel):
 
 class PlannerInvalidOutputError(ValueError):
     """Provider data did not satisfy PlannerProposal."""
+
+
+def authorized_planner_schema(
+    available_tools: tuple[str, ...], *, max_steps: int,
+) -> type[PlannerProposal]:
+    """Restrict the provider contract to this request's authorized capability set."""
+    names = tuple(sorted(set(available_tools)))
+    if names:
+        step = create_model(
+            "AuthorizedProposedStep", __base__=ProposedStep,
+            primary_tool=(Literal.__getitem__(names), Field(...)),
+        )
+        steps_type = tuple[step, ...]
+        steps_field = Field(default=(), max_length=max_steps)
+    else:
+        # No executable step is possible; the other result variants remain valid.
+        steps_type = tuple[()]
+        steps_field = Field(default=())
+    return create_model(
+        "AuthorizedPlannerProposal", __base__=PlannerProposal,
+        steps=(steps_type, steps_field),
+    )

@@ -56,12 +56,21 @@ def create_capture_tool_output_node():
                 "Capture executed without pending_tool_request."
             )
 
+        if last_message.tool_call_id != decision.pending_tool_request.request_id:
+            raise RuntimeError("Tool result request identity mismatch")
+
         raw_content = tool_message_content(last_message)
 
         tool_result = normalize_tool_output(
             raw_content=raw_content,
             request=decision.pending_tool_request,
         )
+
+        if execution_state.protocol_visible.tool_request_continuation is not None:
+            from core.graph_authorization import require_tool_authorization
+            from core.runtime.tool_result_integration import integrate_tool_result
+            require_tool_authorization(state)
+            return {"execution_state": integrate_tool_result(execution_state, decision, tool_result)}
 
         working = execution_state.working
         active_step = execution_state.protocol_visible.active_step

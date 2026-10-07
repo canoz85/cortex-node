@@ -14,6 +14,7 @@ from core.protocol.models import (
     ToolResult,
 )
 from core.tool_output import compute_repeat_fail_count, parse_tool_output, unwrap_tool_output, build_artifact_records, normalize_tool_output
+from tools.registry import ToolRegistry
 
 
 class SerializedToolRuntimePort:
@@ -26,11 +27,7 @@ class SerializedToolRuntimePort:
         observe: Callable[[ToolRequest], ContextManager[Any]] | None = None,
         require_structured: bool = True,
     ) -> None:
-        self._tools_by_name = {
-            str(getattr(tool, "name", "")): tool
-            for tool in tools
-            if str(getattr(tool, "name", ""))
-        }
+        self._tools_by_name = ToolRegistry.from_tools(tools).by_name
         self._observe = observe
         self._require_structured = require_structured
 

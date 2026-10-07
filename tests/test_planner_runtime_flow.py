@@ -84,7 +84,7 @@ def test_executable_runtime_flow_with_scripted_provider():
     assert protocol.completion_provenance[0].tool_request_ids
     assert tool_calls == ["a.txt"]
     assert [m.content for m in history] == ["Read a.txt", "The file says hello."]
-    assert sum(schema is PlannerProposal for schema, _ in model.exchanges) == 1
+    assert sum(issubclass(schema, PlannerProposal) for schema, _ in model.exchanges) == 1
 
 
 def test_create_direct_response_uses_one_human_request_and_controller_terminal_state_with_scripted_provider():
@@ -95,7 +95,7 @@ def test_create_direct_response_uses_one_human_request_and_controller_terminal_s
     protocol = app.get_state({'configurable': {'thread_id': 'production-direct'}}).values['execution_state'].protocol_visible
     assert protocol.status == ExecutionStatus.COMPLETED
     assert protocol.active_plan is None and protocol.planning_request is None
-    exchange = next(messages for schema, messages in model.exchanges if schema is PlannerProposal)
+    exchange = next(messages for schema, messages in model.exchanges if issubclass(schema, PlannerProposal))
     assert [m.content for m in exchange if isinstance(m, HumanMessage)] == ['hello']
     context = json.loads(exchange[-2].content.split('\n', 1)[1])
     assert context['operation'] == 'create'
@@ -133,7 +133,7 @@ def test_checkpointed_clarification_resumes_same_authorization_without_duplicate
     assert protocol.planning_clarification is None
     assert protocol.status == ExecutionStatus.COMPLETED
     assert sum(schema is RouterDecisionSchema for schema, _ in model.exchanges) == 1
-    planner_exchanges = [messages for schema, messages in model.exchanges if schema is PlannerProposal]
+    planner_exchanges = [messages for schema, messages in model.exchanges if issubclass(schema, PlannerProposal)]
     resumed = planner_exchanges[-1]
     assert resumed[-1].content == original.context.user_request
     context = json.loads(resumed[-2].content.split('\n', 1)[1])['context']

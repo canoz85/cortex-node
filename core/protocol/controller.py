@@ -42,12 +42,16 @@ from .models import (
     RetryMetadata,
     StepCompletionEvidence,
     ToolRequest,
+    ToolRequestContinuation,
     ToolResult,
 )
 from .completion_identity import (requirement_scope, evidence_identity, plan_validation_identity,
     eligible_records, completion_provenance_records, accepted_step, binding_for)
 from core.planner_revision import RevisionRejection, reconcile_revision
 from core.planner_progress import build_planner_progress
+from core.planner_feedback import planner_retry_feedback
+from core.brain_batch_policy import validate_read_only_batch, normalized_batch_arguments
+from core.brain_evidence_policy import MAX_CURRENT_ATTEMPT_RECORDS
 
 
 class InvalidExactCollection(ValueError):
@@ -138,10 +142,23 @@ class CortexController:
             })
         
         if controller_input.brain_result is not None:
+            if controller_input.tool_request_continuation is not None:
+                return self._terminate(controller_input.cursor, "brain_during_tool_batch")
             return self._decide_from_brain(controller_input)
 
         if controller_input.tool_result is not None:
-            return self._decide_from_tool(controller_input)
+            decision = self._decide_from_tool(controller_input)
+            continuation = controller_input.tool_request_continuation
+            if continuation is not None:
+                if (decision.decision_type == ControllerDecisionType.DISPATCH_BRAIN
+                        and not controller_input.tool_result.is_async_job):
+                    return self._continue_tool_batch(controller_input, decision)
+                return decision.model_copy(update={"consume_tool_result": True})
+            return decision
+
+        if controller_input.tool_request_continuation is not None:
+            # Resume an authorization checkpoint before its result was captured.
+            return self._resume_tool_batch(controller_input)
 
         return self._decide_initial(controller_input)
 
@@ -387,13 +404,19 @@ class CortexController:
                         PlanningFailureCategory.INVALID_OUTPUT,
                         PlanningFailureCategory.PROVIDER_FAILURE,
                     } and request.attempt < request.max_attempts):
+                    feedback = planner_retry_feedback(planner_result)
+                    retry_context = request.context
+                    if feedback is not None:
+                        retry_context = retry_context.model_copy(update={
+                            "retrieval_messages": (*retry_context.retrieval_messages, feedback),
+                        })
                     retry_request = self._build_planning_request(
                         controller_input, operation=request.operation,
                         planner_route=request.planner_route or planner_result.planner_route,
                         trigger=request.trigger, reason=request.reason,
                         suggested_constraints=request.suggested_constraints,
                         episode_id=request.episode_id, attempt=request.attempt + 1,
-                        context_override=request.context,
+                        context_override=retry_context,
                     )
                     return self._planning_dispatch(
                         controller_input, retry_request, "Retry Planner.",
@@ -642,6 +665,8 @@ class CortexController:
 
         match brain_result.outcome:
             case BrainOutcome.TOOL_REQUEST:
+                if brain_result.tool_requests is not None:
+                    return self._accept_tool_batch(controller_input, brain_result.tool_requests)
                 tool_request = brain_result.tool_request
                 if tool_request is None:
                     return self._terminate(
@@ -784,11 +809,109 @@ class CortexController:
 
         raise ValueError(f"Unsupported brain outcome: {brain_result.outcome}")
 
+    def _accept_tool_batch(self, context, requests):
+        plan, step = self._validate_active_step(context, transition="tool batch acceptance")
+        if context.brain_result.step_id != step.step_id:
+            return self._terminate(context.cursor, "tool_batch_requires_active_step_scope")
+        if context.pending_tool_request is not None:
+            return self._terminate(context.cursor, "tool_batch_has_pending_request")
+        authorized = plan.available_tools or ()
+        try:
+            validate_read_only_batch(
+                [(request.tool_name, request.arguments) for request in requests], authorized,
+            )
+            # The accepted plan's execution ceiling remains Controller authority,
+            # independently of the shared static batch eligibility policy.
+            if any(request.tool_name not in authorized for request in requests):
+                raise ValueError("batch_tool_not_authorized_or_homogeneous")
+            ids = [request.request_id for request in requests]
+            if len(set(ids)) != len(ids):
+                raise ValueError("duplicate_batch_request_id")
+            # Configured submission tools require singleton lifecycle preparation
+            # (attempt limits, job identity and active-job checks). Batch dispatch
+            # bypasses that path, so reject this execution-mode mismatch even if
+            # the shared static batch policy permits the tool's name.
+            if any(request.tool_name in self._async_submission_tool_names for request in requests):
+                raise ValueError("async_tool_not_batch_eligible")
+            recorded = {record.result.request_id for record in context.tool_execution_history}
+            if recorded.intersection(ids):
+                raise ValueError("batch_request_id_already_executed")
+        except (ValueError, TypeError) as exc:
+            return self._terminate(context.cursor, f"invalid_tool_batch:{exc}")
+        continuation = ToolRequestContinuation(
+            execution_id=context.identity.execution_id, plan_id=plan.plan_id,
+            plan_revision=plan.revision, step_id=step.step_id, step_attempt=step.attempt,
+            remaining=tuple(requests[1:]),
+        )
+        return self._batch_dispatch(context, requests[0], continuation, "tool_batch_accepted")
+
+    def _batch_scope_valid(self, context):
+        continuation = context.tool_request_continuation
+        plan, step = self._validate_active_step(context, transition="tool batch continuation")
+        return (
+            continuation.execution_id, continuation.plan_id, continuation.plan_revision,
+            continuation.step_id, continuation.step_attempt,
+        ) == (
+            context.identity.execution_id, plan.plan_id, plan.revision, step.step_id, step.attempt,
+        )
+
+    def _batch_dispatch(self, context, request, continuation, reason, *, consume=False):
+        return ControllerDecision(
+            accepted_plan=self._update_active_step_status(context, StepStatus.ACTIVE),
+            decision_type=ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
+            reason=reason, next_worker=WorkerRole.TOOL_RUNTIME,
+            cursor=context.cursor.model_copy(update={
+                "phase": ExecutionPhase.EXECUTING, "current_worker": WorkerRole.TOOL_RUNTIME,
+                "step_id": context.active_step.step_id, "step_attempt": context.active_step.attempt,
+            }),
+            next_step_id=context.active_step.step_id, pending_tool_request=request,
+            tool_request_continuation=continuation, requires_checkpoint=True,
+            consume_tool_result=consume,
+        )
+
+    def _resume_tool_batch(self, context):
+        request = context.pending_tool_request
+        if not self._batch_scope_valid(context) or request is None:
+            return self._terminate(context.cursor, "tool_batch_scope_or_pending_mismatch")
+        try:
+            normalized_batch_arguments(request.tool_name, request.arguments)
+            if request.tool_name not in (context.active_plan.available_tools or ()):
+                raise ValueError("tool_outside_plan_capabilities")
+            if any(record.result.request_id == request.request_id
+                   for record in context.tool_execution_history):
+                raise ValueError("tool_batch_result_missing_for_recorded_request")
+        except ValueError as exc:
+            return self._terminate(context.cursor, f"invalid_tool_batch_resume:{exc}")
+        return self._batch_dispatch(context, request, context.tool_request_continuation,
+                                    "resume_authorized_tool_batch_member")
+
+    def _continue_tool_batch(self, context, normal_decision):
+        if not self._batch_scope_valid(context) or context.pending_tool_request is None:
+            return self._terminate(context.cursor, "tool_batch_scope_or_pending_mismatch")
+        continuation = context.tool_request_continuation
+        if not continuation.remaining:
+            return normal_decision.model_copy(update={"consume_tool_result": True})
+        request = continuation.remaining[0]
+        # Recheck the current capability ceiling before every authorization.
+        try:
+            normalized_batch_arguments(request.tool_name, request.arguments)
+            if request.tool_name not in (context.active_plan.available_tools or ()):
+                raise ValueError("tool_outside_plan_capabilities")
+            if any(record.result.request_id == request.request_id
+                   for record in context.tool_execution_history):
+                raise ValueError("tool_batch_request_already_executed")
+        except ValueError as exc:
+            return self._terminate(context.cursor, f"invalid_tool_batch_continuation:{exc}")
+        return self._batch_dispatch(
+            context, request, continuation.model_copy(update={"remaining": continuation.remaining[1:]}),
+            "tool_batch_continuation", consume=True,
+        )
+
     @staticmethod
     def _bind_exact_collection(proposal, records) -> ExactCollection | None:
         if proposal is None:
             return None
-        visible_records = records[-24:]
+        visible_records = records[-MAX_CURRENT_ATTEMPT_RECORDS:]
         if proposal.source_record_index >= len(visible_records):
             raise InvalidExactCollection("exact collection source record is unavailable")
         record = visible_records[proposal.source_record_index]
@@ -1611,6 +1734,12 @@ def apply_controller_decision_to_state(
             else protocol_visible.pending_tool_request
         )
 
+    # A continuation survives only an explicit Controller tool authorization.
+    # Pause, replan, cancellation, termination and Brain dispatch discard it.
+    continuation = decision.tool_request_continuation
+    if protocol_visible.tool_request_continuation is not None and continuation is None:
+        pending_tool_request = decision.pending_tool_request
+
     should_clear_active_step = decision.clear_active_step
     active_step = None
     if not should_clear_active_step:
@@ -1687,6 +1816,7 @@ def apply_controller_decision_to_state(
                     ),
                     "active_step": active_step,
                     "pending_tool_request": pending_tool_request,
+                    "tool_request_continuation": continuation,
                     "completed_step_ids": completed_step_ids,
                     "completion_provenance": completion_provenance,
                     "retry": (

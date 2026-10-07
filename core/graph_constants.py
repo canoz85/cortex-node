@@ -1,4 +1,4 @@
-from typing import Set, Dict
+from tools.registry import TOOL_DEFINITIONS
 
 MAX_REASONING_STEPS = 24
 MAX_SUMMARY_TURNS = 6
@@ -6,15 +6,6 @@ MAX_SUMMARY_CHARS = 4000
 
 ANSI_BLUE = "\033[34m"
 ANSI_RESET = "\033[0m"
-
-SYSTEM_CAPABILITIES_TEXT = """SYSTEM CAPABILITIES & AVAILABLE TOOL CATEGORIES:
-- File & Workspace: Reading/writing files, directory listing, Python script execution.
-- Source Control: Git status, history, diffs, and commits.
-- Knowledge & RAG: Semantic document search and local knowledge files.
-- SAP / Enterprise: Material lookups, ABAP table queries, report executions.
-- SCADA & Industrial: Reading PLC telemetry and SCADA system statuses.
-- Vision & Generation: Inspecting/describing images and executing ComfyUI generation workflows.
-- System Info: Real-time clock, agent status, token usages."""
 
 SYSTEM_PROMPT_TEMPLATE="""
 You are CortexNode Brain, an execution worker selecting the active step's next action.
@@ -35,31 +26,15 @@ Knowledge folder: {knowledge_dir}
 """
 
 
-BASE_GENERAL_TOOLS = {
-    "current_time", "agent_info", "token_usage", "describe_image", 
-    "scada_status", "rag_search", "read_knowledge_file", "rag_refresh_index"
-}
-
-COMFY_TOOLS = {
-    "run_comfy_workflow", "get_comfy_history", "download_comfy_output_image"
-}
+BASE_GENERAL_TOOLS = {entry.name for entry in TOOL_DEFINITIONS if entry.family == "general"}
+COMFY_TOOLS = {entry.name for entry in TOOL_DEFINITIONS if entry.family == "comfy"}
 
 # Map domains and routes to allowed tool categories
-DOMAIN_TOOL_MAP: Dict[str, Set[str]] = {
-    "workspace": {
-        "run_python", "install_package", "list_files", "read_file", 
-        "write_file", "make_directory", "git_status", "git_log", 
-        "git_show", "git_diff"
-    } | BASE_GENERAL_TOOLS | COMFY_TOOLS,
-    "sap": {
-        "lookup_material", "query_abap_table", "execute_abap_report", 
-        "get_report_data"
-    } | BASE_GENERAL_TOOLS,
+DOMAIN_TOOL_MAP = {
+    "workspace": {entry.name for entry in TOOL_DEFINITIONS if entry.family == "workspace"}
+    | BASE_GENERAL_TOOLS | COMFY_TOOLS,
+    "sap": {entry.name for entry in TOOL_DEFINITIONS if entry.family == "sap"} | BASE_GENERAL_TOOLS,
     "general": BASE_GENERAL_TOOLS | COMFY_TOOLS,
 }
 
-MUTATING_TOOLS: Set[str] = {
-    "write_file", "make_directory", "install_package", 
-    "execute_abap_report", "run_python", "run_comfy_workflow",
-    "rag_refresh_index", "download_comfy_output_image",
-}
+MUTATING_TOOLS = {entry.name for entry in TOOL_DEFINITIONS if entry.mutating}

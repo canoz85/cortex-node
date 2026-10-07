@@ -452,6 +452,7 @@ class BrainOutcome(ImmutableProtocolModel):
     message: str = ""
     step_id: str | None = None
     tool_request: ToolRequest | None = None
+    tool_requests: tuple[ToolRequest, ...] | None = Field(default=None, min_length=2)
     replan_request: ReplanRequest | None = None
     completion_evidence: StepCompletionEvidence | None = None
     error_code: str | None = None
@@ -465,8 +466,11 @@ class BrainOutcome(ImmutableProtocolModel):
 
     @model_validator(mode="after")
     def validate_payload_kinds(self) -> "BrainOutcome":
+        if self.tool_request is not None and self.tool_requests is not None:
+            raise ValueError("single and batch ToolRequest payloads are exclusive")
         for payload, kind in (
             (self.tool_request, BrainOutcomeKind.TOOL_REQUESTED),
+            (self.tool_requests, BrainOutcomeKind.TOOL_REQUESTED),
             (self.replan_request, BrainOutcomeKind.REPLAN_REQUESTED),
             (self.completion_evidence, BrainOutcomeKind.STEP_COMPLETED),
         ):
@@ -476,6 +480,21 @@ class BrainOutcome(ImmutableProtocolModel):
 
 
 BrainResult = BrainOutcome
+
+
+class ToolRequestContinuation(ImmutableProtocolModel):
+    """Controller-accepted remainder, bound to one execution/plan/step attempt.
+
+    An empty remainder still scopes the final pending member until consumed.
+    These requests are accepted candidates, not execution authorizations.
+    """
+
+    execution_id: str = Field(min_length=1)
+    plan_id: str = Field(min_length=1)
+    plan_revision: int = Field(ge=1)
+    step_id: str = Field(min_length=1)
+    step_attempt: int = Field(ge=0)
+    remaining: tuple[ToolRequest, ...] = ()
 
 
 class ControllerInput(ImmutableProtocolModel):
@@ -496,6 +515,7 @@ class ControllerInput(ImmutableProtocolModel):
     active_plan: ExecutionPlan | None = None
     active_step: ExecutionStep | None = None
     pending_tool_request: ToolRequest | None = None
+    tool_request_continuation: ToolRequestContinuation | None = None
     planner_result: PlannerResult | None = None
     brain_result: BrainResult | None = None
     tool_result: ToolResult | None = None
@@ -955,6 +975,7 @@ class ProtocolVisibleState(ImmutableProtocolModel):
     active_plan: ExecutionPlan | None = None
     active_step: ExecutionStep | None = None
     pending_tool_request: ToolRequest | None = None
+    tool_request_continuation: ToolRequestContinuation | None = None
     completed_step_ids: StepIdList = Field(default_factory=tuple)
     completion_provenance: tuple[StepCompletionEvidence, ...] = ()
     accepted_direct_response: AcceptedDirectResponse | None = None
@@ -1105,6 +1126,7 @@ class ControllerDecision(ImmutableProtocolModel):
 
     pending_tool_request: ToolRequest | None = None
     clear_pending_tool_request: bool = False
+    tool_request_continuation: ToolRequestContinuation | None = None
 
     async_job_id: str | None = None
     resume_after_utc: datetime | None = None
@@ -1116,6 +1138,14 @@ class ControllerDecision(ImmutableProtocolModel):
 
     @model_validator(mode="after")
     def validate_terminal_status_and_cursor(self) -> "ControllerDecision":
+        if self.tool_request_continuation is not None and (
+            self.decision_type != ControllerDecisionType.DISPATCH_TOOL_RUNTIME
+            or self.next_worker != WorkerRole.TOOL_RUNTIME
+            or self.pending_tool_request is None
+            or self.clear_pending_tool_request
+            or self.terminal
+        ):
+            raise ValueError("tool continuation requires one non-terminal tool authorization")
         if self.accepted_direct_response is not None and (
             self.decision_type != ControllerDecisionType.TERMINATE
             or self.execution_status != ExecutionStatus.COMPLETED

@@ -30,9 +30,10 @@ class ReadArguments(BaseModel):
 
 
 def batch():
+    # Valid candidates, but duplicate effective invocations are not executable.
     return AIMessage(content="", tool_calls=[
         {"name": "read_file", "args": {"path": "a.py"}, "id": "rejected-a"},
-        {"name": "read_file", "args": {"path": "b.py"}, "id": "rejected-b"},
+        {"name": "read_file", "args": {"path": "a.py", "offset": 0}, "id": "rejected-b"},
     ])
 
 
@@ -158,17 +159,14 @@ def test_invalid_batch_candidates_do_not_trigger_cardinality_correction(bad_call
     assert any("correction_triggered=False" in r.message for r in caplog.records)
 
 
-def test_batch_with_invalid_native_calls_or_content_is_not_cardinality_only():
-    for raw in (
-        AIMessage(content="", tool_calls=batch().tool_calls, invalid_tool_calls=[{
-            "name": "read_file", "args": "{bad", "id": "bad", "error": "invalid JSON",
-        }]),
-        AIMessage(content="Also do this", tool_calls=batch().tool_calls),
-    ):
-        provider, model, _ = setup_provider(raw)
-        outcome = provider.generate(brain_input(), ())
-        assert outcome.kind == Kind.INVALID_OUTPUT
-        assert len(model.calls) == 1
+def test_batch_with_invalid_native_calls_is_not_cardinality_only():
+    raw = AIMessage(content="Also do this", tool_calls=batch().tool_calls, invalid_tool_calls=[{
+        "name": "read_file", "args": "{bad", "id": "bad", "error": "invalid JSON",
+    }])
+    provider, model, _ = setup_provider(raw)
+    outcome = provider.generate(brain_input(), ())
+    assert outcome.kind == Kind.INVALID_OUTPUT
+    assert len(model.calls) == 1
 
 
 def test_batch_correction_provider_exception_is_not_retried():

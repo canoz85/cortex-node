@@ -2,6 +2,7 @@
 
 import json
 import logging
+from copy import copy
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -14,6 +15,10 @@ from core.protocol.models import BrainInput, BrainOutcome
 
 from core.debug import log_llm_exchange
 from core.logging.live_status import add_response_usage, begin_provider_invocation
+from tools.registry import ToolRegistry, get_tool_argument_schema
+from core.brain_batch_policy import (
+    MAX_READ_FILE_BATCH, is_oversized_read_only_batch, validate_read_only_batch,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -28,12 +33,21 @@ def _ensure_native_call(
     calls = getattr(raw, "tool_calls", None)
     missing_call = not calls and not getattr(raw, "invalid_tool_calls", None)
     valid_batch = _is_valid_native_batch(raw, authorized_tools)
-    correction_triggered = missing_call or valid_batch
+    disallowed_batch = valid_batch and not _is_permitted_native_batch(raw, authorized_tools)
+    correction_triggered = missing_call or disallowed_batch
     _log_native_call_attempt(raw, 1, correction_triggered=correction_triggered)
     if not correction_triggered:
         return raw, provider_messages
 
-    if valid_batch:
+    if disallowed_batch and _is_oversized_native_batch(raw, authorized_tools):
+        instruction = (
+            f"The previous response contained {len(calls)} calls in an otherwise valid "
+            f"homogeneous read-only batch, but the maximum permitted batch size is {MAX_READ_FILE_BATCH}. "
+            f"Return one native action containing at most {MAX_READ_FILE_BATCH} of those useful calls. "
+            "Use the same tool. Do not add new calls. Leave content empty."
+        )
+        rejected_response = [raw] if isinstance(raw, AIMessage) else []
+    elif disallowed_batch:
         instruction = (
             "The previous response contained multiple native calls and was not accepted. "
             "Choose exactly one next action from the useful candidates for this turn. "
@@ -69,8 +83,48 @@ def _is_valid_native_batch(raw, authorized_tools: dict[str, object]) -> bool:
         or getattr(raw, "content", None)
     ):
         return False
+    if not _are_valid_native_calls(calls, authorized_tools):
+        return False
+    try:
+        for call in calls:
+            schema = get_tool_argument_schema(call["name"])
+            if schema is not None:
+                schema.model_validate(call["args"])
+    except (ValueError, TypeError, KeyError):
+        return False
+    return True
+
+
+def _is_permitted_native_batch(raw, authorized_tools: dict[str, object]) -> bool:
+    """Execution eligibility is stricter than valid correction candidates."""
+    if not _is_valid_native_batch(raw, authorized_tools):
+        return False
+    try:
+        validate_read_only_batch(
+            [(call["name"], call["args"]) for call in raw.tool_calls], authorized_tools,
+            registry=ToolRegistry.from_tools(authorized_tools.values()),
+        )
+    except (ValueError, TypeError, KeyError):
+        return False
+    return True
+
+
+def _is_oversized_native_batch(raw, authorized_tools: dict[str, object]) -> bool:
+    if not _is_valid_native_batch(raw, authorized_tools):
+        return False
+    return is_oversized_read_only_batch(
+        [(call["name"], call["args"]) for call in raw.tool_calls], authorized_tools,
+        registry=ToolRegistry.from_tools(authorized_tools.values()),
+    )
+
+
+def _are_valid_native_calls(
+    calls, authorized_tools: dict[str, object], *, allow_unknown_schema=False,
+    validate_arguments=True,
+) -> bool:
     try:
         allowed_tools = set(authorized_tools)
+        registry = ToolRegistry.from_tools(authorized_tools.values()) if validate_arguments else None
         for call in calls:
             name, arguments, _ = validate_native_call(call, allowed_tools)
             if call.get("type", "tool_call") != "tool_call":
@@ -78,14 +132,13 @@ def _is_valid_native_batch(raw, authorized_tools: dict[str, object]) -> bool:
             if "id" in call and (not isinstance(call["id"], str) or not call["id"].strip()):
                 return False
             json.dumps(arguments, allow_nan=False)
-            if name in authorized_tools:
-                tool = authorized_tools[name]
-                schema = getattr(tool, "args_schema", None)
+            if name in authorized_tools and validate_arguments:
+                schema = get_tool_argument_schema(name, registry=registry)
                 if isinstance(schema, dict):
                     # Do not correct a batch whose argument validity is unknown.
-                    return False
-                if schema is None and callable(getattr(tool, "get_input_schema", None)):
-                    schema = tool.get_input_schema()
+                    if not allow_unknown_schema:
+                        return False
+                    continue
                 if schema is not None:
                     if callable(getattr(schema, "model_validate", None)):
                         schema.model_validate(arguments)
@@ -94,6 +147,27 @@ def _is_valid_native_batch(raw, authorized_tools: dict[str, object]) -> bool:
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return False
     return True
+
+
+def _canonical_brain_response(raw, authorized_tools: dict[str, object]):
+    """Discard incidental text beside valid native candidates; preserve the raw log.
+
+    This validates candidates, not batch eligibility. Classification still checks
+    the complete group against the existing execution safety policy.
+    """
+    calls = getattr(raw, "tool_calls", None)
+    if (
+        not getattr(raw, "content", None)
+        or not isinstance(calls, (list, tuple)) or not calls
+        or getattr(raw, "invalid_tool_calls", None)
+        or not _are_valid_native_calls(
+            calls, authorized_tools, validate_arguments=len(calls) == 1,
+        )
+    ):
+        return raw
+    canonical = copy(raw)
+    canonical.content = ""
+    return canonical
 
 
 def _log_native_call_attempt(
@@ -196,7 +270,7 @@ LIFECYCLE_ACTION_SCHEMAS = (
 
 def _resolve_authorized_tools(
     brain_input: BrainInput,
-    executable_tools: dict[str, object],
+    registry: ToolRegistry,
 ) -> tuple[set[str], list]:
     authorized_names = set(
         brain_input.active_plan.available_tools or ()
@@ -204,11 +278,7 @@ def _resolve_authorized_tools(
         else ()
     )
 
-    authorized_tools = [
-        tool
-        for name, tool in executable_tools.items()
-        if name in authorized_names
-    ]
+    authorized_tools = registry.resolve(authorized_names & registry.names)
 
     return authorized_names, authorized_tools
 
@@ -235,10 +305,8 @@ class LangChainBrainProvider:
         show_raw_llm: bool = False,
     ):
         self.brain_llm = brain_llm
-        self.executable_tools = {
-            tool.name: tool for tool in executable_tools
-            if isinstance(getattr(tool, "name", None), str) and tool.name
-        }
+        self.tool_registry = ToolRegistry.from_tools(executable_tools)
+        self.executable_tools = self.tool_registry.by_name
         self.show_raw_llm = show_raw_llm
 
     def generate(
@@ -246,7 +314,7 @@ class LangChainBrainProvider:
     ) -> BrainOutcome:
 
         authorized_tool_names, authorized_tools = _resolve_authorized_tools(
-            brain_input, self.executable_tools
+            brain_input, self.tool_registry
         )
 
         provider_messages = _to_provider_messages(messages)
@@ -261,7 +329,10 @@ class LangChainBrainProvider:
                 enabled=self.show_raw_llm,
             )
             raw, retry_messages = _ensure_native_call(
-                llm=llm, provider_messages=provider_messages, raw=raw,
+                llm=llm, provider_messages=provider_messages,
+                raw=_canonical_brain_response(
+                    raw, {tool.name: tool for tool in authorized_tools},
+                ),
                 authorized_tools={tool.name: tool for tool in authorized_tools},
             )
             if retry_messages is not provider_messages:
@@ -270,6 +341,9 @@ class LangChainBrainProvider:
                     response=raw, execution_id=brain_input.identity.execution_id,
                     enabled=self.show_raw_llm,
                 )
+            canonical = _canonical_brain_response(
+                raw, {tool.name: tool for tool in authorized_tools},
+            )
         except Exception as exc:
             # Provider failures are values at the service boundary.
             # Exception retries remain a Controller decision.
@@ -281,8 +355,21 @@ class LangChainBrainProvider:
             )
 
         outcome = normalize_brain_output(
-            raw, brain_input, set(self.executable_tools) & authorized_tool_names,
+            canonical, brain_input, set(self.executable_tools) & authorized_tool_names,
         )
+        # A proposal must also satisfy the bound tool schemas. Normalization's
+        # batch policy cannot override a provider schema rejection.
+        calls = getattr(canonical, "tool_calls", None)
+        if (outcome.outcome == BrainOutcomeKind.TOOL_REQUESTED
+                and not _are_valid_native_calls(
+                    calls, {tool.name: tool for tool in authorized_tools},
+                    allow_unknown_schema=outcome.tool_requests is None,
+                )):
+            outcome = BrainOutcome(
+                outcome=BrainOutcomeKind.INVALID_OUTPUT, step_id=outcome.step_id,
+                error_code="invalid_native_tool_arguments",
+                message="Brain returned invalid native tool arguments.",
+            )
         if retry_messages is not provider_messages:
             _log_native_call_attempt(
                 raw, 2, correction_exhausted=outcome.outcome == BrainOutcomeKind.INVALID_OUTPUT,

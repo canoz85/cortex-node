@@ -6,6 +6,7 @@ from langchain_core.tools import tool
 from core.error_codes import GIT_COMMAND_FAILED, GIT_NOT_INSTALLED, GIT_RUNTIME_ERROR, GIT_TIMEOUT
 from core.models import ToolOutputEnvelope
 from tools.sandbox_paths import resolve_workspace
+from tools.git_evidence import get_git_changed_files_tool
 
 
 def _run_git(workspace_root: Path, args: list[str], timeout_seconds: int = 20) -> str:
@@ -93,4 +94,4 @@ def get_git_tools(workspace_dir: str):
         """Show details of a revision, defaulting to HEAD."""
         return _run_git(workspace_root, ["show", "--stat", "--oneline", revision])
 
-    return [git_status, git_diff, git_log, git_show]
+    return [git_status, git_diff, git_log, git_show, get_git_changed_files_tool(workspace_root)]

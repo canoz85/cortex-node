@@ -50,6 +50,7 @@ from .models import (
     RetryMetadata,
     ToolInput,
     ToolRequest,
+    ToolRequestContinuation,
     ToolResult,
     WorkingState,
 )
@@ -101,6 +102,7 @@ __all__ = [
     "ReplanRequest",
     "RetryMetadata",
     "ToolRequest",
+    "ToolRequestContinuation",
     "ToolInput",
     "ToolResult",
     "WorkingState",

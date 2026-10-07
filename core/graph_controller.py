@@ -11,6 +11,7 @@ from core.completion import CompletionService
 from core.runtime.controller_transition import ControllerCoordinator
 from core.runtime.execution_driver import ExecutionDriver
 from core.runtime.portable_orchestration import PortableExecutionRuntime
+from core.graph_authorization import batch_member_transport
 
 
 class _GraphDeferredWorkerPort:
@@ -78,6 +79,9 @@ def create_controller_node(
             "controller_decision": decision,
             "user_input": None,
         }
+        if worker_ports is None and decision.tool_request_continuation is not None:
+            transport = batch_member_transport({**state, **update})
+            update["messages"] = [transport["messages"][-1]]
         worker_update = {}
         if worker_ports is not None:
             worker_update = worker_ports.consume_update()

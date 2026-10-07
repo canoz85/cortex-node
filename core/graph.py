@@ -28,15 +28,7 @@ from core.runtime.state_propagation import propagate_execution_state
 from core.runtime.execution_driver import WorkerDispatchError
 from core.runtime.tool_result_integration import SerializedToolRuntimePort
 from core.state import AgentState
-from tools.comfy_ops import get_comfy_tools
-from tools.exec_ops import get_exec_tools
-from tools.file_ops import get_file_tools
-from tools.git_ops import get_git_tools
-from tools.info_ops import get_info_tools
-from tools.rag_ops import get_rag_tools
-from tools.sap_ops import get_sap_tools
-from tools.scada_ops import get_scada_tools
-from tools.vision_ops import get_vision_tools
+from tools.registry import ToolRegistry, build_tool_registry, default_enabled_tools
 
 
 ToolListFactory = Callable[[str, str, WorkspaceRAG, str], list[Any]]
@@ -69,20 +61,11 @@ def _default_tool_list_factory(
     *,
     resource_coordinator: GpuResourceCoordinator | None = None,
 ) -> list[Any]:
-    return [
-        *get_file_tools(workspace_root, knowledge_dir=knowledge_root),
-        *get_exec_tools(workspace_root),
-        *get_git_tools(workspace_root),
-        *get_info_tools(model=model, workspace_dir=workspace_root),
-        *get_rag_tools(rag_service),
-        *get_sap_tools(workspace_root),
-        *get_scada_tools(workspace_root),
-        *get_vision_tools(workspace_root),
-        *get_comfy_tools(
-            workspace_root,
-            resource_coordinator=resource_coordinator,
-        ),
-    ]
+    registry = build_tool_registry(
+        workspace_root, knowledge_root, rag_service, model,
+        resource_coordinator=resource_coordinator,
+    )
+    return default_enabled_tools(registry)
 
 
 def _build_tools(
@@ -320,7 +303,9 @@ def build_app(
         model,
         resource_coordinator=resource_coordinator,
     )
-    tool_names = set(_tool_names(tools))
+    # This registry contains the deployment's enabled selection, including any
+    # injected factory filter. The full production inventory is not authority.
+    tool_names = set(ToolRegistry.from_tools(tools).names)
     agent_system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         model=model,
         workspace_dir=workspace_root_str,

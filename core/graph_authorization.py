@@ -96,6 +96,20 @@ def require_tool_authorization(state) -> ToolRequest:
     return request
 
 
+def batch_member_transport(state):
+    """Project only Controller's current batch authorization into ToolNode input."""
+    protocol = state["execution_state"].protocol_visible
+    if protocol.tool_request_continuation is None:
+        return state
+    from langchain_core.messages import AIMessage
+    request = require_tool_authorization(state)
+    message = AIMessage(content="", tool_calls=[{
+        "name": request.tool_name, "args": request.arguments,
+        "id": request.request_id, "type": "tool_call",
+    }])
+    return {**state, "messages": [*state.get("messages", []), message]}
+
+
 __all__ = [
     "require_brain_authorization",
     "require_planner_authorization",

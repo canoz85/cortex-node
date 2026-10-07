@@ -1,6 +1,6 @@
 """One defensive boundary from model/provider output to domain BrainOutcome.
 
-Exactly one native call is executable. Text and provider envelopes are never
+One native action is proposed. Text and provider envelopes are never
 parsed for tools or lifecycle outcomes. This module is internal to the provider
 adapter; no raw response is returned by the Brain service.
 """
@@ -10,6 +10,7 @@ import json
 from collections.abc import Mapping
 
 from pydantic import ValidationError
+from core.brain_batch_policy import validate_read_only_batch
 
 from core.protocol.enums import BrainOutcomeKind as Kind, StepStatus
 from core.protocol.models import (
@@ -129,10 +130,29 @@ def _tool_requested_outcome(
 def _native_outcome(
     calls, brain_input: BrainInput, allowed_tools: set[str],
 ) -> BrainOutcome:
-    if not isinstance(calls, (list, tuple)) or len(calls) != 1:
+    if not isinstance(calls, (list, tuple)) or not calls:
         raise InvalidBrainOutput("exactly_one_tool_call_required")
     if brain_input.direct_response or brain_input.active_step is None:
         raise InvalidBrainOutput("native_call_requires_active_step")
+    if len(calls) > 1:
+        candidates = []
+        try:
+            for call in calls:
+                name, arguments, _ = validate_native_call(call, allowed_tools)
+                if call.get("type", "tool_call") != "tool_call":
+                    raise InvalidBrainOutput("invalid_tool_call_type")
+                if "id" in call and (not isinstance(call["id"], str) or not call["id"].strip()):
+                    raise InvalidBrainOutput("invalid_tool_call_id")
+                candidates.append((name, arguments))
+            validate_read_only_batch(candidates, allowed_tools)
+        except ValueError as exc:
+            raise InvalidBrainOutput("exactly_one_tool_call_required") from exc
+        return BrainOutcome(
+            outcome=Kind.TOOL_REQUESTED, step_id=brain_input.active_step.step_id,
+            tool_requests=tuple(_tool_request(name, arguments, brain_input, allowed_tools)
+                                for name, arguments in candidates),
+            message="Brain requested homogeneous read-only tool execution.",
+        )
     name, arguments, exact_collection = validate_native_call(calls[0], allowed_tools)
     if name in allowed_tools:
         return _tool_requested_outcome(

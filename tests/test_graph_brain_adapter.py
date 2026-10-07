@@ -201,7 +201,7 @@ def test_graph_brain_execution_with_injected_planner_result():
         "brain_step_completed", "brain_step_failed", "brain_replan_requested",
     }
     assert all("BRAIN NATIVE CALL CONTRACT" in prompt for _, prompt in calls)
-    assert "Return exactly one native call" in calls[0][1]
+    assert "Return one native action" in calls[0][1]
     assert "brain_step_completed" in calls[0][1]
     assert '"kind":"TOOL_REQUESTED"' not in calls[0][1]
     assert "Execution evidence v1:" in calls[-1][1]
