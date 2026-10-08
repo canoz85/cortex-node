@@ -231,12 +231,14 @@ def test_accepting_replacement_plan_clears_old_retry_history(replacement_step_id
     replacement = ExecutionPlan(
         plan_id="plan-1",
         revision=2,
-        steps=(ExecutionStep(step_id=replacement_step_id, title="Replacement"),),
+        available_tools=("read_file",),
+        steps=(ExecutionStep(step_id=replacement_step_id, title="Replacement",
+            description="Inspect replacement evidence", primary_tool="read_file"),),
     )
 
     request = PlanningRequest(
         request_id="replace", episode_id="replace-episode", identity=IDENTITY, operation=PlanningOperation.REVISE,
-        context=CONTEXT, capabilities=PlanningCapabilities(), sequence=1,
+        context=CONTEXT, capabilities=PlanningCapabilities(available_tools=("read_file",)), sequence=1,
         created_at_utc=datetime.now(timezone.utc), base_plan=execution["active_plan"],
         base_plan_id="plan-1", base_revision=1,
         interrupted_step=execution["active_step"], trigger=ReplanTrigger.BRAIN_REQUESTED,

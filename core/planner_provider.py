@@ -1,5 +1,8 @@
 """LangChain transport for Planner proposal generation."""
 
+from collections.abc import Mapping
+from copy import copy
+
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import ValidationError
@@ -7,6 +10,7 @@ from pydantic import ValidationError
 from core.planner import PlannerMessage
 from core.planner_contract import PlannerInvalidOutputError, PlannerProposal, authorized_planner_schema
 from core.planner_normalization import MAX_PROPOSED_STEPS
+from core.planner_limits import MAX_PLANNER_GENERATION_TOKENS, PLANNER_LENGTH_DIAGNOSTIC
 from core.debug import log_llm_exchange
 from core.logging.live_status import add_response_usage
 from core.logging.live_status import current_live_status
@@ -42,7 +46,19 @@ def _extract_planner_proposal(exchange, proposal_schema=PlannerProposal) -> Plan
     )
 
     if not is_envelope:
+        if isinstance(exchange, PlannerProposal):
+            exchange = exchange.model_dump()
         return proposal_schema.model_validate(exchange)
+
+    raw = exchange.get("raw")
+    metadata = (
+        raw.get("response_metadata", {}) if isinstance(raw, Mapping)
+        else getattr(raw, "response_metadata", {})
+    ) or {}
+    if metadata.get("done_reason") == "length" or metadata.get("finish_reason") == "length":
+        # Parsers can repair incomplete JSON. A length-terminated generation is
+        # not a completed proposal, even if the parser produced a typed value.
+        raise PlannerInvalidOutputError(PLANNER_LENGTH_DIAGNOSTIC)
 
     parsed = exchange.get("parsed")
 
@@ -65,7 +81,10 @@ def _extract_planner_proposal(exchange, proposal_schema=PlannerProposal) -> Plan
 
 class LangChainPlannerProvider:
     def __init__(self, *, planner_llm, show_raw_llm: bool = False):
-        self.planner_llm = planner_llm
+        # Router shares the supplied model. Copy its configuration before
+        # schema binding so this option reaches Ollama without mutating Router.
+        self.planner_llm = copy(planner_llm)
+        self.planner_llm.num_predict = MAX_PLANNER_GENERATION_TOKENS
         self.show_raw_llm = show_raw_llm
 
     def generate(
@@ -104,6 +123,10 @@ class LangChainPlannerProvider:
                 response=raw,
                 execution_id=messages[0].execution_id if messages else None,
                 enabled=self.show_raw_llm,
+                invocation={
+                    "num_predict": MAX_PLANNER_GENERATION_TOKENS,
+                    "attempt": messages[0].attempt if messages else None,
+                },
             )
                 
             return _extract_planner_proposal(exchange, proposal_schema)

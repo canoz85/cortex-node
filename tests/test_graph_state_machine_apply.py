@@ -21,6 +21,7 @@ from core.protocol.models import (
     ExecutionState,
     ExecutionStep,
     PlannerResult,
+    PlanningCapabilities,
     ProtocolVisibleState,
     ReplanRequest,
     RetryMetadata,
@@ -380,7 +381,8 @@ def _retryable_state():
 
 
 def _apply_worker_result(state, **worker_result):
-    decision = CortexController(max_reasoning_steps=10).decide(
+    decision = CortexController(max_reasoning_steps=10,
+        planning_capabilities=PlanningCapabilities(available_tools=("read_file",))).decide(
         build_controller_input({"execution_state": state, **worker_result})
     )
     return apply_controller_decision_to_state(state, decision)
@@ -460,7 +462,9 @@ def test_failed_step_replan_and_replacement_plan_can_proceed(replacement_step_id
             proposed_plan=ExecutionPlan(
                 plan_id=replanning.protocol_visible.active_plan.plan_id,
                 revision=2,
-                steps=(ExecutionStep(step_id=replacement_step_id, title="Replacement"),),
+                available_tools=("read_file",),
+                steps=(ExecutionStep(step_id=replacement_step_id, title="Replacement",
+                    description="Inspect replacement evidence", primary_tool="read_file"),),
             ),
         ),
     )

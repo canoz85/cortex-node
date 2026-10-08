@@ -20,6 +20,7 @@ from core.protocol.models import (
     ExecutionState,
     ExecutionStep,
     PlannerResult,
+    PlanningCapabilities,
     ProtocolVisibleState,
     ToolRequest,
     ToolResult,
@@ -51,9 +52,12 @@ def _planned_state(controller: CortexController) -> ExecutionState:
     request = planning.planning_request
     plan = ExecutionPlan(
         plan_id="plan-1",
+        available_tools=("read_file",),
         steps=(
-            ExecutionStep(step_id="step-1", title="Read the file"),
-            ExecutionStep(step_id="step-2", title="Inspect the contents"),
+            ExecutionStep(step_id="step-1", title="Read the file",
+                description="Read requested evidence", primary_tool="read_file"),
+            ExecutionStep(step_id="step-2", title="Inspect the contents",
+                description="Inspect requested evidence", primary_tool="read_file"),
         ),
     )
     accepted = controller.decide(build_controller_input({
@@ -71,7 +75,8 @@ def _planned_state(controller: CortexController) -> ExecutionState:
 
 
 def test_brain_dispatches_advance_one_protocol_iteration_and_tool_round_trip_cannot_bypass_limit():
-    controller = CortexController(max_reasoning_steps=2)
+    controller = CortexController(max_reasoning_steps=2,
+        planning_capabilities=PlanningCapabilities(available_tools=("read_file",)))
     state = _planned_state(controller)
     assert state.protocol_visible.cursor.controller_iteration == 1
 
@@ -118,7 +123,8 @@ def test_brain_dispatches_advance_one_protocol_iteration_and_tool_round_trip_can
 
 
 def test_checkpoint_round_trip_preserves_iteration_and_controller_decision_is_idempotent():
-    controller = CortexController(max_reasoning_steps=3)
+    controller = CortexController(max_reasoning_steps=3,
+        planning_capabilities=PlanningCapabilities(available_tools=("read_file",)))
     state = _planned_state(controller)
     decision = controller.decide(build_controller_input({
         "execution_state": state,

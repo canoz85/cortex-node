@@ -32,7 +32,7 @@ BASE = ExecutionPlan(plan_id="plan", revision=3, objective="Finish", steps=(DONE
 def request(**updates):
     value = PlanningRequest(
         request_id="revision", episode_id="revision-episode", identity=IDENTITY, operation=PlanningOperation.REVISE,
-        context=ExecutionContext(user_request="Finish"), capabilities=PlanningCapabilities(),
+        context=ExecutionContext(user_request="Finish"), capabilities=PlanningCapabilities(available_tools=("read_file",)),
         sequence=2, created_at_utc=datetime(2026, 1, 1, tzinfo=timezone.utc),
         base_plan=BASE, base_plan_id="plan", base_revision=3,
         completed_step_ids=("done",), completed_steps=(DONE,), interrupted_step=FAILED,
@@ -42,11 +42,13 @@ def request(**updates):
 
 
 def proposal(*steps, plan_id="plan", revision=99):
-    return ExecutionPlan(plan_id=plan_id, revision=revision, objective="Finish", steps=steps)
+    return ExecutionPlan(plan_id=plan_id, revision=revision, objective="Finish", steps=steps,
+                         available_tools=("read_file",))
 
 
 def replacement(step_id="new", title="New approach"):
     return ExecutionStep(step_id=step_id, title=title, description="alternative",
+                         primary_tool="read_file",
                          depends_on_step_ids=("done",))
 
 
@@ -124,8 +126,9 @@ def test_rejection_decision_is_atomic_and_provenance_survives_acceptance_round_t
 
 
 def test_create_path_is_not_revision_reconciled():
-    plan = ExecutionPlan(plan_id="fresh", revision=1, steps=(replacement(),))
-    ctrl = CortexController(20)
+    plan = ExecutionPlan(plan_id="fresh", revision=1, available_tools=("read_file",),
+                         steps=(replacement().model_copy(update={"depends_on_step_ids": ()}),))
+    ctrl = CortexController(20, planning_capabilities=PlanningCapabilities(available_tools=("read_file",)))
     initial = ControllerInput(identity=IDENTITY, cursor=ExecutionCursor(),
                               context=ExecutionContext(user_request="Finish"))
     dispatch = ctrl.decide(initial)

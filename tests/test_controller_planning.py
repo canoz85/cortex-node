@@ -200,9 +200,9 @@ def test_revise_context_projection_with_scripted_provider():
     assert result.proposed_plan.revision == 4
     assert result.proposed_plan.plan_id == "accepted"
     prompt = provider.messages[0][0].content
-    tools = prompt.split("AVAILABLE TOOLS FOR THIS REQUEST", 1)[1].split("PLANNING RULES:", 1)[0]
-    assert "- list_files" in tools and "- read_file" in tools
-    assert "- write_file" not in tools and "- agent_info" not in tools
+    tools = prompt.split("AVAILABLE CAPABILITIES FOR THIS REQUEST", 1)[1].split("STEP SEMANTICS:", 1)[0]
+    assert '"name":"list_files"' in tools and '"name":"read_file"' in tools
+    assert '"name":"write_file"' not in tools and '"name":"agent_info"' not in tools
     context = provider.messages[0][-2].content
     assert "Do not repeat completed work" in context
     payload = json.loads(context.split("\n", 1)[1])
@@ -335,9 +335,11 @@ def result_input(dispatch, request, result, **updates):
 
 
 def test_create_plan_and_no_plan_have_distinct_terminal_semantics():
-    ctrl = CortexController(20)
+    ctrl = CortexController(20, planning_capabilities=PlanningCapabilities(available_tools=("read_file",)))
     dispatch, request = authorize(ctrl)
-    plan = ExecutionPlan(plan_id="fresh", steps=(ExecutionStep(step_id="s", title="Work"),))
+    plan = ExecutionPlan(plan_id=f"{request.identity.execution_id}:plan", available_tools=("read_file",),
+                         steps=(ExecutionStep(step_id="s", title="Work", description="Inspect files",
+                                              primary_tool="read_file"),))
     accepted = ctrl.decide(result_input(dispatch, request, PlannerResult(
         outcome=PlannerOutcome.EXECUTION_PLAN, request_id=request.request_id, proposed_plan=plan,
     )))
@@ -425,6 +427,7 @@ def test_clarification_pause_resume_controller_lifecycle():
         steps=(ExecutionStep(
             step_id="inspect",
             title="Inspect the clarified target",
+            description="Read the clarified target and report findings",
             primary_tool="read_file",
         ),),
     )

@@ -43,6 +43,7 @@ JsonValue = dict[str, Any] | list[Any] | str | int | float | bool | None
 StepIdList = tuple[str, ...]
 MessageList = tuple[str, ...]
 ConstraintList = tuple[str, ...]
+MAX_PLANNER_DIRECT_RESPONSE_CHARS = 4000
 
 class ImmutableProtocolModel(BaseModel):
     """Base class for frozen, serialization-friendly protocol model contracts.
@@ -759,6 +760,14 @@ class PlannerProgressProjection(ImmutableProtocolModel):
     omitted_action_group_count: int = Field(default=0, ge=0)
 
 
+class PlanningFeedback(ImmutableProtocolModel):
+    """Controller-owned structural defect data for one planning episode."""
+
+    source: Literal["structural_validation"] = "structural_validation"
+    code: Literal["invalid_output"] = "invalid_output"
+    message: str = Field(min_length=1, max_length=240)
+
+
 class PlanningRequest(ImmutableProtocolModel):
     """Durable Controller authorization. Snapshots never authorize execution.
 
@@ -774,6 +783,7 @@ class PlanningRequest(ImmutableProtocolModel):
     planner_route: Literal["conversation", "info", "action", "clarify"] | None = None
     context: ExecutionContext
     capabilities: PlanningCapabilities
+    feedback: PlanningFeedback | None = None
     sequence: int = Field(ge=1)
     created_at_utc: datetime
     base_plan: ExecutionPlan | None = None
@@ -794,6 +804,8 @@ class PlanningRequest(ImmutableProtocolModel):
     def validate_operation(self):
         if self.attempt > self.max_attempts:
             raise ValueError("planning attempt exceeds episode budget")
+        if self.feedback is not None and self.attempt == 1:
+            raise ValueError("planning feedback requires a rejected prior attempt")
         if self.created_at_utc.tzinfo is None:
             raise ValueError("planning request creation time must be timezone aware")
         if self.operation == PlanningOperation.CREATE:
@@ -824,7 +836,7 @@ class PlannerResult(ImmutableProtocolModel):
     planner_route: Literal["conversation", "info", "action", "clarify"] | None = None
     proposed_plan: ExecutionPlan | None = None
     message: str = ""
-    direct_response_content: str | None = Field(default=None, min_length=1, max_length=4000)
+    direct_response_content: str | None = Field(default=None, min_length=1, max_length=MAX_PLANNER_DIRECT_RESPONSE_CHARS)
     failure_category: PlanningFailureCategory | None = None
 
     @model_validator(mode="after")
@@ -849,7 +861,7 @@ class AcceptedDirectResponse(ImmutableProtocolModel):
 
     execution_id: str = Field(min_length=1)
     request_id: str = Field(min_length=1)
-    content: str = Field(min_length=1, max_length=4000)
+    content: str = Field(min_length=1, max_length=MAX_PLANNER_DIRECT_RESPONSE_CHARS)
 
     @model_validator(mode="after")
     def validate_content(self) -> "AcceptedDirectResponse":

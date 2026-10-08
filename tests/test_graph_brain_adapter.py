@@ -149,7 +149,8 @@ def test_graph_brain_execution_with_injected_planner_result():
                 outcome=PlannerOutcome.EXECUTION_PLAN,
                 request_id=request_id,
                     proposed_plan=ExecutionPlan(
-                        plan_id="p1", steps=(ExecutionStep(step_id="s1", title="Read the file"),),
+                        plan_id="p1", steps=(ExecutionStep(step_id="s1", title="Read the file",
+                            description="Read the requested file", primary_tool="read_file"),),
                         available_tools=("read_file",),
                     ),
             )}

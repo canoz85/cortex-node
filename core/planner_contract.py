@@ -3,6 +3,7 @@
 from enum import Enum
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, create_model, model_validator
+from core.protocol.models import MAX_PLANNER_DIRECT_RESPONSE_CHARS
 
 
 class PlannerProposalResultType(str, Enum):
@@ -38,6 +39,7 @@ class PlannerProposal(BaseModel):
         default="",
         description=(
             "For NEEDS_INPUT, the concrete non-empty question to ask the user. "
+            f"For NO_PLAN_REQUIRED, the direct answer, at most {MAX_PLANNER_DIRECT_RESPONSE_CHARS} characters. "
             "For other result variants, optional explanatory text."
         ),
     )
@@ -54,6 +56,10 @@ class PlannerProposal(BaseModel):
             PlannerProposalResultType.PLANNING_FAILED,
         } and not self.message.strip():
             raise ValueError(f"{self.result.value} requires a non-empty message")
+        if self.result == PlannerProposalResultType.NO_PLAN_REQUIRED:
+            # The variant's answer has the same bound as the downstream result.
+            if len(self.message.strip()) > MAX_PLANNER_DIRECT_RESPONSE_CHARS:
+                raise ValueError(f"NO_PLAN_REQUIRED message exceeds the {MAX_PLANNER_DIRECT_RESPONSE_CHARS}-character limit")
         return self
 
 

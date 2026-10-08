@@ -4,8 +4,11 @@ from pydantic import ValidationError
 from core.planner_contract import PlannerProposal, PlannerProposalResultType
 from core.protocol.enums import PlannerOutcome, PlanningFailureCategory, PlanningOperation, StepStatus
 from core.protocol.models import ExecutionPlan, ExecutionStep, PlanningRequest, PlannerResult
+from core.planner_validation import (
+    MAX_PROPOSED_STEPS, PlanValidationError, authorized_plan_tools,
+    validate_execution_plan, validate_proposed_step_count,
+)
 
-MAX_PROPOSED_STEPS = 4
 def planner_failure(
     request_id: str, category: PlanningFailureCategory, message: str, *,
     route: str | None = None,
@@ -16,81 +19,35 @@ def planner_failure(
     )
 
 
-def _validate_graph(step_ids: tuple[str, ...], dependencies: dict[str, tuple[str, ...]]) -> None:
-    known = set(step_ids)
-    for step_id, refs in dependencies.items():
-        if len(refs) != len(set(refs)):
-            raise ValueError(f"step '{step_id}' contains duplicate dependencies")
-        for ref in refs:
-            if ref not in known:
-                raise ValueError(f"step '{step_id}' references unknown dependency '{ref}'")
-            if ref == step_id:
-                raise ValueError(f"step '{step_id}' cannot depend on itself")
-    visiting: set[str] = set()
-    visited: set[str] = set()
-
-    def visit(step_id: str) -> None:
-        if step_id in visiting:
-            raise ValueError("proposed step dependency graph is cyclic")
-        if step_id in visited:
-            return
-        visiting.add(step_id)
-        for ref in dependencies[step_id]:
-            visit(ref)
-        visiting.remove(step_id)
-        visited.add(step_id)
-
-    for step_id in step_ids:
-        visit(step_id)
-
-
 def normalize_planner_proposal(
     content: object, planner_input: PlanningRequest, *, route: str,
 ) -> PlannerResult:
     """Validate a proposal and convert it to the existing PlannerResult path."""
     try:
-        proposal = PlannerProposal.model_validate(content)
+        proposal = PlannerProposal.model_validate(
+            content.model_dump() if isinstance(content, PlannerProposal) else content,
+        )
     except (ValidationError, TypeError, ValueError, AttributeError) as exc:
         return planner_failure(planner_input.request_id, PlanningFailureCategory.INVALID_OUTPUT,
                                f"Planner output is invalid ({type(exc).__name__}).", route=route)
 
-    if proposal.result == PlannerProposalResultType.NO_PLAN_REQUIRED:
-        semantic_content = proposal.message.strip() or None
-        return PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=planner_input.request_id,
-                             planner_route=route,
-                             message=semantic_content or "No execution plan required.",
-                             direct_response_content=semantic_content)
-    if proposal.result == PlannerProposalResultType.NEEDS_INPUT:
-        return PlannerResult(outcome=PlannerOutcome.CLARIFICATION_REQUIRED, request_id=planner_input.request_id,
-                             planner_route=route,
-                             message=proposal.message.strip())
-    if proposal.result == PlannerProposalResultType.PLANNING_FAILED:
-        return planner_failure(planner_input.request_id, PlanningFailureCategory.UNPLANNABLE,
-                               proposal.message, route=route)
-
     try:
-        if not proposal.steps:
-            raise ValueError("PLAN_PROPOSED requires at least one step")
-        if len(proposal.steps) > MAX_PROPOSED_STEPS:
-            raise ValueError(f"PLAN_PROPOSED exceeds the {MAX_PROPOSED_STEPS}-step limit")
-        ids = tuple(step.step_id.strip() for step in proposal.steps)
-        if len(ids) != len(set(ids)):
-            raise ValueError("proposed step ids must be unique")
+        if proposal.result == PlannerProposalResultType.NO_PLAN_REQUIRED:
+            semantic_content = proposal.message.strip()
+            return PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=planner_input.request_id,
+                                 planner_route=route, message=semantic_content,
+                                 direct_response_content=semantic_content)
+        if proposal.result == PlannerProposalResultType.NEEDS_INPUT:
+            return PlannerResult(outcome=PlannerOutcome.CLARIFICATION_REQUIRED, request_id=planner_input.request_id,
+                                 planner_route=route, message=proposal.message.strip())
+        if proposal.result == PlannerProposalResultType.PLANNING_FAILED:
+            return planner_failure(planner_input.request_id, PlanningFailureCategory.UNPLANNABLE,
+                                   proposal.message, route=route)
+
+        validate_proposed_step_count(proposal.steps)
         dependencies = {step.step_id.strip(): tuple(ref.strip() for ref in step.dependencies)
                         for step in proposal.steps}
-        _validate_graph(ids, dependencies)
-        available = set(planner_input.capabilities.available_tools)
-        unavailable = set(planner_input.capabilities.unavailable_tools)
-        for step in proposal.steps:
-            if not step.title.strip() or not step.description.strip():
-                raise ValueError("proposed step titles and descriptions must be non-empty")
-            tool = step.primary_tool.strip()
-            if not tool:
-                raise ValueError("primary_tool cannot be empty")
-            if tool in unavailable:
-                raise ValueError(f"primary_tool '{tool}' is unavailable")
-            if tool not in available:
-                raise ValueError(f"primary_tool '{tool}' is unknown")
+        available = authorized_plan_tools(planner_input, route=route)
         revising = planner_input.operation == PlanningOperation.REVISE
         plan = ExecutionPlan(
             plan_id=planner_input.base_plan_id if revising else f"{planner_input.identity.execution_id}:plan",
@@ -98,19 +55,23 @@ def normalize_planner_proposal(
             objective=proposal.objective.strip() or planner_input.context.user_request,
             available_tools=tuple(sorted(available)),
             steps=tuple(ExecutionStep(
-                step_id=step.step_id.strip(), 
+                step_id=step.step_id.strip(),
                 title=step.title.strip(),
                 description=step.description.strip(),
                 primary_tool=step.primary_tool.strip(),
-                status=StepStatus.PENDING, 
+                status=StepStatus.PENDING,
                 attempt=0,
                 depends_on_step_ids=dependencies[step.step_id.strip()],
             ) for step in proposal.steps),
         )
+        plan = validate_execution_plan(plan, planner_input, route=route)
         return PlannerResult(outcome=PlannerOutcome.EXECUTION_PLAN,
                              request_id=planner_input.request_id, planner_route=route,
                              proposed_plan=plan,
                              message=proposal.message or "Plan generated successfully.")
-    except (ValueError, TypeError, AttributeError) as exc:
+    except ValidationError as exc:
+        return planner_failure(planner_input.request_id, PlanningFailureCategory.INVALID_OUTPUT,
+                               f"Planner proposal conversion is invalid ({type(exc).__name__}).", route=route)
+    except PlanValidationError as exc:
         return planner_failure(planner_input.request_id, PlanningFailureCategory.INVALID_OUTPUT,
                                f"Planner proposal is invalid: {exc}", route=route)

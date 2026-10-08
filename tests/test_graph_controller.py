@@ -22,6 +22,7 @@ from core.protocol.models import (
     ExecutionState,
     ExecutionStep,
     PlannerResult,
+    PlanningCapabilities,
     ProtocolVisibleState,
     RetryMetadata,
     WorkingState,
@@ -183,7 +184,8 @@ def test_finalizer_failure_is_observable_and_never_falls_back_to_brain_answer():
 
 def test_non_terminal_controller_decision_does_not_invoke_finalizer():
     observer = ObservingFinalizer()
-    node = create_controller_node(finalizer=observer)
+    node = create_controller_node(finalizer=observer,
+        planning_capabilities=PlanningCapabilities(available_tools=("read_file",)))
     initial = _state()
     authorized = node(initial)
     request = authorized["execution_state"].protocol_visible.planning_request
@@ -193,7 +195,9 @@ def test_non_terminal_controller_decision_does_not_invoke_finalizer():
             request_id=request.request_id,
             proposed_plan=ExecutionPlan(
                 plan_id="p1",
-                steps=(ExecutionStep(step_id="s1", title="Work"),),
+                available_tools=("read_file",),
+                steps=(ExecutionStep(step_id="s1", title="Work",
+                    description="Read requested evidence", primary_tool="read_file"),),
             ),
         ),
     })
@@ -223,7 +227,9 @@ def test_successful_planning_retry_is_consumed_before_brain_without_redispatch()
                 request_id=request.request_id,
                 proposed_plan=ExecutionPlan(
                     plan_id="retry-plan",
-                    steps=(ExecutionStep(step_id="s1", title="Get current time"),),
+                    available_tools=("current_time",),
+                    steps=(ExecutionStep(step_id="s1", title="Get current time",
+                        description="Report current time", primary_tool="current_time"),),
                 ),
             )
         return {"planner_result": result}
@@ -238,7 +244,8 @@ def test_successful_planning_retry_is_consumed_before_brain_without_redispatch()
 
     ports = GraphWorkerRuntimePorts()
     ports.bind_nodes(planner=planner, brain=brain)
-    node = create_controller_node(worker_ports=ports)
+    node = create_controller_node(worker_ports=ports,
+        planning_capabilities=PlanningCapabilities(available_tools=("current_time",)))
 
     first = node(_state())
     first_state = {**_state(), **first}

@@ -29,6 +29,25 @@ def render_exact_collections(request: FinalizationRequest) -> str | None:
     return "\n\n".join(blocks)
 
 
+def render_exact_collection_answer(request: FinalizationRequest) -> str | None:
+    """Compose exact blocks with all other accepted step conclusions.
+
+    A collection-bearing step keeps its existing deterministic presentation.
+    Other steps retain their accepted semantic text, in acceptance order. No
+    model is needed to regenerate either the collections or these conclusions.
+    """
+    exact = render_exact_collections(request)
+    if exact is None:
+        return None
+
+    semantics = (
+        result.semantic_content
+        for result in request.accepted_step_results
+        if result.completion_evidence.exact_collection is None
+    )
+    return "\n\n".join((exact, *semantics))
+
+
 def _format_member(item) -> str:
     if isinstance(item, str):
         return item

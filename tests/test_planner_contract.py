@@ -54,7 +54,7 @@ def test_proposal_extra_fields_are_forbidden():
 def test_system_policy_exposes_only_semantic_proposal_outcomes():
     prompt = PLANNER_SYSTEM_PROMPT.format(
         route="info",
-        available_tools="- list_files",
+        available_capabilities='[{"name":"list_files"}]',
         capability_guidance="",
     )
 

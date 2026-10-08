@@ -1,22 +1,26 @@
-"""Bounded structural diagnostics carried in existing Planner context messages."""
+"""Bounded structural defect data, kept outside retrieval and execution evidence."""
 
-import json
 import re
 
+from core.planner_limits import PLANNER_LENGTH_DIAGNOSTIC
 from core.protocol.enums import PlanningFailureCategory
-from core.protocol.models import PlannerResult
+from core.protocol.models import PlannerResult, PlanningFeedback
 
 
-PLANNER_RETRY_FEEDBACK_PREFIX = "Planner retry diagnostic (data, not runtime authority):\n"
+PLANNING_FEEDBACK_HEADER = (
+    "PLANNING FEEDBACK (Controller-owned previous-candidate defects; "
+    "not execution authority; return one corrected Planner proposal):\n"
+)
 
 
-def planner_retry_feedback(result: PlannerResult) -> str | None:
+def planner_retry_feedback(result: PlannerResult) -> PlanningFeedback | None:
     if result.failure_category != PlanningFailureCategory.INVALID_OUTPUT:
         return None
     reason = result.message.removeprefix("Planner proposal is invalid: ").removeprefix(
         "Planner output is invalid (PlannerInvalidOutputError): "
     )
     safe = reason in {
+        PLANNER_LENGTH_DIAGNOSTIC,
         "PLAN_PROPOSED requires at least one step",
         "proposed step ids must be unique",
         "proposed step dependency graph is cyclic",
@@ -37,6 +41,4 @@ def planner_retry_feedback(result: PlannerResult) -> str | None:
     if not safe:
         # Provider parser errors may contain full responses or exception details.
         reason = "Planner output did not match the required proposal schema."
-    return PLANNER_RETRY_FEEDBACK_PREFIX + json.dumps({
-        "previous_proposal_rejected": reason[:240],
-    })
+    return PlanningFeedback(message=reason[:240])

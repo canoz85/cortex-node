@@ -2,7 +2,7 @@
 
 from typing import Protocol
 
-from core.finalizer_exact import render_exact_collections
+from core.finalizer_exact import render_exact_collection_answer, render_exact_collections
 from core.protocol.enums import ExecutionStatus, StepStatus
 from core.protocol.models import (
     ExecutionSummary,
@@ -74,7 +74,7 @@ class SummaryFinalAnswerRenderer:
     ) -> str:
         if request.accepted_direct_response is not None:
             return request.accepted_direct_response.content
-        exact = render_exact_collections(request)
+        exact = render_exact_collection_answer(request)
         if exact is not None:
             return exact
         return summary.summary_text

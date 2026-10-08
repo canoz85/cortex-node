@@ -44,7 +44,9 @@ class Planner:
         class Provider:
         
             def generate(self, messages):
-                assert "Amber" in messages[-2].content
+                memory_message = next(message.content for message in messages
+                                      if message.content.startswith("PLANNER MEMORY CONTEXT"))
+                assert "Amber" in memory_message
                 if self_planned:
                     return PlannerProposal(
                         result=PlannerProposalResultType.PLAN_PROPOSED,

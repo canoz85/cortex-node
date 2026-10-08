@@ -117,18 +117,22 @@ def _response_value(response) -> tuple[dict, dict]:
 def log_llm_exchange(
     *, worker: str, operation: str, messages, response,
     execution_id: str | None = None, enabled: bool = False,
+    invocation: Mapping | None = None,
 ) -> None:
     """Write one sanitized JSONL record for one completed LLM invocation."""
     try:
         response_value, usage = _response_value(response)
-        record = sanitize_raw_value({
+        record = {
             "execution_id": execution_id,
             "worker": worker,
             "operation": operation,
             "messages": [_message_value(message) for message in messages],
             "response": response_value,
             "usage": usage,
-        })
+        }
+        if invocation is not None:
+            record["invocation"] = dict(invocation)
+        record = sanitize_raw_value(record)
 
         file_path = os.getenv("CORTEX_RAW_LLM_FILE") or "logs/raw_llm.jsonl"
         if file_path:

@@ -48,6 +48,7 @@ from .models import (
 from .completion_identity import (requirement_scope, evidence_identity, plan_validation_identity,
     eligible_records, completion_provenance_records, accepted_step, binding_for)
 from core.planner_revision import RevisionRejection, reconcile_revision
+from core.planner_validation import PlanValidationError, first_ready_step, validate_execution_plan
 from core.planner_progress import build_planner_progress
 from core.planner_feedback import planner_retry_feedback
 from core.brain_batch_policy import validate_read_only_batch, normalized_batch_arguments
@@ -338,6 +339,13 @@ class CortexController:
                             reason=f"revision_rejected:{exc.reason}",
                         )
 
+                try:
+                    plan = validate_execution_plan(
+                        plan, request, route=planner_result.planner_route, reconciled=True,
+                    )
+                except PlanValidationError as exc:
+                    return self._terminate(controller_input.cursor, f"invalid_planner_plan:{exc}")
+
                 if (controller_input.completion_validation_error is not None
                         or any(step.completion_requirement is not None for step in plan.steps)):
                     bindings_valid = all(
@@ -352,16 +360,10 @@ class CortexController:
                             reconciliation_required=True,
                             reason=controller_input.completion_validation_error or "completion_requirement_not_validated")
 
-                next_step = next(
-                    (step for step in plan.steps if step.status == StepStatus.PENDING),
-                        None,
-                    )
+                next_step = self._find_next_executable_step(plan)
 
                 if next_step is None:
-                    return self._complete_execution(
-                        controller_input.cursor,
-                        "Plan contains no executable steps.",
-                    )
+                    return self._terminate(controller_input.cursor, "invalid_planner_plan:plan_has_no_ready_unfinished_step")
 
                 cursor = self._brain_dispatch_cursor(
                     controller_input.cursor,
@@ -405,19 +407,15 @@ class CortexController:
                         PlanningFailureCategory.PROVIDER_FAILURE,
                     } and request.attempt < request.max_attempts):
                     feedback = planner_retry_feedback(planner_result)
-                    retry_context = request.context
-                    if feedback is not None:
-                        retry_context = retry_context.model_copy(update={
-                            "retrieval_messages": (*retry_context.retrieval_messages, feedback),
-                        })
                     retry_request = self._build_planning_request(
                         controller_input, operation=request.operation,
                         planner_route=request.planner_route or planner_result.planner_route,
                         trigger=request.trigger, reason=request.reason,
                         suggested_constraints=request.suggested_constraints,
                         episode_id=request.episode_id, attempt=request.attempt + 1,
-                        context_override=retry_context,
+                        context_override=request.context,
                     )
+                    retry_request = retry_request.model_copy(update={"feedback": feedback})
                     return self._planning_dispatch(
                         controller_input, retry_request, "Retry Planner.",
                     )
@@ -1556,23 +1554,7 @@ class CortexController:
     ) -> ExecutionStep | None:
         """Return the first pending step whose dependencies are completed."""
 
-        completed_step_ids = {
-            step.step_id
-            for step in plan.steps
-            if step.status == StepStatus.COMPLETED
-        }
-
-        for step in plan.steps:
-            if step.status != StepStatus.PENDING:
-                continue
-
-            if all(
-                dependency_id in completed_step_ids
-                for dependency_id in step.depends_on_step_ids
-            ):
-                return step
-
-        return None
+        return first_ready_step(plan)
     
     def _advance_to_next_step(
         self,

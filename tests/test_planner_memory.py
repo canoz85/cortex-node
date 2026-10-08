@@ -194,7 +194,7 @@ def test_planner_consumes_authorized_memory_snapshot_without_graph_injection(rev
     assert received.context.planner_memory_context != state["planner_memory_context"]
     assert state["execution_state"].protocol_visible.planning_request == original_request
     rendered = planning_request_context(received)
-    assert '"planner_memory_context"' in rendered
+    assert '"planner_memory_context"' not in rendered  # Data has its own labeled message.
     assert "current user_request is the active instruction" in rendered
     assert "supersedes conflicting remembered user facts" in rendered
     assert "never an active Controller execution" in rendered
@@ -256,5 +256,7 @@ def test_authorized_memory_is_projected_in_one_scripted_provider_exchange():
     assert provider.messages[-1].content == "Use long answers instead"
     context_message = provider.messages[-2].content
     assert '"recent_history": ["Earlier question"]' in context_message
-    assert '"planner_memory_context"' in context_message
-    assert "Use concise answers" in context_message
+    memory_message = next(message.content for message in provider.messages
+                          if message.content.startswith("PLANNER MEMORY CONTEXT"))
+    assert '"planner_memory_context"' in memory_message
+    assert "Use concise answers" in memory_message

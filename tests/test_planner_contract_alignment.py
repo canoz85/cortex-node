@@ -10,7 +10,7 @@ from ollama._types import ChatRequest
 
 from core.planner import PlannerMessage, PlannerService
 from core.planner_contract import PlannerInvalidOutputError, PlannerProposal
-from core.planner_feedback import PLANNER_RETRY_FEEDBACK_PREFIX, planner_retry_feedback
+from core.planner_feedback import PLANNING_FEEDBACK_HEADER, planner_retry_feedback
 from core.planner_normalization import MAX_PROPOSED_STEPS, normalize_planner_proposal
 from core.planner_provider import LangChainPlannerProvider, _extract_planner_proposal
 from core.protocol.enums import ControllerDecisionType as Decision, PlannerOutcome, PlanningFailureCategory
@@ -52,7 +52,7 @@ def test_prompt_exposes_shared_limit_and_repeated_tool_semantics_without_retry_f
     assert MAX_PROPOSED_STEPS == 4
     assert f"A plan may contain at most {MAX_PROPOSED_STEPS} steps." in messages[0].content
     assert "One logical step may invoke its primary tool repeatedly" in messages[0].content
-    assert all(PLANNER_RETRY_FEEDBACK_PREFIX not in message.content for message in messages)
+    assert all(PLANNING_FEEDBACK_HEADER not in message.content for message in messages)
     assert "write_file" not in messages[0].available_tools
 
 
@@ -150,13 +150,14 @@ def test_real_provider_retry_is_controller_authorized_bounded_and_preserves_cont
     assert len(router.calls) == 1
     assert retrieval_calls == [request.context.user_request] * 2
     first_messages, retry_messages = (record["messages"] for record in requests)
-    assert all(PLANNER_RETRY_FEEDBACK_PREFIX not in item["content"] for item in first_messages)
-    feedback = [item for item in retry_messages if item["content"].startswith(PLANNER_RETRY_FEEDBACK_PREFIX)]
+    assert all(PLANNING_FEEDBACK_HEADER not in item["content"] for item in first_messages)
+    feedback = [item for item in retry_messages if item["content"].startswith(PLANNING_FEEDBACK_HEADER)]
     assert len(feedback) == 1
     assert json.loads(feedback[0]["content"].split("\n")[1]) == {
-        "previous_proposal_rejected": "PLAN_PROPOSED exceeds the 4-step limit",
+        "source": "structural_validation", "code": "invalid_output",
+        "message": "PLAN_PROPOSED exceeds the 4-step limit",
     }
-    assert "Return one corrected Planner proposal." in feedback[0]["content"]
+    assert "return one corrected Planner proposal" in feedback[0]["content"]
     assert [item for item in retry_messages if item not in feedback] == first_messages
     assert requests[0]["format"] == requests[1]["format"]
 
@@ -190,7 +191,7 @@ def test_normalizer_rejection_reaches_retry_provider_once_without_rag():
     assert second.outcome == PlannerOutcome.EXECUTION_PLAN
     assert len(provider.messages) == 2
     feedback = [message for message in provider.messages[1]
-                if message.content.startswith(PLANNER_RETRY_FEEDBACK_PREFIX)]
+                if message.content.startswith(PLANNING_FEEDBACK_HEADER)]
     assert len(feedback) == 1
     assert "PLAN_PROPOSED exceeds the 4-step limit" in feedback[0].content
     assert provider.messages[1][-1].content == request.context.user_request
@@ -204,9 +205,9 @@ def test_retry_feedback_passes_structural_errors_and_excludes_exception_details(
     diagnostic = planner_retry_feedback(failure(
         "Planner proposal is invalid: proposed step dependency graph is cyclic",
     ))
-    assert "dependency graph is cyclic" in diagnostic
+    assert "dependency graph is cyclic" in diagnostic.message
     diagnostic = planner_retry_feedback(failure(
         "Planner output is invalid (PlannerInvalidOutputError): Traceback:\nprivate rejected proposal",
     ))
-    assert "Traceback" not in diagnostic and "private rejected proposal" not in diagnostic
-    assert len(diagnostic) < 350
+    assert "Traceback" not in diagnostic.message and "private rejected proposal" not in diagnostic.message
+    assert len(diagnostic.message) <= 240

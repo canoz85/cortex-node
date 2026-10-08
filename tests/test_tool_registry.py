@@ -100,8 +100,8 @@ def test_planner_projects_controller_authorization_not_registered_inventory():
     result = planner.run(decision.planning_request)
     assert result.outcome == PlannerOutcome.EXECUTION_PLAN
     assert result.proposed_plan.available_tools == ("read_file",)
-    assert "- read_file" in provider.messages[0][0].content
-    assert "- find_files" not in provider.messages[0][0].content
+    assert '"name":"read_file"' in provider.messages[0][0].content
+    assert '"name":"find_files"' not in provider.messages[0][0].content
 
 
 def test_brain_binds_only_authorized_tools_from_registry():

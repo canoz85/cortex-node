@@ -128,9 +128,11 @@ class Planner:
             proposed_plan=ExecutionPlan(
                 plan_id="driver-plan",
                 objective="Read one file",
+                available_tools=request.capabilities.available_tools,
                 steps=(ExecutionStep(
                     step_id="read",
                     title="Read target",
+                    description="Read the requested file",
                     primary_tool="read_file",
                 ),),
             ),
@@ -196,7 +198,8 @@ class FinalizerWorker:
 def test_complete_non_graph_lifecycle_is_controller_authorized():
     trace = AuthorizationTrace()
     controller = TracedController(
-        CortexController(max_reasoning_steps=10),
+        CortexController(max_reasoning_steps=10,
+            planning_capabilities=PlanningCapabilities(available_tools=("read_file",))),
         trace,
     )
     brain = Brain(trace)

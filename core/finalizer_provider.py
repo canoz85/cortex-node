@@ -5,7 +5,7 @@ import json
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.debug import log_llm_exchange
-from core.finalizer_exact import render_exact_collections
+from core.finalizer_exact import render_exact_collection_answer
 from core.protocol.models import ExecutionSummary, FinalizationRequest
 from core.logging.live_status import add_response_usage, current_live_status
 
@@ -170,7 +170,7 @@ class LangChainFinalAnswerRenderer:
         if request.accepted_direct_response is not None:
             return request.accepted_direct_response.content
 
-        exact = render_exact_collections(request)
+        exact = render_exact_collection_answer(request)
         if exact is not None:
             return exact
 

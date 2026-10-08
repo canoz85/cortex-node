@@ -9,7 +9,7 @@ from core.protocol.models import (
     CoverageRequirement, CoverageAssessment, ExecutionStep, ExecutionPlan,
     ExecutionIdentity, ExecutionCursor, ExecutionContext, ControllerInput,
     BrainOutcome, PlannerResult, ToolExecutionRecord, ToolResult, ExecutionState,
-    ProtocolVisibleState, WorkingState, StepCompletionEvidence,
+    ProtocolVisibleState, WorkingState, StepCompletionEvidence, PlanningCapabilities,
 )
 from core.protocol.enums import BrainOutcomeKind, PlannerOutcome, StepStatus, ExecutionPhase
 
@@ -78,7 +78,11 @@ def evaluate(service, ctx, frozen=(), previous=None):
 
 
 def planner_context(ctx, plan):
-    controller = CortexController(20)
+    plan = plan.model_copy(update={"available_tools": ("read_file",), "steps": tuple(
+        step.model_copy(update={"primary_tool": "read_file", "description": "Produce test evidence"})
+        for step in plan.steps)})
+    controller = CortexController(20,
+        planning_capabilities=PlanningCapabilities(available_tools=("read_file",)))
     initial = ControllerInput(identity=ctx.identity, cursor=ExecutionCursor(), context=ctx.context)
     dispatch = controller.decide(initial)
     request = dispatch.planning_request
@@ -274,11 +278,13 @@ def test_acceptance_binding_survives_recovery_before_resolution():
     provider = FakeProvider()
     provider.items = None
     ctx = context()
-    pending = ctx.active_step.model_copy(update={"status": StepStatus.PENDING})
-    plan = ctx.active_plan.model_copy(update={"steps": (pending,)})
+    pending = ctx.active_step.model_copy(update={"status": StepStatus.PENDING,
+        "primary_tool": "read_file", "description": "Produce test evidence"})
+    plan = ctx.active_plan.model_copy(update={"steps": (pending,), "available_tools": ("read_file",)})
     state = ExecutionState(protocol_visible=ProtocolVisibleState(identity=ctx.identity,
         cursor=ExecutionCursor()))
-    node = create_controller_node(completion_service=CompletionService({"fake": provider}))
+    node = create_controller_node(completion_service=CompletionService({"fake": provider}),
+        planning_capabilities=PlanningCapabilities(available_tools=("read_file",)))
     authorized = node({"execution_state": state})
     request = authorized["execution_state"].protocol_visible.planning_request
     result = node({**authorized, "planner_result": PlannerResult(

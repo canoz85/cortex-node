@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from core.protocol.enums import PlanningOperation, StepStatus
 from core.protocol.models import ExecutionPlan, ExecutionStep, PlanningRequest
+from core.planner_validation import PlanValidationError, authorized_completed_steps
 
 
 @dataclass(frozen=True)
@@ -53,18 +54,12 @@ def reconcile_revision(
     if proposal.plan_id != accepted_plan.plan_id:
         raise RevisionRejection("revision_plan_id_mismatch")
 
+    try:
+        completed = authorized_completed_steps(request, accepted_plan)
+    except PlanValidationError as exc:
+        raise RevisionRejection(str(exc)) from exc
     completed_ids = set(request.completed_step_ids)
     base_by_id = {step.step_id: step for step in accepted_plan.steps}
-    accepted_completed_ids = {
-        step.step_id for step in accepted_plan.steps if step.status == StepStatus.COMPLETED
-    }
-    if (completed_ids != accepted_completed_ids
-            or completed_ids != {step.step_id for step in request.completed_steps}
-            or any(step.step_id not in base_by_id or base_by_id[step.step_id] != step
-                   for step in request.completed_steps)
-            or any(base_by_id[step_id].status != StepStatus.COMPLETED
-                   for step_id in completed_ids)):
-        raise RevisionRejection("completed_work_snapshot_mismatch")
 
     proposed_by_id = {step.step_id: step for step in proposal.steps}
     if len(proposed_by_id) != len(proposal.steps):
@@ -79,7 +74,6 @@ def reconcile_revision(
     if _remaining_shape(proposal, completed_ids) == _remaining_shape(accepted_plan, completed_ids):
         raise RevisionRejection("ineffective_revision")
 
-    completed = tuple(base_by_id[step_id] for step_id in request.completed_step_ids)
     reconciled_steps = (*completed, *remaining)
     ids = {step.step_id for step in reconciled_steps}
     if len(ids) != len(reconciled_steps):
