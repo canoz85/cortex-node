@@ -1,6 +1,6 @@
 """Explicit executable inventory. Lookup never grants execution authority."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Iterable, Literal
 
@@ -79,102 +79,102 @@ class ToolDefinition:
 # definition is disabled unless its deployment default is deliberately enabled.
 TOOL_DEFINITIONS = (
     ToolDefinition("list_files", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
-        "List a workspace directory or identify a file", ("path: optional workspace path, defaults to .",),
+        "List immediate workspace children or identify a file", (),
         ("path, entries: immediate child names; is_file",), ("Not recursive; no file content or sizes",))),
     ToolDefinition("read_file", "workspace", enabled_by_default=True, args_schema=ReadFileRequest,
         planning=CapabilitySemantics(
-            "Read workspace text content", ("path: required workspace text file", "offset/limit: optional character range"),
-            ("path, content, total_chars, offset, read_chars, is_truncated",),
-            ("UTF-8 text only", "total_chars counts decoded characters, not byte size"),
+            "Read workspace text", ("path: required workspace text file",),
+            ("content; total_chars even on partial reads",),
+            ("UTF-8 only; total_chars counts decoded characters, not byte size",),
             pagination="offset/limit in characters; continue truncated content")),
     ToolDefinition("write_file", "workspace", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
-        "Write workspace text content", ("path and content: required", "overwrite: optional, defaults to true"),
-        ("path, characters_written, created/modified artifact",),
-        ("Creates parent directories; replaces existing content when overwrite is true", "Write receipt does not independently verify content"))),
+        "Write workspace text", ("path and content: required",),
+        ("path, characters_written",),
+        ("Creates parents; replaces existing content by default", "Write receipt does not independently verify content"))),
     ToolDefinition("make_directory", "workspace", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
         "Create a workspace directory", ("path: required workspace directory",),
-        ("path, creation receipt",), ("Creates missing parents; existing directories are allowed",))),
+        ("path, creation receipt",), ("Creates parents; existing directories allowed",))),
     ToolDefinition("read_knowledge_file", "general", enabled_by_default=True, requires_knowledge=True,
         planning=CapabilitySemantics("Read a knowledge-folder text document", ("path: required knowledge-relative file",),
-            ("path, content",), ("Knowledge folder only; not live workspace evidence",))),
+            ("content",), ("Knowledge folder only; not live workspace evidence",))),
     ToolDefinition("run_python", "workspace", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
-        "Run an existing workspace Python script", ("path: required .py script", "args and timeout_seconds: optional"),
-        ("exit_code, stdout, stderr",), ("May have script-defined side effects", "Process success does not prove the requested semantic outcome"))),
+        "Run an existing workspace Python script", ("path: required .py script",),
+        ("exit_code, stdout, stderr",), ("Script-defined side effects; exit success does not prove task success",))),
     ToolDefinition("install_package", "workspace", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
-        "Install a package into the active Python environment", ("package_name: required pip package specifier", "timeout_seconds: optional"),
-        ("package, command, bounded pip stdout on success",), ("Changes the active interpreter environment; needs package access",))),
+        "Install into the active Python environment", ("package_name: required pip specifier",),
+        ("package, bounded pip stdout",), ("Changes interpreter environment; needs package access",))),
     ToolDefinition("git_status", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
-        "Inspect workspace repository status", (), ("exit_code, stdout/stderr: short status and branch",),
+        "Inspect repository status", (), ("short status and branch",),
         ("Requires a Git repository; no file content",))),
     ToolDefinition("git_diff", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
-        "Inspect unstaged repository changes", ("path: optional file restriction",),
-        ("exit_code, stdout/stderr: unstaged textual diff",), ("Does not include staged or untracked file content",))),
+        "Read unstaged textual diff", (),
+        ("unstaged patch text",), ("No staged or untracked file content",))),
     ToolDefinition("git_log", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
-        "Inspect recent commit history", ("limit: optional commit count",),
-        ("exit_code, stdout/stderr: commit hash, date, author, subject",), ("Commit count clamped to 1..50; no file content",))),
+        "Inspect recent commit history", (),
+        ("commit hash, date, author, subject",), ("1..50 commits; no file content",))),
     ToolDefinition("git_show", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
-        "Inspect a Git revision summary", ("revision: optional, defaults to HEAD",),
-        ("exit_code, stdout/stderr: revision statistics and summary",), ("Uses --stat, not full file content or patch evidence",))),
+        "Inspect revision summary (default HEAD)", (),
+        ("revision statistics and summary",), ("--stat only; no patch or full file content",))),
     ToolDefinition("agent_info", "general", enabled_by_default=True, planning=CapabilitySemantics(
-        "Inspect CortexNode runtime configuration", (), ("model, workspace, context_window, max_steps, token_usage",),
-        ("Configuration and last known usage, not workspace content",))),
+        "Inspect runtime configuration", (), ("model, workspace, context_window, max_steps, token_usage",),
+        ("Configuration/last known usage, not workspace content",))),
     ToolDefinition("token_usage", "general", enabled_by_default=True, planning=CapabilitySemantics(
-        "Inspect recorded token usage", (), ("Recorded prompt/completion/total token counts",),
-        ("Only recorded runtime usage; may be unavailable before any response",))),
+        "Inspect recorded token usage", (), ("prompt/completion/total token counts",),
+        ("May be unavailable before any response",))),
     ToolDefinition("current_time", "general", enabled_by_default=True, planning=CapabilitySemantics(
-        "Read the local system clock", ("format: optional strftime format",), ("iso, formatted, format",),
+        "Read the local system clock", (), ("iso, formatted",),
         ("Local system time; no timezone conversion",))),
     ToolDefinition("rag_search", "general", enabled_by_default=True, planning=CapabilitySemantics(
-        "Search indexed knowledge", ("query: required", "top_k: optional result count"),
-        ("Ranked knowledge chunks and source context",), ("Retrieved context can be stale; not live workspace discovery",))),
+        "Search indexed knowledge", ("query: required",),
+        ("ranked chunks and sources",), ("Can be stale; not live workspace discovery",))),
     ToolDefinition("rag_refresh_index", "general", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
         "Rebuild the in-memory knowledge index", (), ("chunks_indexed",),
-        ("Changes the knowledge index; does not modify source documents",))),
+        ("Changes index, not source documents",))),
     ToolDefinition("query_abap_table", "sap", enabled_by_default=True, planning=CapabilitySemantics(
-        "Query the current SAP table stub", ("table_name: required", "fields, where_clause, max_rows: optional"),
-        ("table_name, fields, row_count, data: mock record collection",),
-        ("Placeholder: no live SAP connection; filters are not executed against SAP",))),
+        "Query SAP table stub", ("table_name: required",),
+        ("mock record collection",),
+        ("Placeholder: no live SAP connection or actual filtering",))),
     ToolDefinition("execute_abap_report", "sap", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
-        "Invoke the current ABAP report stub", ("report_name: required", "parameters: optional mapping"),
-        ("report_name, parameters_used, mock output, row_count",), ("Placeholder: no actual report execution or live SAP effects",))),
+        "Invoke ABAP report stub", ("report_name: required",),
+        ("mock report output",), ("Placeholder: no actual execution or live SAP effects",))),
     ToolDefinition("lookup_material", "sap", enabled_by_default=True, planning=CapabilitySemantics(
-        "Look up material data through the current SAP stubs", ("material_id: required", "include_plant_data: optional"),
-        ("material_id, material_data, optional plant_data collection",), ("Placeholder: cannot establish live material facts",))),
+        "Look up SAP material stub", ("material_id: required",),
+        ("mock material/plant data",), ("Placeholder: cannot establish live material facts",))),
     ToolDefinition("get_report_data", "sap", enabled_by_default=True, planning=CapabilitySemantics(
-        "Obtain the current report-export stub data", ("report_name: required", "output_format and parameters: optional"),
-        ("report_name, output_format, row_count, data: mock record collection",),
+        "Read report-export stub", ("report_name: required",),
+        ("mock record collection",),
         ("Placeholder: no live report or exported file; csv/xlsx labels do not create files",))),
     ToolDefinition("scada_status", "general", enabled_by_default=True, planning=CapabilitySemantics(
         "Report SCADA integration availability", (), ("planned_modules",),
         ("Placeholder: no live telemetry or device status",))),
     ToolDefinition("describe_image", "general", enabled_by_default=True, planning=CapabilitySemantics(
-        "Describe a workspace image with the local vision model", ("image_path: required workspace image file",),
-        ("path, model-generated description",), ("Requires local llava; interpretation is not deterministic image measurement",))),
+        "Describe a workspace image", ("image_path: required workspace image file",),
+        ("model-generated description",), ("Requires local llava; not deterministic measurement",))),
     ToolDefinition("run_comfy_workflow", "comfy", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
-        "Submit image generation using the fixed workflow", ("positive_prompt, seed, steps, cfg, width, height: required", "negative_prompt, filename_prefix, client_id, prompt_id: optional"),
-        ("prompt_id, async job identity/status, submission receipt",),
-        ("Fixed template and installed checkpoint required", "Submission is not completion; poll history for outputs"), async_kind="submission")),
+        "Submit image generation with fixed workflow", ("positive_prompt, seed, steps, cfg, width, height: required",),
+        ("prompt_id, job status, submission receipt",),
+        ("Needs fixed template/installed checkpoint", "Submission is not completion; poll history for outputs"), async_kind="submission")),
     ToolDefinition("download_comfy_output_image", "comfy", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
-        "Download a generated image into the workspace", ("filename: required server image name", "subfolder, folder_type, save_path: optional"),
-        ("message: workspace save receipt",), ("Needs an output identity discovered from generation history",))),
+        "Download generated image into workspace", ("filename: required server image name",),
+        ("workspace save receipt",), ("Needs output identity from generation history",))),
     ToolDefinition("get_comfy_history", "comfy", enabled_by_default=True, planning=CapabilitySemantics(
-        "Observe a submitted generation and discover its outputs", ("prompt_id: required submitted job identity",),
-        ("async job status/terminality, completed, filenames collection, outputs, primary_filename",),
-        ("May still be queued/running; history absence is not proof of success", "Does not download outputs"), async_kind="poll")),
+        "Observe submitted generation and discover outputs", ("prompt_id: required submitted job identity",),
+        ("job status/completed, filenames collection, outputs",),
+        ("May be queued/running; absent history is not success", "Does not download outputs"), async_kind="poll")),
     ToolDefinition("find_files", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
-        "Discover workspace file paths", ("path/pattern/recursive: optional scope, basename glob and recursion", "offset/limit: optional page"),
-        ("files: sorted workspace-relative path collection", "count, offset, limit, has_more, truncation"),
-        ("Does not establish file content or byte size", "Case-sensitive basename glob; excludes file links and does not traverse directory links", "limit must be 1..100"),
+        "Discover workspace paths by basename glob, optionally recursive", (),
+        ("files: sorted workspace-relative path collection",),
+        ("No file content or sizes", "Case-sensitive; excludes file/directory links", "limit must be 1..100"),
         pagination="offset/limit over sorted paths")),
     ToolDefinition("search_text", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
-        "Discover matching workspace text lines", ("query: required literal text or regex", "path, file_pattern, regex, recursive, offset, limit: optional"),
-        ("matches: path, line_number, text, text_start_column, text_truncated", "count, offset, limit, has_more, truncation"),
-        ("Case-sensitive UTF-8 search; invalid bytes replaced", "Matching snippets can truncate; not full-file content", "limit must be 1..100"),
+        "Search workspace text and discover matching paths, optionally recursive", ("query: required literal text or regex",),
+        ("matches: path, line_number, text snippet",),
+        ("Case-sensitive UTF-8; invalid bytes replaced", "Snippets can truncate; not full-file content", "limit must be 1..100"),
         pagination="offset/limit over matches ordered by path then line")),
     ToolDefinition("git_changed_files", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
-        "Discover changed repository paths", ("offset/limit: optional page",),
-        ("changed_files: path/status collection with staged and worktree flags", "branch, upstream, count and continuation metadata"),
-        ("No file content; requires a repository; ignored files omitted", "limit must be 1..100"), pagination="offset/limit over sorted changed paths")),
+        "Discover changed repository paths", (),
+        ("changed_files: path/status collection with staged and worktree flags; branch/upstream",),
+        ("No file content; requires repository; ignored files omitted", "limit must be 1..100"), pagination="offset/limit over sorted changed paths")),
 )
 
 
@@ -190,9 +190,18 @@ def planning_capability_projection(names: Iterable[str]) -> tuple[dict, ...]:
         definition = get_tool_definition(name)
         if definition is None or definition.planning is None:
             raise CapabilityMetadataError(f"Planning semantics unavailable for authorized capability '{name}'")
-        semantics = asdict(definition.planning)
-        summaries.append({"name": definition.name, "mutating": definition.mutating,
-                          **{key: value for key, value in semantics.items() if value is not None}})
+        semantics = definition.planning
+        card = {"name": definition.name, "purpose": semantics.purpose, "outputs": semantics.outputs}
+        if semantics.limits:
+            card["limits"] = semantics.limits
+        if semantics.inputs:
+            card["inputs"] = semantics.inputs
+        card["mutating"] = definition.mutating
+        if semantics.pagination:
+            card["pagination"] = True
+        if semantics.async_kind:
+            card["async_kind"] = semantics.async_kind
+        summaries.append(card)
     return tuple(summaries)
 
 

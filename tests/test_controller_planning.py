@@ -212,7 +212,7 @@ def test_revise_context_projection_with_scripted_provider():
     assert payload["trigger"] == trigger.value
     assert payload["reason"] == request.reason
     assert "capabilities" not in payload
-    assert payload["suggested_constraints"] == list(request.suggested_constraints)
+    assert payload.get("suggested_constraints", []) == list(request.suggested_constraints)
     progress = payload["previous_execution_progress"]
     failed = progress["action_groups"][-1]
     assert failed["latest_error_code"] == "DENIED"

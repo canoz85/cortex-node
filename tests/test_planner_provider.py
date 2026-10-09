@@ -108,7 +108,7 @@ def test_infrastructure_failures_are_normalized_at_provider_boundary(failure, ex
             assert method == "json_schema" and include_raw
 
             def invoke(messages):
-                assert [m.type for m in messages] == ["system", "system", "system", "human"]
+                assert [m.type for m in messages] == ["system", "system", "human"]
                 if failure == "provider":
                     raise RuntimeError("provider unavailable")
                 return {"raw": AIMessage(content='{"result":"NO_PLAN_REQUIRED","message":"Valid raw JSON"}'),

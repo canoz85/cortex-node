@@ -48,7 +48,9 @@ from .models import (
 from .completion_identity import (requirement_scope, evidence_identity, plan_validation_identity,
     eligible_records, completion_provenance_records, accepted_step, binding_for)
 from core.planner_revision import RevisionRejection, reconcile_revision
-from core.planner_validation import PlanValidationError, first_ready_step, validate_execution_plan
+from core.planner_validation import (
+    PlanValidationError, first_ready_step, validate_direct_response_route, validate_execution_plan,
+)
 from core.planner_progress import build_planner_progress
 from core.planner_feedback import planner_retry_feedback
 from core.brain_batch_policy import validate_read_only_batch, normalized_batch_arguments
@@ -302,6 +304,12 @@ class CortexController:
             case PlannerOutcome.DIRECT_RESPONSE:
                 if controller_input.planning_request.operation == PlanningOperation.REVISE:
                     return self._terminate(controller_input.cursor, "invalid_no_plan_required_for_revise")
+                try:
+                    validate_direct_response_route(
+                        controller_input.planning_request, route=planner_result.planner_route,
+                    )
+                except PlanValidationError as exc:
+                    return self._terminate(controller_input.cursor, f"invalid_planner_direct_response:{exc}")
                 content = planner_result.direct_response_content
                 accepted = (
                     AcceptedDirectResponse(

@@ -148,7 +148,7 @@ def test_real_provider_retry_is_controller_authorized_bounded_and_preserves_cont
         assert decision.planning_request is None
     assert len(requests) == 2
     assert len(router.calls) == 1
-    assert retrieval_calls == [request.context.user_request] * 2
+    assert retrieval_calls == []
     first_messages, retry_messages = (record["messages"] for record in requests)
     assert all(PLANNING_FEEDBACK_HEADER not in item["content"] for item in first_messages)
     feedback = [item for item in retry_messages if item["content"].startswith(PLANNING_FEEDBACK_HEADER)]

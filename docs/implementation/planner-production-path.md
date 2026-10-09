@@ -12,6 +12,21 @@ Runtime dispatches only the resulting authorization.
 input, displays output, manages session memory/history and holds the opaque pause
 handle. It does not choose planning operations or interpret clarification answers.
 
+The Router classifies execution mode: `conversation` requires no runtime tools,
+`info` requires read-only runtime observation, `action` requests or requires a
+state change, and `clarify` means intent is ambiguous. `info + NO_PLAN_REQUIRED`
+contradicts that classification. Normalization rejects it as `INVALID_OUTPUT`,
+using the existing Controller-owned retry budget; Controller also rejects a
+direct `info` result that bypasses normalization. A preserved request route wins
+over a worker-reported route.
+
+Capability cards describe what a tool may establish; they do not observe current
+repository, file, Git or other runtime state. A question about the declared
+`read_file` contract (for example whether it returns `total_chars`) can be answered
+from its card on the conversation path. A question about current file contents or
+the current implementation requires runtime evidence. No request keywords choose
+this validation rule; it consumes the existing classified route.
+
 ## Ownership and projections
 
 | Representation | Authoritative owner | Necessary projection / retention |

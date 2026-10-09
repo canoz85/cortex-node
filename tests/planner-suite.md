@@ -85,7 +85,65 @@ Validation:
 - Production Python source hashes match the initial snapshot; scoped AST duplicate audit is clean.
 
 Run deterministic tests with `python -m pytest -o addopts= -q -p no:cacheprovider --no-cov --ignore=tests/live`.
-Run mandatory smoke tests with `python -m pytest -o addopts= -q -p no:cacheprovider --no-cov tests/live/test_planner_stability.py tests/live/test_clarification_lifecycle.py`.
+Run the general-purpose live production Planner harness (PowerShell):
+
+```powershell
+$env:CORTEX_LIVE_PLANNER = '1'
+$env:CORTEX_LIVE_PLANNER_PROMPT = '20 tane Michael Jackson şarkısı yaz'
+$env:CORTEX_LIVE_PLANNER_RUNS = '1'
+python -m pytest -o addopts= -q -s -p no:cacheprovider --no-cov tests/live/test_planner_stability.py
+```
+
+Change only `CORTEX_LIVE_PLANNER_PROMPT` to inspect another arbitrary request.
+The convenience default is `List files`. `CORTEX_LIVE_PLANNER_RUNS` defaults to
+one; set it to ten for ten independent observations of the same prompt. Without
+the existing `CORTEX_LIVE_PLANNER=1` opt-in the harness skips during offline tests.
+Application defaults and environment settings select the production model,
+workspace, knowledge directory, embedding model and RAG depth. The current
+default Planner is `gpt-oss:20b`; the provider/model and generation
+settings are printed. Application CLI/config-file overrides are not supplied.
+
+Call path: application settings -> production chat/tool/RAG factories -> fresh
+Controller execution -> `build_controller_input` -> `CortexController.decide`
+-> Controller-built `PlanningRequest` -> `apply_controller_decision_to_state`
+-> `create_planner_node` / `require_planner_authorization` -> `PlannerService.run`
+-> production Router, filtering, capability projection and message assembly
+-> `LangChainPlannerProvider.generate` -> authorized schema bound through
+`with_structured_output(method="json_schema", include_raw=True)` -> configured
+ChatOllama transport -> production normalization / `PlannerResult`.
+
+Only Planner dispatch decisions are executed. Controller decides whether an
+invalid/provider-failed attempt receives its normal bounded retry, preserving
+its own feedback and route. Brain, runtime tools, Finalizer, memory saving and
+the full graph/Controller runtime are never executed. Tools are constructed only
+to obtain the deployment's enabled registry; normal ambient Planner retrieval
+is retained. No prompt, capability definition, schema or retry policy is copied.
+
+Each attempt and final result are printed in full, including step titles,
+descriptions, tools, dependencies and messages. The normalized PlannerResult is
+also saved to `planner-observations.json` under pytest's temporary test directory.
+Existing `log_llm_exchange` JSONL
+diagnostics supply per-attempt usage, model and `done_reason`, including length
+limits. `--live-raw-llm-file` still selects an explicit retained raw log; otherwise
+raw exchanges remain in the temporary directory. Missing exchange metrics on
+provider failure are unknown (`null`), not zero. Token totals include all Planner
+attempts and exclude Router/embedding tokens. Elapsed time covers the Planner
+node, including routing/context retrieval, and totals all attempts in a run.
+
+This is an observation/debug harness. It does not classify plan quality, require
+an expected step shape, or fail because Planner returned a particular production
+outcome. Semantic results and infrastructure failures are displayed directly:
+PLAN_PROPOSED, NO_PLAN_REQUIRED, NEEDS_INPUT, PLANNING_FAILED, INVALID_OUTPUT or
+PROVIDER_FAILURE. Every attempt is visible, including length-limited attempts and
+Controller-authorized retries. Public production component types and completed
+exchange diagnostics establish fidelity without private HTTP transport checks.
+Offline display/lifecycle checks live in `test_planner_stability_measurement.py`.
+
+The historical six-case live results above describe the previous stability
+test, which called production PlannerService/provider with a unit-test request
+fixture, no Controller retry handling, and no opt-in guard.
+The separate clarification lifecycle smoke remains available with
+`python -m pytest -o addopts= -q -p no:cacheprovider --no-cov tests/live/test_clarification_lifecycle.py`.
 
 ## Primary classification
 

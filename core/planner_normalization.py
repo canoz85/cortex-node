@@ -6,7 +6,7 @@ from core.protocol.enums import PlannerOutcome, PlanningFailureCategory, Plannin
 from core.protocol.models import ExecutionPlan, ExecutionStep, PlanningRequest, PlannerResult
 from core.planner_validation import (
     MAX_PROPOSED_STEPS, PlanValidationError, authorized_plan_tools,
-    validate_execution_plan, validate_proposed_step_count,
+    validate_direct_response_route, validate_execution_plan, validate_proposed_step_count,
 )
 
 def planner_failure(
@@ -33,6 +33,7 @@ def normalize_planner_proposal(
 
     try:
         if proposal.result == PlannerProposalResultType.NO_PLAN_REQUIRED:
+            validate_direct_response_route(planner_input, route=route)
             semantic_content = proposal.message.strip()
             return PlannerResult(outcome=PlannerOutcome.DIRECT_RESPONSE, request_id=planner_input.request_id,
                                  planner_route=route, message=semantic_content,

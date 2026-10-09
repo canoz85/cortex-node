@@ -3,6 +3,7 @@
 import re
 
 from core.planner_limits import PLANNER_LENGTH_DIAGNOSTIC
+from core.planner_validation import INFO_REQUIRES_RUNTIME_EVIDENCE
 from core.protocol.enums import PlanningFailureCategory
 from core.protocol.models import PlannerResult, PlanningFeedback
 
@@ -20,6 +21,7 @@ def planner_retry_feedback(result: PlannerResult) -> PlanningFeedback | None:
         "Planner output is invalid (PlannerInvalidOutputError): "
     )
     safe = reason in {
+        INFO_REQUIRES_RUNTIME_EVIDENCE,
         PLANNER_LENGTH_DIAGNOSTIC,
         "PLAN_PROPOSED requires at least one step",
         "proposed step ids must be unique",

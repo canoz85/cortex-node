@@ -1,6 +1,7 @@
 """Slice 4 bounded Planner context without memory execution authority."""
 
 from datetime import datetime, timezone
+import json
 
 import pytest
 from langchain_core.messages import HumanMessage
@@ -195,10 +196,10 @@ def test_planner_consumes_authorized_memory_snapshot_without_graph_injection(rev
     assert state["execution_state"].protocol_visible.planning_request == original_request
     rendered = planning_request_context(received)
     assert '"planner_memory_context"' not in rendered  # Data has its own labeled message.
-    assert "current user_request is the active instruction" in rendered
-    assert "supersedes conflicting remembered user facts" in rendered
-    assert "never an active Controller execution" in rendered
-    assert "Controller progress, failure evidence" in rendered
+    assert "current user statements override remembered user facts" in rendered
+    assert "Project facts may be stale" in rendered
+    assert "previous work, not an active execution" in rendered
+    assert "use current Controller progress and failure evidence over memory" in rendered
     if revise:
         assert "Current failure: permission denied" in rendered
         assert received.completed_step_ids == ("done",)
@@ -255,7 +256,7 @@ def test_authorized_memory_is_projected_in_one_scripted_provider_exchange():
     assert provider.messages[-1].role == "human"
     assert provider.messages[-1].content == "Use long answers instead"
     context_message = provider.messages[-2].content
-    assert '"recent_history": ["Earlier question"]' in context_message
+    assert json.loads(context_message.split("\n", 1)[1])["context"]["recent_history"] == ["Earlier question"]
     memory_message = next(message.content for message in provider.messages
                           if message.content.startswith("PLANNER MEMORY CONTEXT"))
     assert '"planner_memory_context"' in memory_message

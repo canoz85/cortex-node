@@ -99,7 +99,7 @@ def test_create_direct_response_uses_one_human_request_and_controller_terminal_s
     assert [m.content for m in exchange if isinstance(m, HumanMessage)] == ['hello']
     context = json.loads(exchange[-2].content.split('\n', 1)[1])
     assert context['operation'] == 'create'
-    assert 'user_request' not in context['context']
+    assert 'user_request' not in context.get('context', {})
 
 
 def test_checkpointed_clarification_resumes_same_authorization_without_duplicate_history_with_scripted_provider():

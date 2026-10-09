@@ -9,10 +9,19 @@ from tools.registry import get_tool_definition
 
 
 MAX_PROPOSED_STEPS = 4
+INFO_REQUIRES_RUNTIME_EVIDENCE = (
+    "NO_PLAN_REQUIRED cannot satisfy info: read-only runtime evidence is required"
+)
 
 
 class PlanValidationError(ValueError):
     """A candidate violates a mechanically checkable planning invariant."""
+
+
+def validate_direct_response_route(request: PlanningRequest, *, route: str | None = None) -> None:
+    """A preserved Controller route takes precedence over a worker-reported route."""
+    if (request.planner_route or route) == "info":
+        raise PlanValidationError(INFO_REQUIRES_RUNTIME_EVIDENCE)
 
 
 def authorized_completed_steps(

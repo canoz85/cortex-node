@@ -58,13 +58,14 @@ def test_system_policy_exposes_only_semantic_proposal_outcomes():
         capability_guidance="",
     )
 
-    assert prompt.count("Canonical shape:") == 4
-    assert '"result": "PLAN_PROPOSED"' in prompt
-    assert '"result": "NO_PLAN_REQUIRED"' in prompt
-    assert '"result": "NEEDS_INPUT"' in prompt
-    assert '"result": "PLANNING_FAILED"' in prompt
-    assert "Provider failures and invalid model output are handled outside this result contract" in prompt
-    assert "Do not add fields outside the schema." in prompt
+    assert "Canonical shape:" not in prompt
+    for result in PlannerProposalResultType:
+        assert f"- {result.value}:" in prompt
+    assert "bound schema" in prompt
+    assert "message contains the direct answer" in prompt
+    assert "message contains the concrete question" in prompt
+    assert "Provider/invalid-output failures are handled externally" in prompt
+    assert "For the three non-plan outcomes, steps must be empty" in prompt
 
 
 @pytest.mark.parametrize("payload", [
