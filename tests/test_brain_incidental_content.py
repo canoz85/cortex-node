@@ -8,17 +8,20 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from core.brain import BRAIN_OUTPUT_PROTOCOL
-from core.brain_batch_policy import MAX_READ_FILE_BATCH
 from core.brain_provider import _canonical_brain_response
 from core.models import ReadFileRequest
 from core.protocol.controller import CortexController, apply_controller_decision_to_state
 from core.protocol.enums import BrainOutcomeKind as Kind, ControllerDecisionType as Decision
 from core.runtime.tool_result_integration import SerializedToolRuntimePort, integrate_tool_result
 from tools.file_ops import get_file_tools
+from tools.registry import get_tool_definition
 from test_brain_cardinality_correction import batch, setup_provider
 from test_brain_ollama_boundary import boundary, git_brain_input, native
 from test_brain_outcomes import brain_input, controller_input, native_action
 from test_brain_read_file_batch import initial_state, input_for, native_batch
+
+
+READ_FILE_BATCH_LIMIT = get_tool_definition("read_file").max_batch_calls
 
 
 @pytest.mark.parametrize("content", [
@@ -163,7 +166,7 @@ def test_single_call_with_text_survives_real_ollama_boundary():
     assert len(requests) == 1
 
 
-@pytest.mark.parametrize("count", [2, MAX_READ_FILE_BATCH])
+@pytest.mark.parametrize("count", [2, READ_FILE_BATCH_LIMIT])
 def test_batch_text_is_only_canonicalized_and_batch_executes_without_correction(
     count, monkeypatch, tmp_path, capsys,
 ):
@@ -222,8 +225,8 @@ def test_oversized_batch_text_reaches_bounded_correction_without_truncation(
 
     log_path = tmp_path / "oversized-exchanges.jsonl"
     monkeypatch.setenv("CORTEX_RAW_LLM_FILE", str(log_path))
-    original = native_batch(MAX_READ_FILE_BATCH + 1).model_copy(update={
-        "content": f"I'll read all {MAX_READ_FILE_BATCH + 1} Python files to compute their sizes.\n"
+    original = native_batch(READ_FILE_BATCH_LIMIT + 1).model_copy(update={
+        "content": f"I'll read all {READ_FILE_BATCH_LIMIT + 1} Python files to compute their sizes.\n"
                    "Let me batch these independent read-only calls.",
     })
     corrected = native_action("read_file", {"path": "chosen.py"}).model_copy(update={
@@ -239,12 +242,12 @@ def test_oversized_batch_text_reaches_bounded_correction_without_truncation(
 
     canonical = classify.call_args_list[0].args[0]
     assert canonical.content == "" and canonical.tool_calls is original.tool_calls
-    assert len(canonical.tool_calls) == MAX_READ_FILE_BATCH + 1
+    assert len(canonical.tool_calls) == READ_FILE_BATCH_LIMIT + 1
     assert original.model_dump() == snapshot
     assert len(model.calls) == 2
     rejected = model.calls[1][-2]
     assert rejected.content == "" and rejected.tool_calls == original.tool_calls
-    assert f"Return one native action containing at most {MAX_READ_FILE_BATCH}" in model.calls[1][-1].content
+    assert f"Return one native action containing at most {READ_FILE_BATCH_LIMIT}" in model.calls[1][-1].content
     assert outcome.tool_requests is None
     assert outcome.tool_request.arguments == {"path": "chosen.py"}
     tool.invoke.assert_not_called()
@@ -301,5 +304,6 @@ def test_registered_but_unauthorized_multicall_with_content_is_strict():
     tool.invoke.assert_not_called()
 
 
-def test_native_action_contract_sources_the_runtime_maximum():
-    assert f"a homogeneous batch of at most {MAX_READ_FILE_BATCH} independent calls" in BRAIN_OUTPUT_PROTOCOL
+def test_static_native_action_contract_does_not_advertise_read_only_batching():
+    assert "homogeneous batch" not in BRAIN_OUTPUT_PROTOCOL
+    assert "read-only tool" not in BRAIN_OUTPUT_PROTOCOL

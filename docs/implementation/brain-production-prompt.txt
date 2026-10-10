@@ -22,7 +22,14 @@ Knowledge folder: {knowledge_dir}
 BRAIN NATIVE CALL CONTRACT:
 Return one native action: an authorized executable tool or
 brain_step_completed, brain_step_failed, brain_replan_requested.
-A native action is one native call or, only when the runtime permits it,
-a homogeneous batch of at most 24 independent calls to the same read-only tool.
 Put arguments in native calls and leave content empty.
 Do not return JSON outcome envelopes, textual lifecycle outcomes, or function-call syntax.
+
+Provider inserts batch guidance generated from authorized, bound tools and their
+executable schemas before the native contract. For example, when both tools are
+available and retain their production limits:
+
+Homogeneous independent multiple calls allowed:
+- read_file: up to 24
+- find_files: up to 24
+All other tools and lifecycle actions require one call.

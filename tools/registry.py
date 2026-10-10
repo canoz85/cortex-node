@@ -50,6 +50,7 @@ class CapabilitySemantics:
     Inputs describe essential needs; executable schemas still validate arguments.
     Outputs describe evidence on success, never a guarantee that a call succeeds.
     Collection shape belongs in outputs; exact coverage remains Controller policy.
+    Selection guidance helps Planner choose tools; it does not grant or restrict authority.
     """
 
     purpose: str
@@ -58,6 +59,8 @@ class CapabilitySemantics:
     limits: tuple[str, ...] = ()
     pagination: str | None = None
     async_kind: Literal["submission", "poll"] | None = None
+    use_when: str | None = None
+    avoid_when: str | None = None
 
 
 class CapabilityMetadataError(ValueError):
@@ -73,6 +76,8 @@ class ToolDefinition:
     requires_knowledge: bool = False
     args_schema: type | None = None
     planning: CapabilitySemantics | None = None
+    # Maximum independent synchronous native calls; never grants authorization.
+    max_batch_calls: int = 1
 
 
 # One production manifest, including explicit deployment defaults. A new
@@ -80,13 +85,17 @@ class ToolDefinition:
 TOOL_DEFINITIONS = (
     ToolDefinition("list_files", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
         "List immediate workspace children or identify a file", (),
-        ("path, entries: immediate child names; is_file",), ("Not recursive; no file content or sizes",))),
-    ToolDefinition("read_file", "workspace", enabled_by_default=True, args_schema=ReadFileRequest,
+        ("path, entries: immediate child names; is_file",), ("Not recursive; no file content or sizes",),
+        use_when="Inspect the immediate children of a known directory.",
+        avoid_when="Recursive discovery or content-based search is needed.")),
+    ToolDefinition("read_file", "workspace", enabled_by_default=True, args_schema=ReadFileRequest, max_batch_calls=24,
         planning=CapabilitySemantics(
             "Read workspace text", ("path: required workspace text file",),
             ("content; total_chars even on partial reads",),
             ("UTF-8 only; total_chars counts decoded characters, not byte size",),
-            pagination="offset/limit in characters; continue truncated content")),
+            pagination="offset/limit in characters; continue truncated content",
+            use_when="Read a known workspace text file, continuing partial reads when needed.",
+            avoid_when="The path still needs discovery or the target is not a text file.")),
     ToolDefinition("write_file", "workspace", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
         "Write workspace text", ("path and content: required",),
         ("path, characters_written",),
@@ -96,7 +105,9 @@ TOOL_DEFINITIONS = (
         ("path, creation receipt",), ("Creates parents; existing directories allowed",))),
     ToolDefinition("read_knowledge_file", "general", enabled_by_default=True, requires_knowledge=True,
         planning=CapabilitySemantics("Read a knowledge-folder text document", ("path: required knowledge-relative file",),
-            ("content",), ("Knowledge folder only; not live workspace evidence",))),
+            ("content",), ("Knowledge folder only; not live workspace evidence",),
+            use_when="Read a known knowledge-relative text document directly.",
+            avoid_when="The target belongs to the workspace or still requires topic-based discovery.")),
     ToolDefinition("run_python", "workspace", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
         "Run an existing workspace Python script", ("path: required .py script",),
         ("exit_code, stdout, stderr",), ("Script-defined side effects; exit success does not prove task success",))),
@@ -105,16 +116,24 @@ TOOL_DEFINITIONS = (
         ("package, bounded pip stdout",), ("Changes interpreter environment; needs package access",))),
     ToolDefinition("git_status", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
         "Inspect repository status", (), ("short status and branch",),
-        ("Requires a Git repository; no file content",))),
+        ("Requires a Git repository; no file content",),
+        use_when="Obtain a concise current repository and branch overview.",
+        avoid_when="Structured changed-file records or patch content are needed.")),
     ToolDefinition("git_diff", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
         "Read unstaged textual diff", (),
-        ("unstaged patch text",), ("No staged or untracked file content",))),
+        ("unstaged patch text",), ("No staged or untracked file content",),
+        use_when="Inspect current unstaged textual changes, optionally for one path.",
+        avoid_when="Staged changes, untracked content, or committed patch content are required.")),
     ToolDefinition("git_log", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
         "Inspect recent commit history", (),
-        ("commit hash, date, author, subject",), ("1..50 commits; no file content",))),
+        ("commit hash, date, author, subject",), ("1..50 commits; no file content",),
+        use_when="Discover recent commits and their basic metadata.",
+        avoid_when="Current workspace state or one revision's file statistics are required.")),
     ToolDefinition("git_show", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
         "Inspect revision summary (default HEAD)", (),
-        ("revision statistics and summary",), ("--stat only; no patch or full file content",))),
+        ("revision statistics and summary",), ("--stat only; no patch or full file content",),
+        use_when="Inspect a revision's summary and file-change statistics.",
+        avoid_when="Patch text, full historical file content, or current workspace content are required.")),
     ToolDefinition("agent_info", "general", enabled_by_default=True, planning=CapabilitySemantics(
         "Inspect runtime configuration", (), ("model, workspace, context_window, max_steps, token_usage",),
         ("Configuration/last known usage, not workspace content",))),
@@ -126,10 +145,14 @@ TOOL_DEFINITIONS = (
         ("Local system time; no timezone conversion",))),
     ToolDefinition("rag_search", "general", enabled_by_default=True, planning=CapabilitySemantics(
         "Search indexed knowledge", ("query: required",),
-        ("ranked chunks and sources",), ("Can be stale; not live workspace discovery",))),
+        ("ranked chunks and sources",), ("Can be stale; not live workspace discovery",),
+        use_when="Retrieve relevant knowledge chunks by topic or semantic similarity.",
+        avoid_when="Current workspace facts, exhaustive matching, or a complete known document are required.")),
     ToolDefinition("rag_refresh_index", "general", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
         "Rebuild the in-memory knowledge index", (), ("chunks_indexed",),
-        ("Changes index, not source documents",))),
+        ("Changes index, not source documents",),
+        use_when="Refresh the knowledge index after source changes or when index freshness is explicitly required.",
+        avoid_when="Ordinary retrieval is sufficient and no freshness problem is established.")),
     ToolDefinition("query_abap_table", "sap", enabled_by_default=True, planning=CapabilitySemantics(
         "Query SAP table stub", ("table_name: required",),
         ("mock record collection",),
@@ -149,32 +172,46 @@ TOOL_DEFINITIONS = (
         ("Placeholder: no live telemetry or device status",))),
     ToolDefinition("describe_image", "general", enabled_by_default=True, planning=CapabilitySemantics(
         "Describe a workspace image", ("image_path: required workspace image file",),
-        ("model-generated description",), ("Requires local llava; not deterministic measurement",))),
+        ("model-generated description",), ("Requires local llava; not deterministic measurement",),
+        use_when="Visually inspect an existing workspace image.",
+        avoid_when="Image generation, job status, text reading, or deterministic measurement is required.")),
     ToolDefinition("run_comfy_workflow", "comfy", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
         "Submit image generation with fixed workflow", ("positive_prompt, seed, steps, cfg, width, height: required",),
         ("prompt_id, job status, submission receipt",),
-        ("Needs fixed template/installed checkpoint", "Submission is not completion; poll history for outputs"), async_kind="submission")),
+        ("Needs fixed template/installed checkpoint", "Submission is not completion; poll history for outputs"), async_kind="submission",
+        use_when="Submit a new image-generation job.",
+        avoid_when="Only an existing job's status or output is needed.")),
     ToolDefinition("download_comfy_output_image", "comfy", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
         "Download generated image into workspace", ("filename: required server image name",),
-        ("workspace save receipt",), ("Needs output identity from generation history",))),
+        ("workspace save receipt",), ("Needs output identity from generation history",),
+        use_when="Save a known Comfy output image into the workspace.",
+        avoid_when="The output identity is unknown or generation/status inspection is still needed.")),
     ToolDefinition("get_comfy_history", "comfy", enabled_by_default=True, planning=CapabilitySemantics(
         "Observe submitted generation and discover outputs", ("prompt_id: required submitted job identity",),
         ("job status/completed, filenames collection, outputs",),
-        ("May be queued/running; absent history is not success", "Does not download outputs"), async_kind="poll")),
-    ToolDefinition("find_files", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
+        ("May be queued/running; absent history is not success", "Does not download outputs"), async_kind="poll",
+        use_when="Inspect a submitted Comfy job using a known prompt ID and discover its outputs.",
+        avoid_when="No job identity exists or the output image itself must be downloaded.")),
+    ToolDefinition("find_files", "workspace", enabled_by_default=True, max_batch_calls=24, planning=CapabilitySemantics(
         "Discover workspace paths by basename glob, optionally recursive", (),
         ("files: sorted workspace-relative path collection",),
         ("No file content or sizes", "Case-sensitive; excludes file/directory links", "limit must be 1..100"),
-        pagination="offset/limit over sorted paths")),
+        pagination="offset/limit over sorted paths",
+        use_when="Discover workspace files by basename glob, optionally recursively.",
+        avoid_when="Selection depends on file content or Git change status.")),
     ToolDefinition("search_text", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
         "Search workspace text and discover matching paths, optionally recursive", ("query: required literal text or regex",),
         ("matches: path, line_number, text snippet",),
         ("Case-sensitive UTF-8; invalid bytes replaced", "Snippets can truncate; not full-file content", "limit must be 1..100"),
-        pagination="offset/limit over matches ordered by path then line")),
+        pagination="offset/limit over matches ordered by path then line",
+        use_when="Locate implementation, symbols, literals, or regex matches inside workspace text.",
+        avoid_when="The target path is already known and only complete file content is needed.")),
     ToolDefinition("git_changed_files", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
         "Discover changed repository paths", (),
         ("changed_files: path/status collection with staged and worktree flags; branch/upstream",),
-        ("No file content; requires repository; ignored files omitted", "limit must be 1..100"), pagination="offset/limit over sorted changed paths")),
+        ("No file content; requires repository; ignored files omitted", "limit must be 1..100"), pagination="offset/limit over sorted changed paths",
+        use_when="Enumerate changed paths with staged, worktree, and untracked status.",
+        avoid_when="File content, patch text, or historical changes are required.")),
 )
 
 
@@ -201,6 +238,10 @@ def planning_capability_projection(names: Iterable[str]) -> tuple[dict, ...]:
             card["pagination"] = True
         if semantics.async_kind:
             card["async_kind"] = semantics.async_kind
+        if semantics.use_when is not None:
+            card["use_when"] = semantics.use_when
+        if semantics.avoid_when is not None:
+            card["avoid_when"] = semantics.avoid_when
         summaries.append(card)
     return tuple(summaries)
 
@@ -208,9 +249,10 @@ def planning_capability_projection(names: Iterable[str]) -> tuple[dict, ...]:
 def get_tool_argument_schema(name: str, *, registry: ToolRegistry | None = None):
     """Read the registered executable schema, or its production declaration.
 
-    The production declaration supplies the schema when constructing read_file
-    and when validating framework-neutral Controller inputs. An explicit
-    registry never falls back when an executable or its schema is missing.
+    Production declarations support construction and standalone validation.
+    Composed validation uses registered executable schemas, including inferred
+    schemas. An explicit registry never falls back when an executable or its
+    schema is missing.
     """
     if registry is None:
         definition = get_tool_definition(name)

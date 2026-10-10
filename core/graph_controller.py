@@ -1,4 +1,7 @@
 from __future__ import annotations
+
+from typing import Callable
+
 from langchain_core.messages import AIMessage
 from core.protocol.controller import CortexController, record_finalization
 from core.finalizer import Finalizer
@@ -30,11 +33,13 @@ def create_controller_node(
     finalizer: Finalizer | None = None,
     planning_capabilities: PlanningCapabilities | None = None,
     worker_ports=None,
+    argument_schema_for: Callable[[str], type | None] | None = None,
 ):
     completion_service = completion_service or CompletionService()
     controller = controller or CortexController(
         max_reasoning_steps=MAX_REASONING_STEPS,
         planning_capabilities=planning_capabilities,
+        argument_schema_for=argument_schema_for,
     )
     finalizer = finalizer or Finalizer()
     coordinator = ControllerCoordinator(controller)

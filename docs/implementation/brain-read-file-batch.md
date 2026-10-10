@@ -1,4 +1,4 @@
-# Sequential homogeneous Brain read_file actions
+# Sequential homogeneous Brain actions
 
 The pre-implementation trace found the singular proposal in
 `BrainOutcome.tool_request`. ControllerInput, ControllerDecision and
@@ -26,47 +26,56 @@ Each member uses the existing deterministic ToolRequest ID generation.
 ## Acceptance
 
 The provider distinguishes valid correction candidates from executable groups.
-An executable group must contain 2–24 known, well-formed, authorized calls to
-`read_file` only, with empty canonical response content and no invalid native calls.
-Every call must validate against the bound tool schema and ReadFileRequest.
-The explicit eligibility policy also requires the production manifest entry to
-be non-mutating; non-mutating metadata alone never enables batching.
-ReadFileRequest's literal path, offset and limit inputs have no result references,
-so each invocation can execute independently. Lifecycle and async tools are excluded.
+An executable group contains homogeneous, well-formed, authorized calls with
+empty canonical response content and no invalid native calls. ToolDefinition owns
+max_batch_calls: the default is 1, while read_file and find_files explicitly allow
+2 through 24 independent synchronous calls. Non-mutating metadata alone never
+enables batching. Mutating tools, lifecycle actions and configured async submission
+tools remain excluded.
 
-Batch policy owns only the immutable `_BATCH_ELIGIBLE_TOOLS` name set, the existing
-maximum, and batch-specific normalization and duplicate checks. Registry-owned
-`get_tool_definition` and `get_tool_argument_schema` provide metadata and schemas.
-The production `read_file` definition owns its schema association; the executable
-decorator consumes that declaration. Bound executable schemas are used when a
-registry is supplied, without falling back for a missing executable or schema.
-Provider candidate validation consumes schemas without selecting eligible tool
-names; shared batch policy separately decides execution permission.
+core/brain_batch_policy.py is the shared generic validator for homogeneity,
+authorization, metadata eligibility and limits, executable argument schemas, and
+duplicate effective invocations. Registry-owned get_tool_definition provides
+metadata. Provider and graph composition reuse existing executable registries to
+supply an argument_schema_for(name) callable; Controller receives only that narrow
+lookup, not a ToolRegistry or executable tools. Normalization receives the same
+lookup used by Provider.
+
+The production read_file definition declares ReadFileRequest, which its executable
+decorator consumes. find_files keeps its existing inferred executable schema.
+Standalone validation can use declared schemas. An explicit schema lookup returning
+None fails closed without declaration fallback. Provider retains existing bound
+schema and declared-schema checks for native correction candidates.
 
 Controller independently validates the complete proposal against the accepted
 plan's capability ceiling and active execution/plan revision/step attempt before
 authorizing any member. Request IDs must be distinct and not already recorded.
-Its configured async-submission guard is retained because batch dispatch bypasses
+Its configured async-submission guard remains because batch dispatch bypasses
 singleton job-identity, active-job and submission-attempt preparation. This checks
-execution-mode compatibility, rather than defining static batch eligibility.
-Duplicate effective calls are rejected after argument coercion, defaults and
-lexical path normalization (`normpath`/`normcase`, without filesystem lookup).
-Oversized groups are rejected whole; no filtering, truncation or first-call selection.
+execution-mode compatibility rather than defining static batch eligibility.
 
-Valid disallowed groups use the existing one-shot “choose one action” correction.
-The size-only exception is an otherwise valid homogeneous read-only group above
-`MAX_READ_FILE_BATCH`: shared policy checks every member against all non-size
-constraints before the provider requests one native action containing at most
-that maximum of the original useful calls, using the same tool. Other disallowed
-groups retain the choose-one-call wording. The corrected proposal passes normal
-validation, and the runtime never chunks, truncates or selects batch members.
-Malformed, unknown, unauthorized or invalid-argument groups remain invalid output.
-Correction output passes validation and can never cause a third provider call.
+Duplicate effective calls are rejected after schema coercion and defaults, using
+canonical JSON of all effective arguments. No path field is assumed, and no lexical
+path or filesystem alias normalization occurs. Original request arguments and
+deterministic request ID generation remain unchanged. Oversized groups are rejected
+whole, without filtering, truncation or first-call selection.
+
+Valid disallowed groups use the existing one-shot choose-one-action correction.
+For an otherwise valid eligible batch exceeding its tool's limit, shared policy
+checks all non-size constraints before Provider requests at most that metadata
+limit of the original useful calls, using the same tool. Other disallowed groups
+retain the singleton correction. Correction output passes normal validation and
+can never cause a third provider call.
+
 Incidental content beside valid singleton or multi-call candidates is discarded
 only from a copied canonical response, after original raw logging and before batch
-classification. Invalid candidates remain strict, and canonicalization never grants
-batch eligibility. Provider-level raw logging is unchanged. The native-action
-contract exposes the existing maximum directly from MAX_READ_FILE_BATCH.
+classification. Invalid candidates remain strict, and canonicalization never
+grants batch eligibility. Provider-level raw logging is unchanged.
+
+Provider generates batch guidance from the currently authorized, bound tools with
+usable executable schemas. It lists only eligible names and their actual metadata
+limits; all other tools and lifecycle actions require one call. The static Brain
+contract no longer implies batching support for arbitrary read-only tools.
 
 ## Controller state and execution
 
@@ -99,7 +108,7 @@ they do not run another member or silently retry.
 
 ## Evidence and recovery
 
-The maximum is **24** and the Brain window displays **32** current
+The current opted-in tools each have a maximum of **24** and the Brain window displays **32** current
 records. A complete fresh batch fits, leaving eight slots for earlier attempts.
 With ten prior attempts, two older records leave the displayed window; all 24 batch
 records remain ordered and visible. Repeated batches can evict more older evidence.
@@ -123,14 +132,14 @@ is unchanged: a pending authorization alone cannot prove whether that invocation
 already happened. Read-only execution can be resumed, but this change does not
 provide exactly-once external invocation across that gap. No retry machinery is added.
 
-Duplicate detection is lexical and argument-based; it does not query the filesystem
-to discover aliases such as symlinks to the same physical file.
+Duplicate detection compares schema-normalized arguments; it does not canonicalize
+path spellings or query the filesystem to discover aliases.
 
 Planner behavior/schemas/retries, memory, mutation authorization, exact_collection,
 ToolRegistry architecture, and tool inventory are unchanged. No stat_files,
 read_files, metadata tools, heterogeneous/mutating batches or parallel execution.
 
-## Changed production files
+## Initial batch implementation files
 
 - `core/brain_batch_policy.py`: explicit eligibility, bound and effective-call checks.
 - `core/brain.py`: narrow native-action contract and scoped current evidence indexes.
@@ -153,7 +162,7 @@ test module covers acceptance, ordering, evidence, interruptions and graph recov
 existing correction tests now use valid-but-disallowed duplicate read candidates,
 and prompt assertions in three existing modules use the revised native-action wording.
 
-## Validation results
+## Initial batch implementation validation results
 
 - 51 focused batch cases passed in `tests/test_brain_read_file_batch.py`.
 - 389 related Brain, Controller, driver, graph, async-policy and provenance cases passed.
@@ -175,3 +184,12 @@ The six broader-suite failures remain outside the batch cases:
 
 These failures were isolated and reproduced. Their fixture, artifact, console and
 memory behavior was left unchanged to preserve the requested implementation scope.
+
+## Metadata cleanup files
+
+ToolDefinition owns batch limits in tools/registry.py. Shared validation stays in
+core/brain_batch_policy.py. core/brain.py removes the broad static allowance;
+core/brain_provider.py renders bound-tool guidance and metadata-driven correction.
+core/brain_normalization.py and core/protocol/controller.py receive narrow schema
+lookups, wired through core/graph_controller.py and core/graph_nodes.py.
+No plan, checkpoint, evidence or tool implementation schema changes are needed.

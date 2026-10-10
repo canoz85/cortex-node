@@ -7,12 +7,10 @@ from typing import Any, Protocol
 from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import BrainInput, BrainOutcome
 from core.protocol.completion_identity import eligible_records
-from core.brain_batch_policy import MAX_READ_FILE_BATCH
 from core.brain_evidence_policy import MAX_CURRENT_ATTEMPT_RECORDS
 
-BRAIN_OUTPUT_PROTOCOL = f"""
+BRAIN_OUTPUT_PROTOCOL = """
 BRAIN NATIVE CALL CONTRACT: Return one native action: an authorized executable tool or brain_step_completed, brain_step_failed, brain_replan_requested.
-A native action is one native call or, only when the runtime permits it, a homogeneous batch of at most {MAX_READ_FILE_BATCH} independent calls to the same read-only tool.
 Put arguments in native calls and leave content empty.
 Do not return JSON outcome envelopes, textual lifecycle outcomes, or function-call syntax.
 """

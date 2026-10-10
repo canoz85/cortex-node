@@ -1,7 +1,8 @@
-"""Ownership boundaries for the existing homogeneous read_file policy."""
+"""Ownership boundaries for metadata-enabled homogeneous batches."""
 
 import inspect
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,7 +34,7 @@ def test_eligible_read_file_normalizes_defaults_and_coercion_from_executable():
     schema = get_tool_argument_schema("read_file", registry=registry)
     assert schema is get_tool_definition("read_file").args_schema
     arguments = {"path": "a", "offset": "2"}
-    assert policy.normalized_batch_arguments("read_file", arguments, registry=registry) == (
+    assert policy.normalized_batch_arguments("read_file", arguments, argument_schema_for=partial(get_tool_argument_schema, registry=registry)) == (
         schema.model_validate(arguments).model_dump(mode="json")
     )
 
@@ -84,7 +85,7 @@ def test_missing_executable_or_schema_fails_closed(monkeypatch, missing):
     else:
         registry = ToolRegistry.from_tools([SimpleNamespace(name="read_file", args_schema=None)])
     with pytest.raises(ValueError, match="tool_not_batch_eligible|schema_unavailable"):
-        policy.normalized_batch_arguments("read_file", {"path": "a"}, registry=registry)
+        policy.normalized_batch_arguments("read_file", {"path": "a"}, argument_schema_for=partial(get_tool_argument_schema, registry=registry))
 
 
 def test_bound_schema_lookup_and_batch_normalization_use_the_registered_executable():
@@ -93,16 +94,16 @@ def test_bound_schema_lookup_and_batch_normalization_use_the_registered_executab
 
     registry = ToolRegistry.from_tools([SimpleNamespace(name="read_file", args_schema=BoundRead)])
     assert get_tool_argument_schema("read_file", registry=registry) is BoundRead
-    assert policy.normalized_batch_arguments("read_file", {"path": "a"}, registry=registry)["limit"] == 3
+    assert policy.normalized_batch_arguments("read_file", {"path": "a"}, argument_schema_for=partial(get_tool_argument_schema, registry=registry))["limit"] == 3
     with pytest.raises(ValidationError):
-        policy.normalized_batch_arguments("read_file", {"path": "a", "limit": 4}, registry=registry)
+        policy.normalized_batch_arguments("read_file", {"path": "a", "limit": 4}, argument_schema_for=partial(get_tool_argument_schema, registry=registry))
 
 
 def test_provider_candidates_do_not_depend_on_batch_eligibility(monkeypatch):
     action = proposal()
     tools = get_file_tools(str(Path.cwd()))
     authorized = {tool.name: tool for tool in tools}
-    monkeypatch.setattr(policy, "_BATCH_ELIGIBLE_TOOLS", frozenset())
+    change_read_definition(monkeypatch, max_batch_calls=1)
     assert provider_module._is_valid_native_batch(native_batch(), authorized)
     assert not provider_module._is_permitted_native_batch(native_batch(), authorized)
     # Static eligibility changes are consumed by both provider and Controller.
@@ -141,7 +142,7 @@ def test_controller_capability_ceiling_is_independent_of_batch_policy(monkeypatc
     state = state.model_copy(update={"protocol_visible": state.protocol_visible.model_copy(
         update={"active_plan": plan},
     )})
-    monkeypatch.setattr(controller_module, "validate_read_only_batch", lambda *args: ())
+    monkeypatch.setattr(controller_module, "validate_read_only_batch", lambda *args, **kwargs: ())
     decision = CortexController(24).decide(input_for(state, action))
     assert decision.decision_type == Decision.TERMINATE
     assert decision.pending_tool_request is None
@@ -149,7 +150,7 @@ def test_controller_capability_ceiling_is_independent_of_batch_policy(monkeypatc
 
 def test_controller_scope_validation_is_independent_of_batch_policy(monkeypatch):
     action = proposal().model_copy(update={"step_id": "another-step"})
-    monkeypatch.setattr(controller_module, "validate_read_only_batch", lambda *args: ())
+    monkeypatch.setattr(controller_module, "validate_read_only_batch", lambda *args, **kwargs: ())
     with pytest.raises(ValueError, match="step does not match active step"):
         CortexController(24).decide(input_for(initial_state(), action))
 

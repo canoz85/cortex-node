@@ -8,6 +8,7 @@ adapter; no raw response is returned by the Brain service.
 import hashlib
 import json
 from collections.abc import Mapping
+from typing import Callable
 
 from pydantic import ValidationError
 from core.brain_batch_policy import validate_read_only_batch
@@ -129,6 +130,7 @@ def _tool_requested_outcome(
 
 def _native_outcome(
     calls, brain_input: BrainInput, allowed_tools: set[str],
+    *, argument_schema_for: Callable[[str], type | None] | None = None,
 ) -> BrainOutcome:
     if not isinstance(calls, (list, tuple)) or not calls:
         raise InvalidBrainOutput("exactly_one_tool_call_required")
@@ -144,7 +146,7 @@ def _native_outcome(
                 if "id" in call and (not isinstance(call["id"], str) or not call["id"].strip()):
                     raise InvalidBrainOutput("invalid_tool_call_id")
                 candidates.append((name, arguments))
-            validate_read_only_batch(candidates, allowed_tools)
+            validate_read_only_batch(candidates, allowed_tools, argument_schema_for=argument_schema_for)
         except ValueError as exc:
             raise InvalidBrainOutput("exactly_one_tool_call_required") from exc
         return BrainOutcome(
@@ -229,6 +231,7 @@ def validate_native_call(
 
 def normalize_brain_output(
     raw: object, brain_input: BrainInput, allowed_tools: set[str],
+    *, argument_schema_for: Callable[[str], type | None] | None = None,
 ) -> BrainOutcome:
     """Consume only the provider's canonical native call channel; never recover text."""
     try:
@@ -239,7 +242,7 @@ def normalize_brain_output(
         calls = getattr(raw, "tool_calls", None)
         if not calls:
             raise InvalidBrainOutput("native_tool_call_required")
-        return _native_outcome(calls, brain_input, allowed_tools)
+        return _native_outcome(calls, brain_input, allowed_tools, argument_schema_for=argument_schema_for)
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
         code = str(exc) if isinstance(exc, InvalidBrainOutput) else "malformed_model_output"
         return BrainOutcome(

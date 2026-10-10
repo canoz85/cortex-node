@@ -1,3 +1,5 @@
+from functools import partial
+
 from langchain_ollama import ChatOllama
 
 from core.graph_brain import create_brain_node
@@ -11,7 +13,7 @@ from core.graph_planner import create_planner_node
 from core.protocol.models import PlanningCapabilities
 
 from core.rag import WorkspaceRAG
-from tools.registry import ToolRegistry
+from tools.registry import ToolRegistry, get_tool_argument_schema
 
 def create_graph_nodes(
     *,
@@ -31,6 +33,7 @@ def create_graph_nodes(
     registry.resolve(tools_set)
     controller_node = create_controller_node(
         planning_capabilities=PlanningCapabilities(available_tools=tuple(sorted(tools_set))),
+        argument_schema_for=partial(get_tool_argument_schema, registry=registry),
         completion_service=CompletionService({
             PROVIDER_ID: FileReadCollectionProvider(),
         }),

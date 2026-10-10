@@ -83,6 +83,7 @@ class CortexController:
         *,
         now_utc: Callable[[], datetime] | None = None,
         planning_capabilities: PlanningCapabilities | None = None,
+        argument_schema_for: Callable[[str], type | None] | None = None,
         async_submission_tool_names: Iterable[str] = ("run_comfy_workflow",),
         ambiguous_submission_error_codes: Iterable[str] = (
             "COMFY_API_ERROR",
@@ -93,6 +94,7 @@ class CortexController:
         self._max_reasoning_steps = max_reasoning_steps
         self._now_utc = now_utc or (lambda: datetime.now(timezone.utc))
         self._planning_capabilities = planning_capabilities or PlanningCapabilities()
+        self._argument_schema_for = argument_schema_for
         self._async_submission_tool_names = frozenset(async_submission_tool_names)
         self._ambiguous_submission_error_codes = frozenset(
             ambiguous_submission_error_codes
@@ -825,6 +827,7 @@ class CortexController:
         try:
             validate_read_only_batch(
                 [(request.tool_name, request.arguments) for request in requests], authorized,
+                argument_schema_for=self._argument_schema_for,
             )
             # The accepted plan's execution ceiling remains Controller authority,
             # independently of the shared static batch eligibility policy.
@@ -880,7 +883,9 @@ class CortexController:
         if not self._batch_scope_valid(context) or request is None:
             return self._terminate(context.cursor, "tool_batch_scope_or_pending_mismatch")
         try:
-            normalized_batch_arguments(request.tool_name, request.arguments)
+            normalized_batch_arguments(
+                request.tool_name, request.arguments, argument_schema_for=self._argument_schema_for,
+            )
             if request.tool_name not in (context.active_plan.available_tools or ()):
                 raise ValueError("tool_outside_plan_capabilities")
             if any(record.result.request_id == request.request_id
@@ -900,7 +905,9 @@ class CortexController:
         request = continuation.remaining[0]
         # Recheck the current capability ceiling before every authorization.
         try:
-            normalized_batch_arguments(request.tool_name, request.arguments)
+            normalized_batch_arguments(
+                request.tool_name, request.arguments, argument_schema_for=self._argument_schema_for,
+            )
             if request.tool_name not in (context.active_plan.available_tools or ()):
                 raise ValueError("tool_outside_plan_capabilities")
             if any(record.result.request_id == request.request_id

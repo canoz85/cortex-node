@@ -1,64 +1,84 @@
-"""Fail-closed policy for independent, synchronous homogeneous read_file actions."""
+"""Shared validation for explicitly enabled, independent synchronous batches."""
 
 import json
-import os
+from typing import Callable
 
-from tools.registry import ToolRegistry, get_tool_argument_schema, get_tool_definition
-
-# A complete batch fits within MAX_CURRENT_ATTEMPT_RECORDS, leaving room for
-# preceding attempts. Full provenance remains independent of display.
-MAX_READ_FILE_BATCH = 24
-_BATCH_ELIGIBLE_TOOLS = frozenset({"read_file"})
+from tools.registry import get_tool_argument_schema, get_tool_definition
 
 
-def normalized_batch_arguments(name, arguments, *, registry: ToolRegistry | None = None):
+def _batch_execution_metadata(name, argument_schema_for):
     definition = get_tool_definition(name)
-    if name not in _BATCH_ELIGIBLE_TOOLS or definition is None or definition.mutating:
+    if definition is None or definition.mutating or definition.max_batch_calls <= 1:
         raise ValueError("tool_not_batch_eligible")
-    schema = get_tool_argument_schema(name, registry=registry)
+    lookup = get_tool_argument_schema if argument_schema_for is None else argument_schema_for
+    schema = lookup(name)
     if not callable(getattr(schema, "model_validate", None)):
         raise ValueError("batch_argument_schema_unavailable")
+    return definition.max_batch_calls, schema
+
+
+def batch_call_limit(name, *, argument_schema_for: Callable[[str], type | None] | None = None) -> int:
+    """Read an eligible tool's limit; metadata and schemas never grant authority."""
+    return _batch_execution_metadata(name, argument_schema_for)[0]
+
+
+def normalized_batch_arguments(
+    name, arguments, *, argument_schema_for: Callable[[str], type | None] | None = None,
+):
+    _, schema = _batch_execution_metadata(name, argument_schema_for)
     return schema.model_validate(arguments).model_dump(mode="json")
 
 
-def validate_read_only_batch(candidates, authorized_names, *, registry: ToolRegistry | None = None):
+def validate_read_only_batch(
+    candidates, authorized_names, *, argument_schema_for: Callable[[str], type | None] | None = None,
+):
     """Validate the entire ordered group; return default-normalized arguments.
 
-    read_file accepts only literal path/offset/limit values, with no result
-    references or async input. Thus each validated invocation is independent.
-    Caller supplies the accepted execution's capability ceiling and scope.
+    Explicit metadata opts tools into independent synchronous execution.
+    Caller supplies the accepted execution's capability ceiling and schemas.
+    Returned arguments are for validation, never replacements for requests.
     """
-    if not 2 <= len(candidates) <= MAX_READ_FILE_BATCH:
+    if not isinstance(candidates, (list, tuple)) or len(candidates) < 2:
         raise ValueError("invalid_batch_size")
-    return _normalized_read_only_batch_members(candidates, authorized_names, registry=registry)
+    normalized = _normalized_read_only_batch_members(
+        candidates, authorized_names, argument_schema_for=argument_schema_for,
+    )
+    if len(candidates) > batch_call_limit(candidates[0][0], argument_schema_for=argument_schema_for):
+        raise ValueError("invalid_batch_size")
+    return normalized
 
 
-def is_oversized_read_only_batch(candidates, authorized_names, *, registry: ToolRegistry | None = None):
+def is_oversized_read_only_batch(
+    candidates, authorized_names, *, argument_schema_for: Callable[[str], type | None] | None = None,
+):
     """Correction classification only: size is the group's sole disqualifier.
 
     Validate every member without relaxing the executable batch size limit.
     This predicate never accepts or authorizes a batch for execution.
     """
-    if len(candidates) <= MAX_READ_FILE_BATCH:
+    if not isinstance(candidates, (list, tuple)) or len(candidates) < 2:
         return False
     try:
-        _normalized_read_only_batch_members(candidates, authorized_names, registry=registry)
+        _normalized_read_only_batch_members(
+            candidates, authorized_names, argument_schema_for=argument_schema_for,
+        )
+        return len(candidates) > batch_call_limit(candidates[0][0], argument_schema_for=argument_schema_for)
     except (ValueError, TypeError, KeyError):
         return False
-    return True
 
 
-def _normalized_read_only_batch_members(candidates, authorized_names, *, registry):
+def _normalized_read_only_batch_members(candidates, authorized_names, *, argument_schema_for):
+    if any(not isinstance(name, str) or not isinstance(arguments, dict)
+           for name, arguments in candidates):
+        raise ValueError("malformed_batch_invocation")
     names = {name for name, _ in candidates}
     if len(names) != 1 or not names <= set(authorized_names):
         raise ValueError("batch_tool_not_authorized_or_homogeneous")
     normalized = []
     seen = set()
     for name, arguments in candidates:
-        effective = normalized_batch_arguments(name, arguments, registry=registry)
-        identity_args = dict(effective)
-        identity_args["path"] = os.path.normcase(os.path.normpath(effective["path"]))
-        identity = json.dumps(identity_args, sort_keys=True, allow_nan=False)
+        effective = normalized_batch_arguments(name, arguments, argument_schema_for=argument_schema_for)
+        identity = json.dumps(effective, sort_keys=True, allow_nan=False)
         if identity in seen:
             raise ValueError("duplicate_effective_batch_invocation")
         seen.add(identity)

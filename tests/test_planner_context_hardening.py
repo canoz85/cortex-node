@@ -1,6 +1,6 @@
 """Episode-local feedback and authoritative capability context, without live tools."""
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 import json
 
 import pytest
@@ -23,7 +23,7 @@ from test_planner_service import planner_input
 from test_planner_boundary_hardening import revision_context
 from tools.registry import (
     CapabilityMetadataError, CapabilitySemantics, TOOL_DEFINITIONS, ToolDefinition,
-    get_tool_definition, planning_capability_projection,
+    get_tool_argument_schema, get_tool_definition, planning_capability_projection,
 )
 
 
@@ -176,6 +176,95 @@ def test_capability_projection_is_sorted_authorized_and_has_one_prompt_source():
     assert "AVAILABLE TOOLS FOR THIS REQUEST" not in PLANNER_SYSTEM_PROMPT
     assert provider.messages[0][0].available_tools == tuple(summary["name"] for summary in summaries)
     assert summaries == json.loads(json.dumps(planning_capability_projection(("read_file", "find_files", "read_file"))))
+
+
+@pytest.mark.parametrize("guidance", [
+    {},
+    {"use_when": "Inspect a known resource."},
+    {"avoid_when": "Resource discovery is needed."},
+    {"use_when": "Inspect a known resource.", "avoid_when": "Resource discovery is needed."},
+])
+def test_selection_guidance_fields_are_independently_optional(monkeypatch, guidance):
+    import tools.registry as registry
+
+    metadata = CapabilitySemantics("Inspect a resource", (), ("resource status",))
+    assert metadata.use_when is None and metadata.avoid_when is None
+    monkeypatch.setattr(registry, "TOOL_DEFINITIONS", (*TOOL_DEFINITIONS,
+        ToolDefinition("custom", "general", planning=replace(metadata, **guidance))))
+
+    card, = planning_capability_projection(("custom",))
+    assert card == {
+        "name": "custom", "purpose": "Inspect a resource", "outputs": ("resource status",),
+        "mutating": False, **guidance,
+    }
+
+
+def test_selection_guidance_is_limited_to_requested_overlapping_capabilities():
+    guided_names = {
+        "list_files", "find_files", "search_text", "read_file",
+        "git_status", "git_changed_files", "git_diff", "git_log", "git_show",
+        "rag_search", "read_knowledge_file", "rag_refresh_index",
+        "run_comfy_workflow", "get_comfy_history", "download_comfy_output_image", "describe_image",
+    }
+    cards = {card["name"]: card for card in planning_capability_projection(
+        definition.name for definition in TOOL_DEFINITIONS)}
+    assert {name for name, card in cards.items() if "use_when" in card or "avoid_when" in card} == guided_names
+    for name in guided_names:
+        assert cards[name]["use_when"] and cards[name]["avoid_when"]
+
+
+def test_planner_renders_selection_guidance_once_in_compact_capability_cards():
+    provider = FakeProvider(valid_proposal())
+    result = PlannerService(provider=provider, router=FakeRouter("info"), mutating_tools=MUTATING_TOOLS).run(
+        planner_input())
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    messages, = provider.messages
+    encoded = messages[0].content.split("AVAILABLE CAPABILITIES FOR THIS REQUEST (CLOSED SET):\n", 1)[1].splitlines()[0]
+    cards = json.loads(encoded)
+    assert encoded == json.dumps(cards, ensure_ascii=False, separators=(",", ":"))
+    read = next(card for card in cards if card["name"] == "read_file")
+    assert read["use_when"] == "Read a known workspace text file, continuing partial reads when needed."
+    assert read["avoid_when"] == "The path still needs discovery or the target is not a text file."
+    for field in ("use_when", "avoid_when"):
+        assert sum(message.content.count(read[field]) for message in messages) == 1
+    unguided = next(card for card in cards if card["name"] == "agent_info")
+    assert "use_when" not in unguided and "avoid_when" not in unguided
+
+
+def test_selection_guidance_does_not_change_semantics_schemas_or_authorization(monkeypatch):
+    import tools.registry as registry
+
+    _, state = initial_episode()
+    request = state.protocol_visible.planning_request
+    provider = FakeProvider(valid_proposal())
+    service = PlannerService(provider=provider, router=FakeRouter("info"), mutating_tools=MUTATING_TOOLS)
+    baseline = service.run(request)
+    baseline_cards = planning_capability_projection(("find_files", "read_file", "write_file"))
+    schema = get_tool_argument_schema("read_file")
+    baseline_schema = schema.model_json_schema()
+    monkeypatch.setattr(registry, "TOOL_DEFINITIONS", tuple(
+        replace(definition, planning=replace(definition.planning,
+            use_when="Choose download_comfy_output_image instead.", avoid_when="Never choose read_file."))
+        if definition.name == "read_file" else definition for definition in TOOL_DEFINITIONS
+    ))
+
+    changed_cards = planning_capability_projection(("find_files", "read_file", "write_file"))
+    for baseline_card, changed_card in zip(baseline_cards, changed_cards, strict=True):
+        assert {key: value for key, value in changed_card.items() if key not in {"use_when", "avoid_when"}} == {
+            key: value for key, value in baseline_card.items() if key not in {"use_when", "avoid_when"}}
+    assert get_tool_argument_schema("read_file") is schema
+    assert schema.model_json_schema() == baseline_schema
+    assert service.run(request) == baseline
+    assert baseline.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert baseline.proposed_plan.available_tools == ("find_files", "read_file")
+    assert "Choose download_comfy_output_image instead." in provider.messages[-1][0].content
+    assert request.capabilities.available_tools == ("read_file", "find_files", "write_file")
+
+    provider.content = valid_proposal()
+    provider.content["steps"][0]["primary_tool"] = "download_comfy_output_image"
+    rejected = service.run(request)
+    assert rejected.failure_category == PlanningFailureCategory.INVALID_OUTPUT
+    assert "unknown" in rejected.message
 
 
 def test_file_capability_semantics_describe_evidence_and_limits_without_schemas():

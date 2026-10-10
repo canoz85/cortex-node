@@ -11,7 +11,6 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from pydantic import ValidationError
 
 from core.brain import _build_step_progress_messages
-from core.brain_batch_policy import MAX_READ_FILE_BATCH
 from core.brain_evidence_policy import MAX_CURRENT_ATTEMPT_RECORDS
 from core.brain_normalization import normalize_brain_output
 from core.brain_provider import LangChainBrainProvider
@@ -33,7 +32,11 @@ from core.runtime.controller_transition import ControllerCoordinator
 from core.runtime.execution_driver import ExecutionDriver, WorkerDispatchError
 from core.runtime.tool_result_integration import integrate_tool_result, SerializedToolRuntimePort
 from tools.file_ops import get_file_tools
+from tools.registry import get_tool_definition
 from test_brain_outcomes import brain_input, SequenceModel, native_action
+
+
+READ_FILE_BATCH_LIMIT = get_tool_definition("read_file").max_batch_calls
 
 
 def native_batch(count=2, *, names=None, args=None):
@@ -76,7 +79,7 @@ def result_for(request, success=True):
                       data={"entries": [request.arguments["path"]]})
 
 
-@pytest.mark.parametrize("count", [2, MAX_READ_FILE_BATCH])
+@pytest.mark.parametrize("count", [2, READ_FILE_BATCH_LIMIT])
 def test_permitted_batch_uses_one_provider_call_and_distinct_ordinary_requests(count):
     output, model = provider_output(native_batch(count))
     assert output.kind == Kind.TOOL_REQUESTED
@@ -99,8 +102,8 @@ def test_singleton_canonicalization_unchanged(content):
 
 
 @pytest.mark.parametrize("raw", [
-    native_batch(MAX_READ_FILE_BATCH + 1),
-    native_batch(args=[{"path": "a"}, {"path": "./a", "offset": 0, "limit": 10000}]),
+    native_batch(READ_FILE_BATCH_LIMIT + 1),
+    native_batch(args=[{"path": "a"}, {"path": "a", "offset": 0, "limit": 10000}]),
     native_batch(names=["read_file", "list_files"], args=[{"path": "a"}, {}]),
     native_batch(names=["write_file"] * 2, args=[{"path": "a", "content": "x"}, {"path": "b", "content": "y"}]),
     native_batch(names=["read_file", "brain_step_completed"], args=[{"path": "a"}, {"message": "Done"}]),
@@ -132,7 +135,7 @@ def test_payload_exclusivity_and_wrong_kind_are_enforced():
         BrainOutcome(outcome=Kind.STEP_FAILED, tool_requests=requests)
 
 
-@pytest.mark.parametrize("count", [2, MAX_READ_FILE_BATCH])
+@pytest.mark.parametrize("count", [2, READ_FILE_BATCH_LIMIT])
 @pytest.mark.parametrize("failed", [None, 0])
 def test_driver_orders_members_reenters_controller_and_returns_all_evidence_once(count, failed):
     state = initial_state()
@@ -255,7 +258,7 @@ def test_controller_revalidates_whole_injected_proposal_before_any_authorization
         requests[1] = requests[1].model_copy(update={"arguments": {"path": "file-0.txt", "limit": 1, "offset": 0}})
     elif invalid == "oversized":
         requests = [ToolRequest(request_id=str(i), tool_name="read_file", arguments={"path": str(i)})
-                    for i in range(MAX_READ_FILE_BATCH + 1)]
+                    for i in range(READ_FILE_BATCH_LIMIT + 1)]
     elif invalid == "heterogeneous":
         requests[1] = requests[1].model_copy(update={"tool_name": "list_files"})
     elif invalid == "mutating":
@@ -276,14 +279,14 @@ def test_controller_revalidates_whole_injected_proposal_before_any_authorization
 
 
 def test_maximum_batch_window_order_and_record_local_exact_collection_with_full_provenance():
-    state, decision = accepted_first(MAX_READ_FILE_BATCH)
+    state, decision = accepted_first(READ_FILE_BATCH_LIMIT)
     prefix = tuple(ToolExecutionRecord(execution_id=state.protocol_visible.identity.execution_id,
         plan_id="p1", plan_revision=1, step_id="s1", tool_name="read_file",
         result=ToolResult(request_id=f"prior-{i}", success=True, message="Earlier read", data={"entries": [f"old-{i}"]}))
         for i in range(10))
     state = state.model_copy(update={"working": state.working.model_copy(update={"tool_execution_history": prefix})})
     controller = CortexController(24)
-    for i in range(MAX_READ_FILE_BATCH):
+    for i in range(READ_FILE_BATCH_LIMIT):
         state = integrate_tool_result(state, decision, result_for(decision.pending_tool_request, i != 0))
         decision = controller.decide(input_for(state))
         state = apply_controller_decision_to_state(state, decision)
@@ -291,10 +294,10 @@ def test_maximum_batch_window_order_and_record_local_exact_collection_with_full_
     payload = json.loads(_build_step_progress_messages(brain_input=context)[0].content.split("\n", 1)[1])
     current = payload["current_attempts"]
     assert [r["record_index"] for r in current] == list(range(MAX_CURRENT_ATTEMPT_RECORDS))
-    assert [r["args"]["path"] for r in current[-MAX_READ_FILE_BATCH:]] == [
-        f"file-{i}.txt" for i in range(MAX_READ_FILE_BATCH)]
-    assert [r["success"] for r in current[-MAX_READ_FILE_BATCH:]] == [
-        False, *([True] * (MAX_READ_FILE_BATCH - 1))]
+    assert [r["args"]["path"] for r in current[-READ_FILE_BATCH_LIMIT:]] == [
+        f"file-{i}.txt" for i in range(READ_FILE_BATCH_LIMIT)]
+    assert [r["success"] for r in current[-READ_FILE_BATCH_LIMIT:]] == [
+        False, *([True] * (READ_FILE_BATCH_LIMIT - 1))]
     completion = BrainOutcome(outcome=Kind.STEP_COMPLETED, step_id="s1",
         completion_evidence=StepCompletionEvidence(step_id="s1", summary="Inspected",
             exact_collection=ExactCollection(source_record_index=MAX_CURRENT_ATTEMPT_RECORDS - 1,
@@ -302,8 +305,8 @@ def test_maximum_batch_window_order_and_record_local_exact_collection_with_full_
     decision = controller.decide(input_for(state, completion))
     records = state.working.tool_execution_history
     assert decision.completion_evidence.tool_request_ids == tuple(r.result.request_id for r in records)
-    assert len(decision.completion_evidence.tool_request_ids) == len(prefix) + MAX_READ_FILE_BATCH
-    assert decision.completion_evidence.exact_collection.items == (f"file-{MAX_READ_FILE_BATCH - 1}.txt",)
+    assert len(decision.completion_evidence.tool_request_ids) == len(prefix) + READ_FILE_BATCH_LIMIT
+    assert decision.completion_evidence.exact_collection.items == (f"file-{READ_FILE_BATCH_LIMIT - 1}.txt",)
     assert decision.completion_evidence.exact_collection.source_request_id == records[-1].result.request_id
 
 
