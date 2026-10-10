@@ -508,7 +508,7 @@ def test_brain_logs_one_exchange_for_each_actual_retry_invocation(monkeypatch, t
     assert len(records[1]["messages"]) == len(records[0]["messages"]) + 2
 
 
-def test_brain_live_step_counts_each_actual_provider_invocation():
+def test_brain_live_invocations_count_each_actual_provider_call():
     model = SequenceModel(
         AIMessage(content="invalid prose"),
         native_action("brain_step_completed", {"message": "Done"}),
@@ -527,7 +527,7 @@ def test_brain_live_step_counts_each_actual_provider_invocation():
         assert result.kind == Kind.STEP_COMPLETED
         assert len(model.calls) == 2
         assert status.provider_invocations_by_worker["brain"] == 2
-        assert (status.stage, status.detail) == ("brain", "step 2")
+        assert (status.stage, status.detail) == ("brain", "plan step 1/1 · invocation 2")
         assert status.usage_by_worker["brain"]["calls"] == 2
     finally:
         status.stop()

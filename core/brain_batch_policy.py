@@ -1,9 +1,13 @@
 """Shared validation for explicitly enabled, independent synchronous batches."""
 
 import json
+from collections import Counter
 from typing import Callable
 
 from tools.registry import get_tool_argument_schema, get_tool_definition
+
+
+MAX_BATCH_CALLS = 24
 
 
 def _batch_execution_metadata(name, argument_schema_for):
@@ -43,7 +47,7 @@ def validate_read_only_batch(
     normalized = _normalized_read_only_batch_members(
         candidates, authorized_names, argument_schema_for=argument_schema_for,
     )
-    if len(candidates) > batch_call_limit(candidates[0][0], argument_schema_for=argument_schema_for):
+    if _exceeds_batch_limits(candidates, argument_schema_for=argument_schema_for):
         raise ValueError("invalid_batch_size")
     return normalized
 
@@ -62,9 +66,16 @@ def is_oversized_read_only_batch(
         _normalized_read_only_batch_members(
             candidates, authorized_names, argument_schema_for=argument_schema_for,
         )
-        return len(candidates) > batch_call_limit(candidates[0][0], argument_schema_for=argument_schema_for)
+        return _exceeds_batch_limits(candidates, argument_schema_for=argument_schema_for)
     except (ValueError, TypeError, KeyError):
         return False
+
+
+def _exceeds_batch_limits(candidates, *, argument_schema_for):
+    return len(candidates) > MAX_BATCH_CALLS or any(
+        count > batch_call_limit(name, argument_schema_for=argument_schema_for)
+        for name, count in Counter(name for name, _ in candidates).items()
+    )
 
 
 def _normalized_read_only_batch_members(candidates, authorized_names, *, argument_schema_for):
@@ -72,13 +83,13 @@ def _normalized_read_only_batch_members(candidates, authorized_names, *, argumen
            for name, arguments in candidates):
         raise ValueError("malformed_batch_invocation")
     names = {name for name, _ in candidates}
-    if len(names) != 1 or not names <= set(authorized_names):
-        raise ValueError("batch_tool_not_authorized_or_homogeneous")
+    if not names <= set(authorized_names):
+        raise ValueError("batch_tool_not_authorized")
     normalized = []
     seen = set()
     for name, arguments in candidates:
         effective = normalized_batch_arguments(name, arguments, argument_schema_for=argument_schema_for)
-        identity = json.dumps(effective, sort_keys=True, allow_nan=False)
+        identity = (name, json.dumps(effective, sort_keys=True, allow_nan=False))
         if identity in seen:
             raise ValueError("duplicate_effective_batch_invocation")
         seen.add(identity)

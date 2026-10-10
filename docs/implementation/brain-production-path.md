@@ -126,7 +126,8 @@ parses the rejected content or asks the model to preserve an inferred decision.
 
 This is an explicit second model invocation, not strict single-invocation semantics. It is
 valuable for a transport-contract omission before a semantic proposal exists. Every actual
-invocation is counted and logged. Permitted homogeneous read_file groups are accepted.
+invocation is counted and logged. Independent groups of metadata-enabled tools are accepted,
+including mixed tool names, subject to the overall and per-tool call limits.
 Valid disallowed groups receive one correction asking for one action. Exceptions,
 malformed/unknown calls and invalid arguments do not trigger correction. After its bounded correction, normalization
 returns a typed failure; Controller owns subsequent execution retry policy.

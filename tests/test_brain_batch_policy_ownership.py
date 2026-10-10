@@ -1,4 +1,4 @@
-"""Ownership boundaries for metadata-enabled homogeneous batches."""
+"""Ownership boundaries for metadata-enabled independent batches."""
 
 import inspect
 from dataclasses import replace

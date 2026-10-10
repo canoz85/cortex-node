@@ -39,7 +39,7 @@ def state_for(context):
 
 def group(name, count=2, arguments=None):
     arguments = arguments if arguments is not None else [
-        {"path": f"file-{i}.txt"} if name == "read_file" else {"pattern": f"*.ext{i}"}
+        {"path": f"file-{i}.txt"} if name in {"read_file", "list_files"} else {"pattern": f"*.ext{i}"}
         for i in range(count)
     ]
     return native_batch(count, names=[name] * count, args=arguments)
@@ -64,14 +64,15 @@ def test_only_explicit_metadata_enables_batches():
     assert ToolDefinition("future", "workspace").max_batch_calls == 1
     assert {definition.name: definition.max_batch_calls
             for definition in registry_module.TOOL_DEFINITIONS if definition.max_batch_calls > 1} == {
-        "read_file": 24, "find_files": 24,
+        "read_file": 24, "find_files": 24, "list_files": 24,
     }
     assert all(definition.max_batch_calls == 1 for definition in registry_module.TOOL_DEFINITIONS
-               if definition.name not in {"read_file", "find_files"})
+               if definition.name not in {"read_file", "find_files", "list_files"})
 
 
-@pytest.mark.parametrize("name", ["read_file", "find_files"])
-@pytest.mark.parametrize("count", [2, 24])
+@pytest.mark.parametrize("name,count", [
+    (name, count) for name in ("read_file", "find_files") for count in (2, 24)
+] + [("list_files", count) for count in range(2, 25)])
 def test_batches_use_bound_schemas_at_all_boundaries(executables, name, count):
     tools, schema_for = executables
     context = context_for()
@@ -94,7 +95,7 @@ def test_batches_use_bound_schemas_at_all_boundaries(executables, name, count):
         assert schema_for(name).model_validate({}).model_dump()["path"] == "."
 
 
-@pytest.mark.parametrize("name", ["read_file", "find_files"])
+@pytest.mark.parametrize("name", ["read_file", "find_files", "list_files"])
 def test_25_calls_are_rejected_at_all_boundaries_without_third_model_call(executables, name):
     tools, schema_for = executables
     context = context_for()
@@ -113,7 +114,7 @@ def test_25_calls_are_rejected_at_all_boundaries_without_third_model_call(execut
     assert decision.pending_tool_request is decision.tool_request_continuation is None
 
 
-@pytest.mark.parametrize("name", ["read_file", "find_files"])
+@pytest.mark.parametrize("name", ["read_file", "find_files", "list_files"])
 def test_changed_metadata_drives_guidance_correction_and_all_limits(monkeypatch, executables, name):
     monkeypatch.setattr(registry_module, "TOOL_DEFINITIONS", tuple(
         replace(definition, max_batch_calls=3) if definition.name == name else definition
@@ -127,7 +128,7 @@ def test_changed_metadata_drives_guidance_correction_and_all_limits(monkeypatch,
     output = LangChainBrainProvider(brain_llm=model, executable_tools=tools).generate(context, ())
     assert output.kind == Kind.TOOL_REQUESTED and len(output.tool_requests) == 3
     assert any(f"- {name}: up to 3" in message.content for message in model.calls[0])
-    assert "maximum permitted batch size is 3" in model.calls[1][-1].content
+    assert f"Per-tool call limits: {name}: 3." in model.calls[1][-1].content
     assert normalize_brain_output(raw, context, {name}, argument_schema_for=schema_for).kind == Kind.INVALID_OUTPUT
     controller = CortexController(24, argument_schema_for=schema_for)
     assert controller.decide(input_for(state_for(context), injected_proposal(raw))).decision_type == Decision.TERMINATE
@@ -142,7 +143,8 @@ def test_changed_metadata_drives_guidance_correction_and_all_limits(monkeypatch,
     ((), ("read_file", "find_files"), None, ()),
     (("read_file", "find_files"), ("read_file", "find_files"), "find_files", ("read_file",)),
     (("read_file", "find_files"), ("read_file", "find_files"), "read_file", ("find_files",)),
-    (("list_files",), ("list_files",), None, ()),
+    (("list_files",), ("list_files",), None, ("list_files",)),
+    (("search_text",), ("search_text",), None, ()),
 ])
 def test_guidance_only_advertises_authorized_bound_schema_valid_tools(executables, authorized, bound,
                                                                     missing_schema, expected):
@@ -154,22 +156,20 @@ def test_guidance_only_advertises_authorized_bound_schema_valid_tools(executable
     guidance = next(message.content for message in model.calls[0]
                     if message.content.endswith("lifecycle actions require one call."))
     lines = [f"- {name}: up to {get_tool_definition(name).max_batch_calls}" for name in expected]
-    expected_guidance = ("Homogeneous independent multiple calls allowed:\n" + "\n".join(lines) +
+    expected_guidance = ("Independent multiple calls allowed (up to 24 total; tools may be mixed):\n" + "\n".join(lines) +
                          "\nAll other tools and lifecycle actions require one call." if lines else
                          "All tools and lifecycle actions require one call.")
     assert guidance == expected_guidance
     assert {tool.name for tool in model.bound_tools if hasattr(tool, "name")} == set(authorized) & set(bound)
 
 
-@pytest.mark.parametrize("invalid", ["mixed", "unauthorized", "malformed", "duplicate", "mutating",
+@pytest.mark.parametrize("invalid", ["unauthorized", "malformed", "duplicate", "mutating",
                                      "singleton_only", "schema_missing", "invalid_args"])
 def test_invalid_batches_fail_closed_at_all_boundaries(executables, monkeypatch, invalid):
     tools, schema_for = executables
     context = context_for()
     raw = group("find_files")
-    if invalid == "mixed":
-        raw.tool_calls[1].update(name="read_file", args={"path": "a"})
-    elif invalid == "unauthorized":
+    if invalid == "unauthorized":
         context = context_for(("read_file",))
     elif invalid == "malformed":
         raw.tool_calls[1]["args"] = []
@@ -183,7 +183,7 @@ def test_invalid_batches_fail_closed_at_all_boundaries(executables, monkeypatch,
         ))
         raw = group("write_file", arguments=[{"path": "a", "content": "x"}, {"path": "b", "content": "y"}])
     elif invalid == "singleton_only":
-        raw = group("list_files", arguments=[{"path": "a"}, {"path": "b"}])
+        raw = group("search_text", arguments=[{"query": "a"}, {"query": "b"}])
     elif invalid == "schema_missing":
         tools = [SimpleNamespace(name=tool.name, args_schema=None) if tool.name == "find_files" else tool
                  for tool in tools]
@@ -341,8 +341,8 @@ def test_find_files_schema_is_rechecked_on_resume_and_continuation(executables, 
 
 def test_singleton_only_tool_is_not_classified_as_size_only(executables):
     _, schema_for = executables
-    assert not is_oversized_read_only_batch([("list_files", {"path": "a"}), ("list_files", {"path": "b"})],
-                                           {"list_files"}, argument_schema_for=schema_for)
+    assert not is_oversized_read_only_batch([("search_text", {"query": "a"}), ("search_text", {"query": "b"})],
+                                           {"search_text"}, argument_schema_for=schema_for)
 
 
 def test_graph_composition_supplies_inferred_schema_to_controller(executables, monkeypatch):
@@ -362,3 +362,88 @@ def test_graph_composition_supplies_inferred_schema_to_controller(executables, m
     update = controller_node({"execution_state": state_for(context), "brain_result": output})
     assert update["controller_decision"].decision_type == Decision.DISPATCH_TOOL_RUNTIME
     assert update["controller_decision"].pending_tool_request == output.tool_requests[0]
+
+
+@pytest.mark.parametrize("invalid", ["duplicate", "duplicate_default",
+                                     "unauthorized", "invalid_args", "schema_missing"])
+def test_list_files_batches_reject_invalid_groups_at_all_boundaries(executables, invalid):
+    tools, schema_for = executables
+    context = context_for()
+    raw = group("list_files")
+    if invalid == "duplicate":
+        raw = group("list_files", arguments=[{"path": "Snake/ui"}, {"path": "Snake/ui"}])
+    elif invalid == "duplicate_default":
+        raw = group("list_files", arguments=[{}, {"path": "."}])
+    elif invalid == "unauthorized":
+        context = context_for(("read_file", "find_files"))
+    elif invalid == "invalid_args":
+        raw.tool_calls[1]["args"] = {"path": []}
+    else:
+        tools = [SimpleNamespace(name=tool.name, args_schema=None) if tool.name == "list_files" else tool
+                 for tool in tools]
+        schema_for = partial(get_tool_argument_schema, registry=ToolRegistry.from_tools(tools))
+    authorized = {tool.name: tool for tool in tools if tool.name in context.active_plan.available_tools}
+    candidates = [(call["name"], call["args"]) for call in raw.tool_calls]
+    with pytest.raises(ValueError):
+        validate_read_only_batch(candidates, authorized, argument_schema_for=schema_for)
+    assert not _is_permitted_native_batch(raw, authorized, argument_schema_for=schema_for)
+    model = SequenceModel(raw, raw)
+    output = LangChainBrainProvider(brain_llm=model, executable_tools=tools).generate(context, ())
+    assert output.kind == Kind.INVALID_OUTPUT
+    assert output.tool_request is output.tool_requests is None
+    assert normalize_brain_output(raw, context, set(authorized), argument_schema_for=schema_for).kind == Kind.INVALID_OUTPUT
+    decision = CortexController(24, argument_schema_for=schema_for).decide(
+        input_for(state_for(context), injected_proposal(raw)),
+    )
+    assert decision.decision_type == Decision.TERMINATE
+    assert decision.pending_tool_request is decision.tool_request_continuation is None
+
+
+def test_snake_list_files_batch_executes_sequentially_with_ordered_provenance(executables, tmp_path):
+    tools, schema_for = executables
+    paths = ("Snake/ui", "Snake/app", "Snake/core")
+    for index, path in enumerate(paths):
+        target = tmp_path / path
+        target.mkdir(parents=True)
+        (target / f"module-{index}.py").write_text("pass", encoding="utf-8")
+    assert get_tool_definition("list_files").args_schema is None
+    assert schema_for("list_files").model_validate({}).model_dump(mode="json") == {"path": "."}
+    raw = group("list_files", 3, [{"path": path} for path in paths])
+    context = context_for(("list_files",))
+    model = SequenceModel(raw)
+    output = LangChainBrainProvider(brain_llm=model, executable_tools=tools).generate(context, ())
+    assert output.kind == Kind.TOOL_REQUESTED and len(model.calls) == 1
+    assert [request.arguments for request in output.tool_requests] == [{"path": path} for path in paths]
+    controller = CortexController(24, argument_schema_for=schema_for)
+    runtime = SerializedToolRuntimePort(tools)
+    state = state_for(context)
+    for index, request in enumerate(output.tool_requests):
+        decision = controller.decide(input_for(state, output if index == 0 else None))
+        assert decision.decision_type == Decision.DISPATCH_TOOL_RUNTIME
+        assert decision.pending_tool_request == request
+        assert decision.tool_request_continuation.remaining == output.tool_requests[index + 1:]
+        state = apply_controller_decision_to_state(state, decision)
+        if index == 1:
+            state = ExecutionState.model_validate_json(state.model_dump_json())
+            controller = CortexController(24, argument_schema_for=schema_for)
+            decision = controller.decide(input_for(state))
+            assert decision.pending_tool_request == request
+            state = apply_controller_decision_to_state(state, decision)
+        result = runtime.execute(decision.pending_tool_request)
+        assert result.success and result.data["entries"] == [f"module-{index}.py"]
+        state = integrate_tool_result(state, decision, result)
+        assert len(state.working.tool_execution_history) == index + 1
+    brain_dispatch = controller.decide(input_for(state))
+    assert brain_dispatch.decision_type == Decision.DISPATCH_BRAIN
+    state = apply_controller_decision_to_state(state, brain_dispatch)
+    assert state.protocol_visible.pending_tool_request is state.protocol_visible.tool_request_continuation is None
+    records = state.working.tool_execution_history
+    assert [record.result.request_id for record in records] == [request.request_id for request in output.tool_requests]
+    assert [record.result.data["path"] for record in records] == list(paths)
+    assert all((record.execution_id, record.plan_id, record.plan_revision, record.step_id, record.tool_name) ==
+               (context.identity.execution_id, "p1", 1, "s1", "list_files") for record in records)
+    completion = controller.decide(input_for(state, BrainOutcome(
+        outcome=Kind.STEP_COMPLETED, step_id="s1", message="Listed Snake UI, app and core directories",
+    )))
+    assert completion.completion_evidence.tool_request_ids == tuple(request.request_id for request in output.tool_requests)
+    assert completion.completion_evidence.evidence_id == evidence_identity(records)

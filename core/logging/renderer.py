@@ -216,7 +216,9 @@ def _render_planner(node_update: NodeUpdate) -> None:
 
 def _render_tool_request(node_update: NodeUpdate) -> None:
 
-    print(f"\n{ANSI_CYAN}[brain]{ANSI_RESET}")
+    step_id = node_update.brain_result.step_id if node_update.brain_result is not None else None
+    context = f" [{step_id}]" if step_id else ""
+    print(f"\n{ANSI_CYAN}[brain]{context}{ANSI_RESET}")
 
     request = (
         node_update.brain_result.tool_request
@@ -234,7 +236,8 @@ def _render_tool_request(node_update: NodeUpdate) -> None:
 def _render_tool_result(node_update: NodeUpdate) -> None:
 
     label = f"tool:{node_update.tool_name}" if node_update.tool_name else "tool"
-    print(f"\n{ANSI_CYAN}[{label}]{ANSI_RESET}")
+    context = f" [{node_update.active_step_id}]" if node_update.active_step_id else ""
+    print(f"\n{ANSI_CYAN}[{label}]{context}{ANSI_RESET}")
     print(format_tool_result(node_update.tool_result))
     print()
 

@@ -80,9 +80,9 @@ def test_zero_call_workers_are_omitted_and_new_turn_is_reset():
 def test_stage_and_detail_are_rendered():
     status, stream = status_stream()
     status.start("planner")
-    status.update("brain", "step 1")
+    status.update("brain", "plan step 1/3 · invocation 1")
     status.stop()
-    assert "brain · step 1" in stream.getvalue()
+    assert "brain · plan step 1/3 · invocation 1" in stream.getvalue()
 
 
 def test_brain_provider_invocation_count_is_turn_local_and_independent_of_usage():
@@ -90,9 +90,9 @@ def test_brain_provider_invocation_count_is_turn_local_and_independent_of_usage(
     status.start("planner")
     try:
         assert status.begin_provider_invocation(worker="brain") == 1
-        assert (status.stage, status.detail) == ("brain", "step 1")
+        assert (status.stage, status.detail) == ("brain", "invocation 1")
         assert status.begin_provider_invocation(worker="brain") == 2
-        assert (status.stage, status.detail) == ("brain", "step 2")
+        assert (status.stage, status.detail) == ("brain", "invocation 2")
         assert status.usage_by_worker == {}
     finally:
         status.stop()
@@ -135,7 +135,7 @@ def test_normal_live_progress_maps_semantic_workers_and_replaces_stale_detail():
 
 def test_brain_tool_call_is_printed_before_tool_stage_redraw(capsys):
     status = LiveStatus(refresh_interval=60, enabled=True)
-    status.start("brain", "step 1")
+    status.start("brain", "invocation 1")
     capsys.readouterr()
     try:
         render_node_update(NodeUpdate(
@@ -225,14 +225,14 @@ def test_finalizer_output_precedes_finalizer_redraw(capsys):
 
 def test_controller_live_details_are_verbose_only():
     status = LiveStatus(enabled=False)
-    status.start("brain", "step 1")
+    status.start("brain", "invocation 1")
     update = NodeUpdate(
         from_node="brain", to_node="controller",
         controller_events=("Tool requested: list_files",),
     )
     try:
         _update_live_status(update, verbose=False)
-        assert (status.stage, status.detail) == ("brain", "step 1")
+        assert (status.stage, status.detail) == ("brain", "invocation 1")
         _update_live_status(update, verbose=True)
         assert (status.stage, status.detail) == ("controller", "dispatching tool")
     finally:
@@ -241,12 +241,12 @@ def test_controller_live_details_are_verbose_only():
 
 def test_raw_graph_names_never_become_normal_live_status():
     status, stream = status_stream()
-    status.start("brain", "step 1")
+    status.start("brain", "invocation 1")
     try:
         _update_live_status(NodeUpdate(
             from_node="portable_orchestration", to_node="capture_tool_output",
         ), verbose=False)
-        assert (status.stage, status.detail) == ("brain", "step 1")
+        assert (status.stage, status.detail) == ("brain", "invocation 1")
         assert "portable_orchestration" not in stream.getvalue()
         assert "capture_tool_output" not in stream.getvalue()
     finally:

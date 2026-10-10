@@ -153,7 +153,7 @@ def _native_outcome(
             outcome=Kind.TOOL_REQUESTED, step_id=brain_input.active_step.step_id,
             tool_requests=tuple(_tool_request(name, arguments, brain_input, allowed_tools)
                                 for name, arguments in candidates),
-            message="Brain requested homogeneous read-only tool execution.",
+            message="Brain requested independent read-only tool execution.",
         )
     name, arguments, exact_collection = validate_native_call(calls[0], allowed_tools)
     if name in allowed_tools:

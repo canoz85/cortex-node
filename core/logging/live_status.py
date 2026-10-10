@@ -7,7 +7,10 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
+
+if TYPE_CHECKING:
+    from core.protocol.models import ExecutionPlan
 
 
 _CURRENT: contextvars.ContextVar["LiveStatus | None"] = contextvars.ContextVar(
@@ -44,6 +47,13 @@ def begin_provider_invocation(*, worker: str) -> int:
     return status.begin_provider_invocation(worker=worker)
 
 
+def set_brain_step_context(*, execution_id: str, plan: ExecutionPlan | None, step_id: str | None) -> None:
+    """Supply display context without counting a call or changing execution state."""
+    status = current_live_status()
+    if status is not None:
+        status.set_brain_step_context(execution_id=execution_id, plan=plan, step_id=step_id)
+
+
 class LiveStatus:
     _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -62,6 +72,9 @@ class LiveStatus:
         self.total_tokens = 0
         self.usage_by_worker: dict[str, dict[str, int]] = {}
         self.provider_invocations_by_worker: dict[str, int] = {}
+        self._brain_step_scope: tuple | None = None
+        self._brain_step_label = ""
+        self._brain_step_invocations = 0
         self._accounted_response_ids: set[int] = set()
         self._accounted_responses: list[object] = []
         self._started_at = 0.0
@@ -96,12 +109,32 @@ class LiveStatus:
             if self._running and self.enabled:
                 self.redraw()
 
+    def set_brain_step_context(self, *, execution_id: str, plan: ExecutionPlan | None, step_id: str | None) -> None:
+        """Reset display numbering on a new plan step, independently of retries."""
+        scope = (execution_id, plan.plan_id if plan is not None else None,
+                 plan.revision if plan is not None else None, step_id)
+        label = f"step_id {step_id}" if step_id else ""
+        if plan is not None and step_id:
+            positions = [index for index, step in enumerate(plan.steps, 1) if step.step_id == step_id]
+            if len(positions) == 1:
+                label = f"plan step {positions[0]}/{len(plan.steps)}"
+        with self._lock:
+            if scope != self._brain_step_scope:
+                self._brain_step_scope = scope
+                self._brain_step_invocations = 0
+            self._brain_step_label = label
+
     def begin_provider_invocation(self, *, worker: str) -> int:
         """Increment a turn-local provider-call count before the blocking call."""
         with self._lock:
             invocation = self.provider_invocations_by_worker.get(worker, 0) + 1
             self.provider_invocations_by_worker[worker] = invocation
-            detail = f"step {invocation}" if worker == "brain" else ""
+            detail = ""
+            if worker == "brain":
+                self._brain_step_invocations += 1
+                detail = f"invocation {self._brain_step_invocations}"
+                if self._brain_step_label:
+                    detail = f"{self._brain_step_label} · {detail}"
             self.update(worker, detail)
             return invocation
 

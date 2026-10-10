@@ -16,10 +16,10 @@ from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import BrainInput, BrainOutcome
 
 from core.debug import log_llm_exchange
-from core.logging.live_status import add_response_usage, begin_provider_invocation
+from core.logging.live_status import add_response_usage, begin_provider_invocation, set_brain_step_context
 from tools.registry import ToolRegistry, get_tool_argument_schema
 from core.brain_batch_policy import (
-    batch_call_limit, is_oversized_read_only_batch, validate_read_only_batch,
+    MAX_BATCH_CALLS, batch_call_limit, is_oversized_read_only_batch, validate_read_only_batch,
 )
 
 
@@ -51,12 +51,15 @@ def _ensure_native_call(
     if disallowed_batch and _is_oversized_native_batch(
         raw, authorized_tools, argument_schema_for=argument_schema_for,
     ):
-        limit = batch_call_limit(calls[0]["name"], argument_schema_for=argument_schema_for)
+        limits = ", ".join(
+            f"{name}: {batch_call_limit(name, argument_schema_for=argument_schema_for)}"
+            for name in dict.fromkeys(call["name"] for call in calls)
+        )
         instruction = (
             f"The previous response contained {len(calls)} calls in an otherwise valid "
-            f"homogeneous read-only batch, but the maximum permitted batch size is {limit}. "
-            f"Return one native action containing at most {limit} of those useful calls. "
-            "Use the same tool. Do not add new calls. Leave content empty."
+            "independent read-only batch, but a call limit was exceeded. "
+            f"Return one native action containing at most {MAX_BATCH_CALLS} of those useful calls. "
+            f"Per-tool call limits: {limits}. Do not add new calls. Leave content empty."
         )
         rejected_response = [raw] if isinstance(raw, AIMessage) else []
     elif disallowed_batch:
@@ -334,7 +337,7 @@ def _batch_guidance(authorized_tools, *, argument_schema_for: Callable[[str], ty
             continue
         lines.append(f"- {name}: up to {limit}")
     if lines:
-        lines.insert(0, "Homogeneous independent multiple calls allowed:")
+        lines.insert(0, f"Independent multiple calls allowed (up to {MAX_BATCH_CALLS} total; tools may be mixed):")
     lines.append("All other tools and lifecycle actions require one call." if lines
                  else "All tools and lifecycle actions require one call.")
     return "\n".join(lines)
@@ -354,6 +357,10 @@ class LangChainBrainProvider:
         self, brain_input: BrainInput, messages: tuple[BrainMessage, ...],
     ) -> BrainOutcome:
 
+        set_brain_step_context(
+            execution_id=brain_input.identity.execution_id, plan=brain_input.active_plan,
+            step_id=brain_input.active_step.step_id if brain_input.active_step is not None else None,
+        )
         authorized_tool_names, authorized_tools = _resolve_authorized_tools(
             brain_input, self.tool_registry
         )

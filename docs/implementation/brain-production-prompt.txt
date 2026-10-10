@@ -26,10 +26,11 @@ Put arguments in native calls and leave content empty.
 Do not return JSON outcome envelopes, textual lifecycle outcomes, or function-call syntax.
 
 Provider inserts batch guidance generated from authorized, bound tools and their
-executable schemas before the native contract. For example, when both tools are
+executable schemas before the native contract. For example, when these tools are
 available and retain their production limits:
 
-Homogeneous independent multiple calls allowed:
+Independent multiple calls allowed (up to 24 total; tools may be mixed):
+- list_files: up to 24
 - read_file: up to 24
 - find_files: up to 24
 All other tools and lifecycle actions require one call.

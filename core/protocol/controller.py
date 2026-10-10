@@ -832,7 +832,7 @@ class CortexController:
             # The accepted plan's execution ceiling remains Controller authority,
             # independently of the shared static batch eligibility policy.
             if any(request.tool_name not in authorized for request in requests):
-                raise ValueError("batch_tool_not_authorized_or_homogeneous")
+                raise ValueError("batch_tool_not_authorized")
             ids = [request.request_id for request in requests]
             if len(set(ids)) != len(ids):
                 raise ValueError("duplicate_batch_request_id")

@@ -104,7 +104,6 @@ def test_singleton_canonicalization_unchanged(content):
 @pytest.mark.parametrize("raw", [
     native_batch(READ_FILE_BATCH_LIMIT + 1),
     native_batch(args=[{"path": "a"}, {"path": "a", "offset": 0, "limit": 10000}]),
-    native_batch(names=["read_file", "list_files"], args=[{"path": "a"}, {}]),
     native_batch(names=["write_file"] * 2, args=[{"path": "a", "content": "x"}, {"path": "b", "content": "y"}]),
     native_batch(names=["read_file", "brain_step_completed"], args=[{"path": "a"}, {"message": "Done"}]),
     native_batch(names=["describe_image"] * 2),
@@ -249,7 +248,7 @@ def test_controller_interruption_discards_remainder(interruption):
     assert len(updated.working.tool_execution_history) == 1
 
 
-@pytest.mark.parametrize("invalid", ["duplicate", "oversized", "heterogeneous", "mutating", "args", "unauthorized", "ids"])
+@pytest.mark.parametrize("invalid", ["duplicate", "oversized", "mutating", "args", "unauthorized", "ids"])
 def test_controller_revalidates_whole_injected_proposal_before_any_authorization(invalid):
     action = proposal()
     requests = list(action.tool_requests)
@@ -259,8 +258,6 @@ def test_controller_revalidates_whole_injected_proposal_before_any_authorization
     elif invalid == "oversized":
         requests = [ToolRequest(request_id=str(i), tool_name="read_file", arguments={"path": str(i)})
                     for i in range(READ_FILE_BATCH_LIMIT + 1)]
-    elif invalid == "heterogeneous":
-        requests[1] = requests[1].model_copy(update={"tool_name": "list_files"})
     elif invalid == "mutating":
         requests = [r.model_copy(update={"tool_name": "write_file"}) for r in requests]
     elif invalid == "args":

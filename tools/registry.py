@@ -83,7 +83,7 @@ class ToolDefinition:
 # One production manifest, including explicit deployment defaults. A new
 # definition is disabled unless its deployment default is deliberately enabled.
 TOOL_DEFINITIONS = (
-    ToolDefinition("list_files", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
+    ToolDefinition("list_files", "workspace", enabled_by_default=True, max_batch_calls=24, planning=CapabilitySemantics(
         "List immediate workspace children or identify a file", (),
         ("path, entries: immediate child names; is_file",), ("Not recursive; no file content or sizes",),
         use_when="Inspect the immediate children of a known directory.",

@@ -1,12 +1,14 @@
 """Size-only correction keeps the native-action contract and execution limits."""
 
 import inspect
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage
 
 import core.brain_provider as provider_module
+import tools.registry as registry_module
 from tools.registry import get_tool_definition
 
 from core.protocol.enums import BrainOutcomeKind as Kind
@@ -21,9 +23,9 @@ READ_FILE_BATCH_LIMIT = get_tool_definition("read_file").max_batch_calls
 def expected_oversized_instruction(count):
     return (
         f"The previous response contained {count} calls in an otherwise valid "
-        f"homogeneous read-only batch, but the maximum permitted batch size is {READ_FILE_BATCH_LIMIT}. "
+        "independent read-only batch, but a call limit was exceeded. "
         f"Return one native action containing at most {READ_FILE_BATCH_LIMIT} of those useful calls. "
-        "Use the same tool. Do not add new calls. Leave content empty."
+        f"Per-tool call limits: read_file: {READ_FILE_BATCH_LIMIT}. Do not add new calls. Leave content empty."
     )
 
 
@@ -77,13 +79,11 @@ def test_oversized_correction_output_uses_normal_validation_without_third_call(c
         assert outcome.tool_request is None
 
 
-@pytest.mark.parametrize("disqualifier", ["heterogeneous", "duplicate", "mutating", "ineligible", "lifecycle"])
-def test_oversized_group_with_another_disqualifier_keeps_choose_one_correction(disqualifier):
+@pytest.mark.parametrize("disqualifier", ["duplicate", "mutating", "ineligible", "lifecycle"])
+def test_oversized_group_with_another_disqualifier_keeps_choose_one_correction(disqualifier, monkeypatch):
     count = READ_FILE_BATCH_LIMIT + 1
     raw = native_batch(count)
-    if disqualifier == "heterogeneous":
-        raw.tool_calls[-1].update(name="list_files", args={"path": "."})
-    elif disqualifier == "duplicate":
+    if disqualifier == "duplicate":
         # Duplicate appears beyond the maximum, after effective default normalization.
         raw.tool_calls[-1]["args"] = {"path": "file-0.txt", "offset": 0, "limit": 1}
     elif disqualifier == "mutating":
@@ -91,6 +91,10 @@ def test_oversized_group_with_another_disqualifier_keeps_choose_one_correction(d
             {"path": f"file-{i}", "content": "x"} for i in range(count)
         ])
     elif disqualifier == "ineligible":
+        monkeypatch.setattr(registry_module, "TOOL_DEFINITIONS", tuple(
+            replace(definition, max_batch_calls=1) if definition.name == "list_files" else definition
+            for definition in registry_module.TOOL_DEFINITIONS
+        ))
         raw = native_batch(count, names=["list_files"] * count, args=[
             {"path": f"dir-{i}"} for i in range(count)
         ])

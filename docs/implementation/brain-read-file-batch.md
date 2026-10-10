@@ -1,4 +1,4 @@
-# Sequential homogeneous Brain actions
+# Sequential independent Brain actions
 
 The pre-implementation trace found the singular proposal in
 `BrainOutcome.tool_request`. ControllerInput, ControllerDecision and
@@ -26,14 +26,15 @@ Each member uses the existing deterministic ToolRequest ID generation.
 ## Acceptance
 
 The provider distinguishes valid correction candidates from executable groups.
-An executable group contains homogeneous, well-formed, authorized calls with
+An executable group contains independent, well-formed, authorized calls with
 empty canonical response content and no invalid native calls. ToolDefinition owns
-max_batch_calls: the default is 1, while read_file and find_files explicitly allow
-2 through 24 independent synchronous calls. Non-mutating metadata alone never
+max_batch_calls: the default is 1, while list_files, read_file and find_files explicitly allow
+multiple independent synchronous calls. Tools may be mixed, with at most 24 calls
+overall and each tool's own limit applied to its member count. Non-mutating metadata alone never
 enables batching. Mutating tools, lifecycle actions and configured async submission
 tools remain excluded.
 
-core/brain_batch_policy.py is the shared generic validator for homogeneity,
+core/brain_batch_policy.py is the shared generic validator for
 authorization, metadata eligibility and limits, executable argument schemas, and
 duplicate effective invocations. Registry-owned get_tool_definition provides
 metadata. Provider and graph composition reuse existing executable registries to
@@ -55,15 +56,15 @@ singleton job-identity, active-job and submission-attempt preparation. This chec
 execution-mode compatibility rather than defining static batch eligibility.
 
 Duplicate effective calls are rejected after schema coercion and defaults, using
-canonical JSON of all effective arguments. No path field is assumed, and no lexical
+tool name and canonical JSON of all effective arguments. No path field is assumed, and no lexical
 path or filesystem alias normalization occurs. Original request arguments and
 deterministic request ID generation remain unchanged. Oversized groups are rejected
 whole, without filtering, truncation or first-call selection.
 
 Valid disallowed groups use the existing one-shot choose-one-action correction.
-For an otherwise valid eligible batch exceeding its tool's limit, shared policy
-checks all non-size constraints before Provider requests at most that metadata
-limit of the original useful calls, using the same tool. Other disallowed groups
+For an otherwise valid eligible batch exceeding the overall or a tool's limit, shared policy
+checks all non-size constraints before Provider requests at most 24
+of the original useful calls, respecting each tool's metadata limit. Other disallowed groups
 retain the singleton correction. Correction output passes normal validation and
 can never cause a third provider call.
 
@@ -137,7 +138,7 @@ path spellings or query the filesystem to discover aliases.
 
 Planner behavior/schemas/retries, memory, mutation authorization, exact_collection,
 ToolRegistry architecture, and tool inventory are unchanged. No stat_files,
-read_files, metadata tools, heterogeneous/mutating batches or parallel execution.
+read_files, metadata tools, mutating batches or parallel execution.
 
 ## Initial batch implementation files
 
