@@ -1,12 +1,16 @@
 from pathlib import Path
+import json
 import shutil
 
 import pytest
 
 from conftest import get_tool, parse_result
 from core.protocol.controller import CortexController
-from core.protocol.enums import BrainOutcomeKind
-from core.protocol.models import BrainOutcome, ExactCollection, StepCompletionEvidence, ToolRequest, ToolExecutionRecord
+from core.finalizer import Finalizer
+from core.protocol.enums import BrainOutcomeKind, ExecutionStatus
+from core.protocol.models import (
+    AcceptedStepResult, BrainOutcome, FinalizationRequest, StepCompletionEvidence, ToolRequest, ToolExecutionRecord,
+)
 from core.runtime.tool_result_integration import SerializedToolRuntimePort
 from test_git_ops import _init_repo, _run
 from test_brain_outcomes import brain_input, controller_input
@@ -101,12 +105,11 @@ def test_changed_files_bind_through_existing_exact_collection_provenance(tmp_pat
     (tmp_path / "new.txt").write_text("new", encoding="utf-8")
     runtime = SerializedToolRuntimePort(get_git_tools(str(tmp_path)))
     result = runtime.execute(ToolRequest(request_id="changes", tool_name="git_changed_files"))
-    context = brain_input()
+    context = brain_input(deliverable_kind="exact_enumeration")
     outcome = BrainOutcome(
         outcome=BrainOutcomeKind.STEP_COMPLETED, step_id=context.active_step.step_id,
         completion_evidence=StepCompletionEvidence(
             step_id=context.active_step.step_id, summary="One untracked file: new.txt.",
-            exact_collection=ExactCollection(source_record_index=0, data_path=("changed_files",)),
         ),
     )
     record = ToolExecutionRecord(execution_id=context.identity.execution_id, plan_id=context.active_plan.plan_id,
@@ -117,3 +120,12 @@ def test_changed_files_bind_through_existing_exact_collection_provenance(tmp_pat
     assert exact.items[0]["path"] == "new.txt"
     assert exact.source_request_id == "changes"
     assert exact.data_path == ("changed_files",)
+    answer = Finalizer().finalize(FinalizationRequest(
+        identity=context.identity, status=ExecutionStatus.COMPLETED, context=context.context,
+        accepted_plan=decision.accepted_plan, completed_step_ids=(context.active_step.step_id,),
+        accepted_step_results=(AcceptedStepResult(completion_evidence=decision.completion_evidence),),
+    )).final_answer
+    assert answer.splitlines()[1:] == [
+        "- " + json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        for item in result.data["changed_files"]
+    ]

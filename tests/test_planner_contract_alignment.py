@@ -22,7 +22,7 @@ from test_planner_service import FakeProvider, FakeRouter, planner_input
 def proposal(count=1, tool="read_file"):
     return {"result": "PLAN_PROPOSED", "objective": "Inspect files", "steps": [
         {"step_id": f"s{i}", "title": "Inspect files", "description": "Inspect files and summarize",
-         "primary_tool": tool, "dependencies": []}
+         "deliverable_kind": "semantic", "primary_tool": tool, "dependencies": []}
         for i in range(count)
     ], "message": ""}
 

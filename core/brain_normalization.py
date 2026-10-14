@@ -12,6 +12,9 @@ from typing import Callable
 
 from pydantic import ValidationError
 from core.brain_batch_policy import validate_read_only_batch
+from core.tool_call_guard import (
+    DUPLICATE_SUCCESSFUL_CALL, DuplicateSuccessfulCall, reject_duplicate_successful_calls,
+)
 
 from core.protocol.enums import BrainOutcomeKind as Kind, StepStatus
 from core.protocol.models import (
@@ -121,6 +124,7 @@ def _native_outcome(
             validate_read_only_batch(candidates, allowed_tools, argument_schema_for=argument_schema_for)
         except ValueError as exc:
             raise InvalidBrainOutput("exactly_one_tool_call_required") from exc
+        reject_duplicate_successful_calls(candidates, brain_input, argument_schema_for=argument_schema_for)
         return BrainOutcome(
             outcome=Kind.TOOL_REQUESTED, step_id=brain_input.active_step.step_id,
             tool_requests=tuple(_tool_request(name, arguments, brain_input, allowed_tools)
@@ -129,6 +133,9 @@ def _native_outcome(
         )
     name, arguments = validate_native_call(calls[0], allowed_tools)
     if name in allowed_tools:
+        reject_duplicate_successful_calls(
+            [(name, arguments)], brain_input, argument_schema_for=argument_schema_for,
+        )
         return _tool_requested_outcome(
             name=name,
             arguments=arguments,
@@ -202,6 +209,11 @@ def normalize_brain_output(
         if not calls:
             raise InvalidBrainOutput("native_tool_call_required")
         return _native_outcome(calls, brain_input, allowed_tools, argument_schema_for=argument_schema_for)
+    except DuplicateSuccessfulCall as exc:
+        return BrainOutcome(
+            outcome=Kind.INVALID_OUTPUT, error_code=DUPLICATE_SUCCESSFUL_CALL,
+            step_id=brain_input.active_step.step_id, message=str(exc),
+        )
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
         code = str(exc) if isinstance(exc, InvalidBrainOutput) else "malformed_model_output"
         return BrainOutcome(

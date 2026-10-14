@@ -54,11 +54,14 @@ from core.planner_validation import (
 from core.planner_progress import build_planner_progress
 from core.planner_feedback import planner_retry_feedback
 from core.brain_batch_policy import validate_read_only_batch, normalized_batch_arguments
-from core.brain_evidence_policy import MAX_CURRENT_ATTEMPT_RECORDS
+from tools.registry import get_tool_definition
+from core.tool_call_guard import (
+    DUPLICATE_SUCCESSFUL_CALL, DuplicateSuccessfulCall, reject_duplicate_successful_calls,
+)
 
 
 class InvalidExactCollection(ValueError):
-    """An untrusted Brain collection reference cannot bind to tool evidence."""
+    """An internal exact collection reference cannot bind to tool evidence."""
 
 
 class CortexController:
@@ -623,23 +626,27 @@ class CortexController:
                 controller_input.identity, plan, active_step,
                 controller_input.tool_execution_history,
             )
-            try:
-                exact_collection = self._bind_exact_collection(
-                    semantic.exact_collection if semantic is not None else None,
-                    records,
-                )
-            except InvalidExactCollection as exc:
-                # Reject the entire completion through the malformed-output path.
-                # Scope and Controller invariant errors remain outside this boundary.
+            if semantic is not None and semantic.exact_collection is not None:
+                # Keep even internally constructed worker outcomes message-only.
                 rejected = BrainResult(
                     outcome=BrainOutcome.INVALID_OUTPUT,
                     step_id=brain_result.step_id,
-                    message=str(exc),
+                    message="Brain completion cannot supply exact collection provenance",
                     error_code="invalid_exact_collection",
                 )
                 return self._decide_from_brain(controller_input.model_copy(
                     update={"brain_result": rejected},
                 ))
+            try:
+                exact_collection = self._resolve_exact_collection(active_step, records)
+            except InvalidExactCollection as exc:
+                # Binding failure cannot authorize another execution of successful
+                # tools (including mutations). Fail closed with the evidence intact.
+                return self._terminate(
+                    controller_input.cursor, "exact_collection_unresolved",
+                    accepted_plan=self._update_active_step_status(controller_input, StepStatus.FAILED),
+                    failed_step_id=active_step.step_id, failure_reason=str(exc),
+                )
             bound = StepCompletionEvidence(
                 execution_id=controller_input.identity.execution_id,
                 plan_id=plan.plan_id,
@@ -686,6 +693,10 @@ class CortexController:
                 if (plan is not None and plan.available_tools is not None
                         and tool_request.tool_name not in plan.available_tools):
                     return self._terminate(controller_input.cursor, "tool_outside_plan_capabilities")
+
+                rejection = self._duplicate_call_rejection(controller_input, (tool_request,))
+                if rejection is not None:
+                    return rejection
 
                 if tool_request.tool_name in self._async_submission_tool_names:
                     tool_request = self._prepare_async_submission_request(
@@ -817,6 +828,29 @@ class CortexController:
 
         raise ValueError(f"Unsupported brain outcome: {brain_result.outcome}")
 
+    def _duplicate_call_rejection(self, context, requests):
+        if context.active_plan is None or context.active_step is None:
+            # Legacy async lifecycle inputs without accepted scope retain their
+            # existing policy; they cannot establish a step-local duplicate.
+            return None
+        self._validate_active_step(context, transition="tool duplicate guard")
+        try:
+            reject_duplicate_successful_calls(
+                [(request.tool_name, request.arguments) for request in requests], context,
+                argument_schema_for=self._argument_schema_for,
+            )
+        except DuplicateSuccessfulCall as exc:
+            rejected = BrainResult(
+                outcome=BrainOutcome.INVALID_OUTPUT, step_id=context.active_step.step_id,
+                error_code=DUPLICATE_SUCCESSFUL_CALL, message=str(exc),
+            )
+            decision = self._decide_step_failure(context.model_copy(update={"brain_result": rejected}))
+            return decision.model_copy(update={
+                "clear_pending_tool_request": True,
+                "consume_tool_result": context.tool_result is not None,
+            })
+        return None
+
     def _accept_tool_batch(self, context, requests):
         plan, step = self._validate_active_step(context, transition="tool batch acceptance")
         if context.brain_result.step_id != step.step_id:
@@ -847,6 +881,9 @@ class CortexController:
                 raise ValueError("batch_request_id_already_executed")
         except (ValueError, TypeError) as exc:
             return self._terminate(context.cursor, f"invalid_tool_batch:{exc}")
+        rejection = self._duplicate_call_rejection(context, requests)
+        if rejection is not None:
+            return rejection
         continuation = ToolRequestContinuation(
             execution_id=context.identity.execution_id, plan_id=plan.plan_id,
             plan_revision=plan.revision, step_id=step.step_id, step_attempt=step.attempt,
@@ -865,6 +902,9 @@ class CortexController:
         )
 
     def _batch_dispatch(self, context, request, continuation, reason, *, consume=False):
+        rejection = self._duplicate_call_rejection(context, (request,))
+        if rejection is not None:
+            return rejection
         return ControllerDecision(
             accepted_plan=self._update_active_step_status(context, StepStatus.ACTIVE),
             decision_type=ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
@@ -920,14 +960,49 @@ class CortexController:
             "tool_batch_continuation", consume=True,
         )
 
+    def _resolve_exact_collection(self, step, records) -> ExactCollection | None:
+        if step.deliverable_kind == "semantic":
+            return None
+
+        candidates = []
+        for index, record in enumerate(records):
+            result = record.result
+            if not result.success:
+                continue
+            definition = get_tool_definition(record.tool_name)
+            if definition is None:
+                continue
+            # This slice binds one complete collection, never a partial page or
+            # an automatic composition of pages. Missing pagination is allowed
+            # for non-paginated tools such as immediate directory enumeration.
+            if result.integrity.is_truncated or (
+                result.pagination is not None and (
+                    result.pagination.has_more or result.pagination.offset != 0
+                    or result.pagination.returned_items != result.pagination.total_items
+                )
+            ):
+                continue
+            for output in definition.exact_collection_outputs:
+                try:
+                    candidates.append(self._bind_exact_collection(
+                        ExactCollection(source_record_index=index, data_path=output.data_path), records,
+                    ))
+                except InvalidExactCollection:
+                    # Missing fields and scalar values are not valid collections.
+                    continue
+        if len(candidates) != 1:
+            raise InvalidExactCollection(
+                f"exact enumeration requires one valid trusted collection; found {len(candidates)}"
+            )
+        return candidates[0]
+
     @staticmethod
     def _bind_exact_collection(proposal, records) -> ExactCollection | None:
         if proposal is None:
             return None
-        visible_records = records[-MAX_CURRENT_ATTEMPT_RECORDS:]
-        if proposal.source_record_index >= len(visible_records):
+        if proposal.source_record_index >= len(records):
             raise InvalidExactCollection("exact collection source record is unavailable")
-        record = visible_records[proposal.source_record_index]
+        record = records[proposal.source_record_index]
         if not record.result.success:
             raise InvalidExactCollection("exact collection source is not accepted tool evidence")
 

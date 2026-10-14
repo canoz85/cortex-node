@@ -266,7 +266,7 @@ def test_planner_route_capabilities_gate_brain_tool_execution(route, tool_name, 
                     return {"result": "PLAN_PROPOSED", "objective": "Inspect repository",
                         "steps": [{"step_id": "inspect", "title": "Inspect",
                                    "description": "Inspect repository",
-                                   "primary_tool": "read_file", "dependencies": []}]}
+                                   "deliverable_kind": "semantic", "primary_tool": "read_file", "dependencies": []}]}
 
             return PlannerService(provider=Provider(), router=FakePlannerRouter(route), mutating_tools=MUTATING_TOOLS).run(request)
 

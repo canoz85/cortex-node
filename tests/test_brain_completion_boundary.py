@@ -58,7 +58,7 @@ def patched_completion(tmp_path):
         "result": "PLAN_PROPOSED", "objective": "Replace night with day", "message": "",
         "steps": [{"step_id": "patch", "title": "Patch x.txt",
                    "description": "Replace the single occurrence of night with day in x.txt.",
-                   "primary_tool": "apply_patch", "dependencies": []}],
+                   "deliverable_kind": "semantic", "primary_tool": "apply_patch", "dependencies": []}],
     }
     planner = PlannerService(provider=FakeProvider(proposal), router=FakeRouter("action"),
                              mutating_tools=MUTATING_TOOLS)
@@ -164,6 +164,6 @@ def test_internal_patch_collection_cannot_traverse_artifact_metadata(patched_com
     decision = case.controller.decide(input_for(case.state, internal))
     assert decision.completed_step_id is decision.completion_evidence is None
     assert decision.retry.last_error_code == "invalid_exact_collection"
-    assert decision.failure_reason == "exact collection data path is invalid"
+    assert decision.failure_reason == "Brain completion cannot supply exact collection provenance"
     assert case.calls == ["find_files", "read_file", "apply_patch"]
     assert case.target.read_bytes() == b"The stars shine bright in the velvet day.\r\n"

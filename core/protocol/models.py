@@ -44,6 +44,7 @@ StepIdList = tuple[str, ...]
 MessageList = tuple[str, ...]
 ConstraintList = tuple[str, ...]
 MAX_PLANNER_DIRECT_RESPONSE_CHARS = 4000
+DeliverableKind = Literal["semantic", "exact_enumeration"]
 
 class ImmutableProtocolModel(BaseModel):
     """Base class for frozen, serialization-friendly protocol model contracts.
@@ -158,6 +159,8 @@ class ExecutionStep(ImmutableProtocolModel):
     title: str = Field(min_length=1)
     description: str = ""
     primary_tool: str | None = None
+    # Older runtime/checkpoint steps retain semantic completion behavior.
+    deliverable_kind: DeliverableKind = "semantic"
     completion_requirement: CoverageRequirement | None = None
 
     status: StepStatus = StepStatus.PENDING
@@ -344,7 +347,7 @@ class ExactCollection(ImmutableProtocolModel):
     source_request_id: str | None = None
     data_path: tuple[str | int, ...] = Field(default_factory=tuple)
     label: str = "Results"
-    # None is an unresolved Brain proposal; an empty tuple is a bound empty set.
+    # None is an unresolved internal reference; () is a bound empty collection.
     items: tuple[DomainJsonValue, ...] | None = None
 
 

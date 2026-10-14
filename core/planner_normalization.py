@@ -60,6 +60,7 @@ def normalize_planner_proposal(
                 title=step.title.strip(),
                 description=step.description.strip(),
                 primary_tool=step.primary_tool.strip(),
+                deliverable_kind=step.deliverable_kind,
                 status=StepStatus.PENDING,
                 attempt=0,
                 depends_on_step_ids=dependencies[step.step_id.strip()],

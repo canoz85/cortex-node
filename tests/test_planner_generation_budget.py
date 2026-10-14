@@ -23,9 +23,9 @@ PROPOSAL = {
     "result": "PLAN_PROPOSED", "objective": "Discover and inspect files", "message": "",
     "steps": [
         {"step_id": "discover", "title": "Discover files", "description": "Report discovered file paths",
-         "primary_tool": "list_files", "dependencies": []},
+         "deliverable_kind": "semantic", "primary_tool": "list_files", "dependencies": []},
         {"step_id": "inspect", "title": "Inspect files", "description": "Read files and summarize their purpose",
-         "primary_tool": "read_file", "dependencies": ["discover"]},
+         "deliverable_kind": "semantic", "primary_tool": "read_file", "dependencies": ["discover"]},
     ],
 }
 

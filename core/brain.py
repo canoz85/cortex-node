@@ -8,6 +8,7 @@ from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import BrainInput, BrainOutcome
 from core.protocol.completion_identity import eligible_records
 from core.brain_evidence_policy import MAX_CURRENT_ATTEMPT_RECORDS
+from core.tool_call_guard import DUPLICATE_SUCCESSFUL_CALL
 
 BRAIN_OUTPUT_PROTOCOL = """
 BRAIN NATIVE CALL CONTRACT: Return one native action: an authorized executable tool or brain_step_completed, brain_step_failed, brain_replan_requested.
@@ -312,6 +313,13 @@ def _build_execution_messages(
             brain_input.coverage_assessment.model_dump_json(),
         ))
     messages.extend(_build_step_progress_messages(brain_input=brain_input))
+    if brain_input.retry.last_error_code == DUPLICATE_SUCCESSFUL_CALL:
+        messages.append(BrainMessage(
+            role="system", content="Tool-call rejection (runtime data):\n" + json.dumps({
+                "code": DUPLICATE_SUCCESSFUL_CALL,
+                "message": brain_input.retry.last_error_message,
+            }, ensure_ascii=True),
+        ))
     messages.append(BrainMessage(role="human", content=_build_brain_execution_brief(brain_input)))
     return messages
 
@@ -328,6 +336,7 @@ def _build_brain_execution_brief(
         "step_id": current_step.step_id,
         "title": current_step.title,
         "description": current_step.description,
+        "deliverable_kind": current_step.deliverable_kind,
     }
     if current_step.primary_tool is not None:
         payload["primary_tool"] = current_step.primary_tool

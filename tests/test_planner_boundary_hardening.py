@@ -52,7 +52,7 @@ def candidate(request, steps):
 def proposal(steps):
     return {"result": "PLAN_PROPOSED", "steps": [
         {"step_id": s.step_id, "title": s.title, "description": s.description,
-         "primary_tool": s.primary_tool, "dependencies": s.depends_on_step_ids}
+         "deliverable_kind": "semantic", "primary_tool": s.primary_tool, "dependencies": s.depends_on_step_ids}
         for s in steps
     ]}
 

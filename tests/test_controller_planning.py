@@ -175,7 +175,7 @@ class FakeProvider:
     def __init__(self, content=None, route="info"):
         if content is None:
             content = {"result": "PLAN_PROPOSED", "objective": "Inspect", "steps": [
-                {"step_id": "inspect", "title": "Inspect", "description": "Inspect workspace", "primary_tool": "list_files", "dependencies": []}
+                {"step_id": "inspect", "title": "Inspect", "description": "Inspect workspace", "deliverable_kind": "semantic", "primary_tool": "list_files", "dependencies": []}
             ]}
         self.content = content
         self.messages = []

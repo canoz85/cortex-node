@@ -24,6 +24,7 @@ def _definition(step: ExecutionStep) -> tuple:
         step.title,
         step.description,
         step.primary_tool,
+        step.deliverable_kind,
         step.completion_requirement,
         step.depends_on_step_ids,
     )

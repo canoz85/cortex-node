@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, create_model, model_validator
-from core.protocol.models import MAX_PLANNER_DIRECT_RESPONSE_CHARS
+from core.protocol.models import DeliverableKind, MAX_PLANNER_DIRECT_RESPONSE_CHARS
 
 
 class PlannerProposalResultType(str, Enum):
@@ -26,6 +26,14 @@ class ProposedStep(BaseModel):
     )
 
     primary_tool: str = Field(min_length=1)
+    deliverable_kind: DeliverableKind = Field(
+        description=(
+            "Classify the intended step answer: semantic for a derived finding, explanation, "
+            "selection or interpretation; exact_enumeration when the collection itself is "
+            "the answer and every member must be preserved exactly. Supporting discovery "
+            "collections alone do not make a step exact_enumeration."
+        ),
+    )
     dependencies: tuple[str, ...] = ()
 
 

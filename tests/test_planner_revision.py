@@ -74,6 +74,19 @@ def test_failed_step_can_be_replaced_but_completed_definition_cannot_change():
         reconcile_revision(request(), BASE, proposal(changed_done, replacement()))
 
 
+def test_completed_deliverable_kind_cannot_change():
+    changed = DONE.model_copy(update={"deliverable_kind": "exact_enumeration"})
+    with pytest.raises(RevisionRejection, match="completed_step_changed"):
+        reconcile_revision(request(), BASE, proposal(changed, replacement()))
+
+
+def test_changing_remaining_deliverable_kind_is_a_material_revision():
+    changed = FAILED.model_copy(update={"status": StepStatus.PENDING, "attempt": 0,
+                                        "deliverable_kind": "exact_enumeration"})
+    accepted = reconcile_revision(request(), BASE, proposal(changed))
+    assert accepted.steps[-1].deliverable_kind == "exact_enumeration"
+
+
 def test_pending_copy_of_completed_step_is_reconciled_not_rerun():
     pending_done = DONE.model_copy(update={"status": StepStatus.PENDING, "attempt": 0})
     accepted = reconcile_revision(request(), BASE, proposal(pending_done, replacement()))

@@ -98,7 +98,7 @@ def test_rejected_info_direct_answer_uses_existing_controller_retry_budget(valid
         provider.content = {"result": "PLAN_PROPOSED", "steps": [{
             "step_id": "inspect", "title": "Inspect current source",
             "description": "Read current source and explain the observed implementation evidence",
-            "primary_tool": "read_file", "dependencies": [],
+            "deliverable_kind": "semantic", "primary_tool": "read_file", "dependencies": [],
         }]}
     second = service.run(next_request)
     decision = ctrl.decide(result_input(retry, next_request, second))

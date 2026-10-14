@@ -229,7 +229,7 @@ def test_accepted_semantics_are_authoritative_over_misleading_raw_evidence():
     assert model_facts["accepted_step_results"][0]["semantic_content"] == semantic_x
     assert "tool_execution_history" not in model_facts
     assert misleading_z not in calls[0][-1].content
-    assert "authoritative conclusions" in calls[0][0].content
+    assert "Controller-accepted step results are the authoritative factual basis" in calls[0][0].content
     assert "supporting evidence and details only" in calls[0][0].content
     assert result.final_answer == "Analysis of the Error; Summary of Findings"
 

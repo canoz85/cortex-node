@@ -93,6 +93,15 @@ INVALID_OUTPUT and PROVIDER_FAILURE remain infrastructure outcomes. Pydantic
 validation, forbidden extras, json_schema output and ProposedStep semantics remain.
 Neither provider nor Router reparses raw output after structured parsing fails.
 
+Each proposed step requires `deliverable_kind: "semantic" | "exact_enumeration"`.
+Planner classifies the intended step answer, independently of the chosen tool.
+Listing workspace-root files (including grouping by file type) is an exact
+enumeration; finding the Snake UI implementation is a semantic finding even
+when discovery yields many candidate paths. No scope, grouping, presentation,
+membership, label or runtime locator fields are added to the Planner contract.
+Normalization preserves this field in ExecutionStep, and revision reconciliation
+treats it as part of the accepted step definition.
+
 ## Removed paths
 
 - Unused `PlannerInput`, `PlanningPauseReason`, `RoutingDecision`, Planner-result

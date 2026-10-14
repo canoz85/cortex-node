@@ -55,7 +55,7 @@ execution identity or an accepted plan dump to the model.
 | Field | Owner/source | Final model projection and reason |
 | --- | --- | --- |
 | accepted_plan_context: every step, status, dependency | Controller's accepted plan | Removed. Controller schedules; Brain executes the active step. The provider still reads the plan's tool ceiling internally. |
-| active step | Controller | One final human message: step_id, title, description, optional primary_tool and completion_requirement. |
+| active step | Controller | One final human message: step_id, title, description, deliverable_kind, optional primary_tool and completion_requirement. |
 | current_attempts | Controller-accepted tool history | Retained, bounded to MAX_CURRENT_ATTEMPT_RECORDS current-step records. Needed for evidence, continuation and repeated-call avoidance. |
 | prior_facts | Controller-accepted tool history | Retained, bounded to 36 successful prior records. Earlier steps may have produced inputs for this step. |
 | prior_failures | Controller-accepted tool history | Retained, bounded to 36 failed prior records. A revised step must not blindly retry known failed paths. |
@@ -69,6 +69,7 @@ execution identity or an accepted plan dump to the model.
 | original_user_request | Controller's ExecutionContext.user_request | Retained once as contextual data. It interprets the active step without authorizing other work. |
 | clarification | Controller's ExecutionContext | Retained once when present for the same contextual purpose. No Brain clarification lifecycle. |
 | coverage_assessment | Runtime mechanical coverage feedback | Retained when present. It explains why apparent completion lacked required coverage. |
+| duplicate_successful_call feedback | Controller rejection/retry policy | Code and deterministic guidance only, when present; counters and scheduling policy remain internal. |
 | exact_collection source index | Current displayed attempts → Controller's original history | Retained. Controller binds original structured evidence, rather than trusting copied model members. |
 
 Success projections use structured data when available, otherwise rendered output, rather
@@ -117,9 +118,34 @@ status, tool request IDs or opaque evidence references are accepted. The provide
 the active step from authorized BrainInput. Completion accepts only message; model-authored
 exact_collection_* arguments and nested exact_collection objects are rejected as unexpected
 fields. Controller continues to bind execution, plan revision, step, tool request IDs and
-evidence fingerprints. Internal ExactCollection selections retain Controller-side binding
-and validation against ToolResult.data. No automatic collection selection is performed;
-model completions leave exact_collection absent.
+evidence fingerprints. Model completions leave exact_collection absent; internally
+constructed worker outcomes also cannot select collection provenance.
+
+For an accepted `semantic` step Controller never promotes tool collections. For
+`exact_enumeration`, Controller inspects the full eligible successful step history
+and ToolDefinition.exact_collection_outputs. Each frozen ExactCollectionOutput
+declares only a field path relative to normalized ToolResult.data; this metadata
+is not projected into Planner capability cards and does not make a collection
+answer-bearing on its own. Initial paths are list_files.entries, find_files.files,
+git_changed_files.changed_files and search_text.matches. Search matches are JSON
+records (path, line_number, snippet and snippet metadata), already supported by
+the exact renderer; each record is preserved rather than reduced to a path.
+
+Only one valid complete candidate may bind. Missing/scalar outputs, failed
+records and incomplete pages are ineligible; multiple candidates remain ambiguous
+even if their members match. Binding failure terminates the step as
+exact_collection_unresolved without authorizing tool retries. Artifacts and other
+result siblings are never traversed. Existing strict binding stores the source
+request ID, full step-local record index, data path and ordered member occurrences
+alongside completion provenance and its evidence fingerprint. Accepted bindings
+survive checkpoint/replay without selection or execution.
+
+Finalizer renders these exact blocks deterministically, preserving every member
+occurrence and other accepted semantic steps. An explicit English request to group
+string filenames by file type/extension uses stable suffix groups with the original
+members intact. Other exact collections retain their existing flat/JSON rendering.
+No model is asked to rewrite the exact members. Composite collections, pagination
+assembly, general presentation policies and Brain semantic refinement are deferred.
 
 ## Provider correction decision
 
@@ -135,6 +161,49 @@ including mixed tool names, subject to the overall and per-tool call limits.
 Valid disallowed groups receive one correction asking for one action. Exceptions,
 malformed/unknown calls and invalid arguments do not trigger correction. After its bounded correction, normalization
 returns a typed failure; Controller owns subsequent execution retry policy.
+
+The same single correction opportunity also handles `duplicate_successful_call`.
+It tells the model that the identical call already succeeded (including an empty
+result), to reuse existing evidence, and to choose different arguments/tool,
+complete the step or request replan. There is no recursive correction: if the
+corrected action is also a duplicate, normalization returns INVALID_OUTPUT with
+that error code and Controller applies its existing bounded retry/failure policy.
+
+## Successful-call execution guard
+
+`core/tool_call_guard.py` supplies one deterministic check shared by native action
+normalization, provider correction classification and Controller authorization.
+Controller checks singleton requests and the whole batch before execution, then
+rechecks queued batch members at dispatch/resume. The guard uses full durable
+WorkingState.tool_execution_history rather than the bounded model projection.
+ExecutionDriver also checks restored authorizations against durable state before
+dispatch. Replaying an authorization whose successful result was already captured
+raises WorkerDispatchError with duplicate_successful_call and executes nothing.
+
+A duplicate requires the same execution ID, plan ID, accepted revision, step ID,
+tool name and effective arguments as an earlier successful record. Attempts are
+not part of this identity, so a retry cannot erase successful evidence. Executable
+schemas supply the same default/coercion normalization used by batch validation;
+without a model schema native arguments are compared intact. Recursive JSON key
+ordering is canonicalized without case/path normalization, array reordering or
+rewriting request arguments. Request IDs and result cardinality do not decide duplication.
+Failed records and records outside that exact accepted scope are not duplicates.
+
+All explicit continuation arguments remain in identity. Changed offsets, cursors,
+tokens, ranges or pages are allowed; repeating the identical partial page makes
+no progress and is rejected. An unfinished async observation remains pollable
+under existing async lifecycle policy. No tool-name-specific branches or new
+registry continuation fields are needed.
+
+Rejection never invokes a tool, creates a ToolResult or appends execution evidence.
+A batch containing a historical duplicate is rejected as a whole before its first
+member executes. Controller independently rejects injected worker proposals using
+the same INVALID_OUTPUT retry path and projects only the duplicate error/guidance
+back to Brain when a retry is authorized. It never completes or replans implicitly.
+Checkpoint restoration needs no new state: restored history still blocks repeats.
+Legacy unscoped records cannot prove duplication. Cache invalidation after mutations,
+implicit stateful cursors, and equivalence beyond executable argument schemas are
+intentionally outside this slice.
 
 ## Remaining boundary limitation
 

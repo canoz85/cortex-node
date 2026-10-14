@@ -16,7 +16,7 @@ PROPOSAL = {
         "step_id": "inspect",
         "title": "Inspect",
         "description": "Inspect workspace",
-        "primary_tool": "list_files",
+        "deliverable_kind": "semantic", "primary_tool": "list_files",
         "dependencies": [],
     }],
 }

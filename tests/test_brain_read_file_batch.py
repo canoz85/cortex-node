@@ -26,7 +26,7 @@ from core.protocol.controller import CortexController, apply_controller_decision
 from core.protocol.enums import BrainOutcomeKind as Kind, ControllerDecisionType as Decision, WorkerRole
 from core.protocol.models import (
     BrainOutcome, ExecutionState, ProtocolVisibleState, ToolRequest, ToolResult,
-    ToolExecutionRecord, ExactCollection, StepCompletionEvidence,
+    ToolExecutionRecord, StepCompletionEvidence,
 )
 from core.runtime.controller_transition import ControllerCoordinator
 from core.runtime.execution_driver import ExecutionDriver, WorkerDispatchError
@@ -275,7 +275,7 @@ def test_controller_revalidates_whole_injected_proposal_before_any_authorization
     assert updated.protocol_visible.tool_request_continuation is None
 
 
-def test_maximum_batch_window_order_and_record_local_exact_collection_with_full_provenance():
+def test_maximum_batch_window_order_and_semantic_completion_with_full_provenance():
     state, decision = accepted_first(READ_FILE_BATCH_LIMIT)
     prefix = tuple(ToolExecutionRecord(execution_id=state.protocol_visible.identity.execution_id,
         plan_id="p1", plan_revision=1, step_id="s1", tool_name="read_file",
@@ -296,15 +296,12 @@ def test_maximum_batch_window_order_and_record_local_exact_collection_with_full_
     assert [r["success"] for r in current[-READ_FILE_BATCH_LIMIT:]] == [
         False, *([True] * (READ_FILE_BATCH_LIMIT - 1))]
     completion = BrainOutcome(outcome=Kind.STEP_COMPLETED, step_id="s1",
-        completion_evidence=StepCompletionEvidence(step_id="s1", summary="Inspected",
-            exact_collection=ExactCollection(source_record_index=MAX_CURRENT_ATTEMPT_RECORDS - 1,
-                                            data_path=("entries",))))
+        completion_evidence=StepCompletionEvidence(step_id="s1", summary="Inspected"))
     decision = controller.decide(input_for(state, completion))
     records = state.working.tool_execution_history
     assert decision.completion_evidence.tool_request_ids == tuple(r.result.request_id for r in records)
     assert len(decision.completion_evidence.tool_request_ids) == len(prefix) + READ_FILE_BATCH_LIMIT
-    assert decision.completion_evidence.exact_collection.items == (f"file-{READ_FILE_BATCH_LIMIT - 1}.txt",)
-    assert decision.completion_evidence.exact_collection.source_request_id == records[-1].result.request_id
+    assert decision.completion_evidence.exact_collection is None
 
 
 @pytest.mark.parametrize("mode", ["portable_direct", "portable_injected", "legacy_deferred"])
@@ -459,11 +456,10 @@ def test_completion_provenance_filters_foreign_execution_plan_and_revision():
     assert [r["args"]["path"] for r in payload["current_attempts"]] == ["file-0.txt", "file-1.txt"]
     completion = controller.decide(input_for(state, BrainOutcome(
         outcome=Kind.STEP_COMPLETED, step_id="s1", message="Done",
-        completion_evidence=StepCompletionEvidence(step_id="s1", summary="Done",
-            exact_collection=ExactCollection(source_record_index=1, data_path=("entries",))))))
+        completion_evidence=StepCompletionEvidence(step_id="s1", summary="Done"))))
     assert completion.completion_evidence.tool_request_ids == tuple(r.result.request_id for r in records)
     assert completion.completion_evidence.evidence_id == evidence_identity(records)
-    assert completion.completion_evidence.exact_collection.source_request_id == records[1].result.request_id
+    assert completion.completion_evidence.exact_collection is None
 
 
 @pytest.mark.parametrize("mode", ["portable", "deferred"])

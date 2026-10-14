@@ -44,7 +44,7 @@ def fail_and_retry(ctrl, state):
     request = state.protocol_visible.planning_request
     result = normalize_planner_proposal({"result": "PLAN_PROPOSED", "steps": [{
         "step_id": "read", "title": "Read", "description": "Read files",
-        "primary_tool": "read_file", "dependencies": ["missing"],
+        "deliverable_kind": "semantic", "primary_tool": "read_file", "dependencies": ["missing"],
     }]}, request, route="info")
     assert result.failure_category == PlanningFailureCategory.INVALID_OUTPUT
     retry = ctrl.decide(build_controller_input({"execution_state": state, "planner_result": result}))
@@ -53,7 +53,7 @@ def fail_and_retry(ctrl, state):
 
 def valid_proposal(dependencies=()):
     return {"result": "PLAN_PROPOSED", "steps": [{"step_id": "new", "title": "Inspect",
-        "description": "Inspect and report files", "primary_tool": "read_file", "dependencies": dependencies}]}
+        "description": "Inspect and report files", "deliverable_kind": "semantic", "primary_tool": "read_file", "dependencies": dependencies}]}
 
 
 def section(messages, label):
@@ -339,7 +339,7 @@ def test_custom_metadata_is_consumed_from_the_same_definition_source(monkeypatch
         "capabilities": PlanningCapabilities(available_tools=("custom",))})
     provider = FakeProvider({"result": "PLAN_PROPOSED", "steps": [{
         "step_id": "inspect", "title": "Inspect custom resource", "description": "Observe resource status",
-        "primary_tool": "custom", "dependencies": [],
+        "deliverable_kind": "semantic", "primary_tool": "custom", "dependencies": [],
     }]})
     assert PlannerService(provider=provider, router=FakeRouter("info"), mutating_tools=set()).run(request).outcome == PlannerOutcome.EXECUTION_PLAN
     summary, = capabilities_in(provider.messages[0])

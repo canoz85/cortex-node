@@ -14,6 +14,7 @@ from core.brain_normalization import (
 )
 from core.protocol.enums import BrainOutcomeKind
 from core.protocol.models import BrainInput, BrainOutcome
+from core.tool_call_guard import DuplicateSuccessfulCall, reject_duplicate_successful_calls
 
 from core.debug import log_llm_exchange
 from core.logging.live_status import add_response_usage, begin_provider_invocation, set_brain_step_context
@@ -32,6 +33,7 @@ def _ensure_native_call(
     raw,
     authorized_tools: dict[str, object],
     argument_schema_for: Callable[[str], type | None] | None = None,
+    brain_input: BrainInput | None = None,
 ):
     if argument_schema_for is None:
         argument_schema_for = partial(
@@ -43,12 +45,26 @@ def _ensure_native_call(
     disallowed_batch = valid_batch and not _is_permitted_native_batch(
         raw, authorized_tools, argument_schema_for=argument_schema_for,
     )
-    correction_triggered = missing_call or disallowed_batch
+    duplicate_feedback = None
+    if (brain_input is not None and calls and not disallowed_batch
+            and not getattr(raw, "content", None) and not getattr(raw, "invalid_tool_calls", None)
+            and _are_valid_native_calls(calls, authorized_tools, allow_unknown_schema=True)):
+        try:
+            reject_duplicate_successful_calls(
+                [(call["name"], call["args"]) for call in calls if call["name"] in authorized_tools],
+                brain_input, argument_schema_for=argument_schema_for,
+            )
+        except DuplicateSuccessfulCall as exc:
+            duplicate_feedback = str(exc)
+    correction_triggered = missing_call or disallowed_batch or duplicate_feedback is not None
     _log_native_call_attempt(raw, 1, correction_triggered=correction_triggered)
     if not correction_triggered:
         return raw, provider_messages
 
-    if disallowed_batch and _is_oversized_native_batch(
+    if duplicate_feedback is not None:
+        instruction = duplicate_feedback + " Return a currently bound native action with empty content."
+        rejected_response = [raw] if isinstance(raw, AIMessage) else []
+    elif disallowed_batch and _is_oversized_native_batch(
         raw, authorized_tools, argument_schema_for=argument_schema_for,
     ):
         limits = ", ".join(
@@ -364,6 +380,7 @@ class LangChainBrainProvider:
                 ),
                 authorized_tools=authorized_by_name,
                 argument_schema_for=argument_schema_for,
+                brain_input=brain_input,
             )
             if retry_messages is not provider_messages:
                 log_llm_exchange(

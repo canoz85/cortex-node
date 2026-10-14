@@ -67,6 +67,14 @@ STEP SEMANTICS:
   step's title or description. Describe the intended result rather than tool-call syntax.
   Any value required for execution must appear in the responsible step semantics.
   A conditional mutation may correctly make no change when its guard is false.
+- Classify each intended step answer with deliverable_kind. Use semantic for a
+  derived finding, explanation, selected item or interpretation. Use
+  exact_enumeration when the collection itself is requested as the answer: every
+  member must survive exactly, without renaming, omission, addition, normalization,
+  summarization or substitution. Supporting discovery candidates are evidence,
+  not automatically the answer. "List the files in the workspace root" (including
+  grouping by file type) is exact_enumeration. "Find the Snake UI implementation"
+  is semantic even when discovery returns many candidate filenames.
 - Dependencies express prerequisites: a step is ready after its dependencies finish
   and may need their evidence. Brain receives bounded prior tool evidence; complete
   evidence continuity is not guaranteed, and prior accepted semantic results are not
@@ -84,10 +92,10 @@ STEP SEMANTICS:
 RESULT CONTRACT:
 
 Include result, objective, steps and message. Each proposed step includes step_id,
-title, description, primary_tool and dependencies; use only listed capabilities
+title, description, primary_tool, deliverable_kind and dependencies; use only listed capabilities
 within their stated limits, without inventing tool modes or arguments.
 JSON envelope examples (illustrative values):
-{{"result":"PLAN_PROPOSED","objective":"requested outcome","steps":[{{"step_id":"step1","title":"runtime stage","description":"intended result","primary_tool":"<available capability>","dependencies":[]}}],"message":""}}
+{{"result":"PLAN_PROPOSED","objective":"requested outcome","steps":[{{"step_id":"step1","title":"runtime stage","description":"intended result","primary_tool":"<available capability>","deliverable_kind":"semantic","dependencies":[]}}],"message":""}}
 {{"result":"NO_PLAN_REQUIRED","objective":"","steps":[],"message":"direct answer"}}
 - PLAN_PROPOSED: runtime work is needed and feasible with available capabilities;
   provide executable steps. Put execution intent in steps, not only objective/message.

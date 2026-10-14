@@ -95,7 +95,7 @@ def test_planner_projects_controller_authorization_not_registered_inventory():
     assert decision.decision_type == ControllerDecisionType.DISPATCH_PLANNER
     registry.resolve(decision.planning_request.capabilities.available_tools)
     provider = FakeProvider({"result": "PLAN_PROPOSED", "objective": "Read", "steps": [
-        {"step_id": "read", "title": "Read", "description": "Read the file", "primary_tool": "read_file", "dependencies": []},
+        {"step_id": "read", "title": "Read", "description": "Read the file", "deliverable_kind": "semantic", "primary_tool": "read_file", "dependencies": []},
     ], "message": ""})
     planner = PlannerService(provider=provider, router=FakeRouter("info"), mutating_tools=MUTATING_TOOLS)
     result = planner.run(decision.planning_request)

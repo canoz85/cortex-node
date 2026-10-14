@@ -53,7 +53,7 @@ class Planner:
                         steps=(ProposedStep(
                             step_id="write", title="Write the requested note",
                             description=f"Write the note using the signature {self_semantic}.",
-                            primary_tool="write_file",
+                            deliverable_kind="semantic", primary_tool="write_file",
                         ),),
                     )
                 return PlannerProposal(

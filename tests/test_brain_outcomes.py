@@ -27,8 +27,9 @@ from core.protocol.models import (
 )
 
 
-def brain_input(*, direct=False, final=False, retry_count=0, max_retries=1):
-    step = ExecutionStep(step_id="s1", title="Read every file", status=StepStatus.ACTIVE)
+def brain_input(*, direct=False, final=False, retry_count=0, max_retries=1, deliverable_kind="semantic"):
+    step = ExecutionStep(step_id="s1", title="Read every file", status=StepStatus.ACTIVE,
+                         deliverable_kind=deliverable_kind)
     return BrainInput(
         identity=ExecutionIdentity(execution_id="brain-outcome-test", protocol_version="1.0"),
         cursor=ExecutionCursor(
@@ -60,14 +61,16 @@ def controller_input(context, outcome):
     )
 
 
-def test_exact_collection_reference_is_bound_from_structured_tool_evidence():
-    context = brain_input()
-    # Internal selections bypass the model-facing lifecycle contract.
+def test_exact_collection_is_resolved_from_declared_tool_metadata(monkeypatch):
+    import tools.registry as registry
+    monkeypatch.setattr(registry, "TOOL_DEFINITIONS", (*registry.TOOL_DEFINITIONS,
+        registry.ToolDefinition("catalog_items", "general", exact_collection_outputs=(
+            registry.ExactCollectionOutput(("entries",)),))))
+    context = brain_input(deliverable_kind="exact_enumeration")
     outcome = BrainOutcome(
         outcome=Kind.STEP_COMPLETED, step_id=context.active_step.step_id,
         completion_evidence=StepCompletionEvidence(
             step_id=context.active_step.step_id, summary="Workspace files collected.",
-            exact_collection=ExactCollection(source_record_index=0, data_path=("entries",), label="Files"),
         ),
     )
     record = ToolExecutionRecord(
@@ -126,13 +129,15 @@ def test_invalid_exact_collection_rejects_completion_through_retry_lifecycle(
     value = controller_input(context, outcome).model_copy(update={
         "tool_execution_history": (record,),
     })
+    with pytest.raises(ValueError, match=reason):
+        CortexController._bind_exact_collection(outcome.completion_evidence.exact_collection, (record,))
     controller = CortexController(24)
     decision = controller.decide(value)
     assert decision.decision_type == Decision.DISPATCH_BRAIN
     assert decision.reason == "retry_step"
     assert decision.retry.retry_count == 1
     assert decision.retry.last_error_code == "invalid_exact_collection"
-    assert reason in decision.failure_reason
+    assert decision.failure_reason == "Brain completion cannot supply exact collection provenance"
     assert decision.completed_step_id is None
     assert decision.completion_evidence is None
     assert decision.accepted_plan.steps[0].status == StepStatus.ACTIVE
@@ -146,10 +151,10 @@ def test_invalid_exact_collection_rejects_completion_through_retry_lifecycle(
 
 
 def test_unrelated_binding_value_error_still_raises(monkeypatch):
-    def invariant_failure(proposal, records):
+    def invariant_failure(self, step, records):
         raise ValueError("Controller internal invariant")
 
-    monkeypatch.setattr(CortexController, "_bind_exact_collection", staticmethod(invariant_failure))
+    monkeypatch.setattr(CortexController, "_resolve_exact_collection", invariant_failure)
     with pytest.raises(ValueError, match="Controller internal invariant"):
         CortexController(24).decide(controller_input(brain_input(), normalize(completion())))
 
@@ -593,7 +598,8 @@ def test_execution_prompt_is_step_scoped_and_has_one_native_contract():
     assert messages[-1].type == "human" and messages[-1].content.startswith("Active step:")
     brief = json.loads(messages[-1].content.split("\n", 1)[1])
     assert "accepted_plan_context" not in brief
-    assert set(brief) == {"step_id", "title", "description"}
+    assert set(brief) == {"step_id", "title", "description", "deliverable_kind"}
+    assert brief["deliverable_kind"] == "semantic"
     rendered = "\n".join(m.content for m in messages)
     assert rendered.count("The active step is the sole execution objective") == 1
     assert rendered.count("Return one native action") == 1

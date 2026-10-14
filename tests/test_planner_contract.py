@@ -8,7 +8,7 @@ def test_all_semantic_variants_validate_without_failure_category():
         step_id="step1",
         title="Inspect files",
         description="Inspect the workspace files.",
-        primary_tool="list_files",
+        deliverable_kind="semantic", primary_tool="list_files",
     )
 
     assert PlannerProposal(
@@ -71,7 +71,7 @@ def test_system_policy_exposes_only_semantic_proposal_outcomes():
 @pytest.mark.parametrize("payload", [
     {"result": "PLAN_PROPOSED", "steps": []},
     {"result": "NEEDS_INPUT", "message": "Which file?", "steps": [{"step_id": "s",
-        "title": "Read", "description": "Read the file", "primary_tool": "read_file"}]},
+        "title": "Read", "description": "Read the file", "deliverable_kind": "semantic", "primary_tool": "read_file"}]},
     {"result": "INVALID_OUTPUT", "message": "Bad output"},
 ])
 def test_invalid_proposal_variant_shapes_are_rejected(payload):
@@ -82,7 +82,7 @@ def test_invalid_proposal_variant_shapes_are_rejected(payload):
 @pytest.mark.parametrize("tool", [None, ""])
 def test_executable_step_requires_a_primary_tool(tool):
     with pytest.raises(ValueError):
-        ProposedStep(step_id="s", title="Read", description="Read the file", primary_tool=tool)
+        ProposedStep(step_id="s", title="Read", description="Read the file", deliverable_kind="semantic", primary_tool=tool)
 
 
 def test_executable_step_rejects_missing_tool_and_extra_arguments():
@@ -91,3 +91,28 @@ def test_executable_step_rejects_missing_tool_and_extra_arguments():
         ProposedStep.model_validate(payload)
     with pytest.raises(ValueError, match="extra"):
         ProposedStep.model_validate({**payload, "primary_tool": "read_file", "arguments": {"path": "a"}})
+
+
+def test_deliverable_schema_is_required_minimal_and_semantic():
+    from core.planner_contract import authorized_planner_schema
+    schema = authorized_planner_schema(("list_files", "find_files"), max_steps=4).model_json_schema()
+    step = schema["$defs"]["AuthorizedProposedStep"]
+    assert step["properties"]["deliverable_kind"]["enum"] == ["semantic", "exact_enumeration"]
+    assert "deliverable_kind" in step["required"]
+    assert set(step["properties"]) == {
+        "step_id", "title", "description", "primary_tool", "deliverable_kind", "dependencies",
+    }
+    assert "Find the Snake UI implementation" in PLANNER_SYSTEM_PROMPT
+    assert "Supporting discovery candidates are evidence" in PLANNER_SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize("kind", [None, "exact", "", True, 1, {}, []])
+def test_invalid_deliverable_kind_is_rejected(kind):
+    with pytest.raises(ValueError):
+        ProposedStep(step_id="s", title="List files", description="List all files",
+                     primary_tool="list_files", deliverable_kind=kind)
+
+
+def test_missing_deliverable_kind_is_rejected():
+    with pytest.raises(ValueError, match="deliverable_kind"):
+        ProposedStep(step_id="s", title="List files", description="List all files", primary_tool="list_files")

@@ -73,7 +73,7 @@ def test_executable_runtime_flow_with_scripted_provider():
 
     model = Model([{"result": "PLAN_PROPOSED", "objective": "Read a.txt", "steps": [{
         "step_id": "read", "title": "Read a.txt", "description": "Read a.txt and report its content",
-        "primary_tool": "read_file", "dependencies": [],
+        "deliverable_kind": "semantic", "primary_tool": "read_file", "dependencies": [],
     }]}], route="info")
     app = production_app(model, [read_file])
     history, _ = run_prompt(app, "Read a.txt", run_id="runtime-executable")

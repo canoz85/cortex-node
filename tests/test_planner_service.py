@@ -39,14 +39,14 @@ VALID = {
             "step_id": "inspect",
             "title": "Inspect",
             "description": "Inspect workspace",
-            "primary_tool": "list_files",
+            "deliverable_kind": "semantic", "primary_tool": "list_files",
             "dependencies": [],
         },
         {
             "step_id": "write",
             "title": "Write",
             "description": "Create file",
-            "primary_tool": "write_file",
+            "deliverable_kind": "semantic", "primary_tool": "write_file",
             "dependencies": ["inspect"],
         },
     ],
@@ -180,7 +180,7 @@ def test_preserved_clarification_route_skips_router_and_plans_original_request()
             "step_id": "read",
             "title": "Read and summarize README.md",
             "description": "Read README.md and produce the requested summary.",
-            "primary_tool": "read_file",
+            "deliverable_kind": "semantic", "primary_tool": "read_file",
             "dependencies": [],
         }],
     })
@@ -258,7 +258,7 @@ def test_info_planner_prompt_and_validation_use_one_authorized_tool_set():
             "step_id": "inspect",
             "title": "Inspect files",
             "description": "Inspect workspace files",
-            "primary_tool": "list_files",
+            "deliverable_kind": "semantic", "primary_tool": "list_files",
             "dependencies": [],
         }],
     })
@@ -281,7 +281,7 @@ def test_info_planner_cannot_validate_tool_outside_authorized_set():
             "step_id": "write",
             "title": "Write a file",
             "description": "Create the requested file",
-            "primary_tool": "write_file",
+            "deliverable_kind": "semantic", "primary_tool": "write_file",
             "dependencies": [],
         }],
     })
@@ -881,7 +881,7 @@ assert (
 def test_runtime_discovery_bypasses_ambient_retrieval_with_scripted_provider(user_request, tool_name):
     provider = FakeProvider({"result": "PLAN_PROPOSED", "steps": [{
         "step_id": "discover", "title": "Discover", "description": user_request,
-        "primary_tool": tool_name,
+        "deliverable_kind": "semantic", "primary_tool": tool_name,
     }]})
     request = planner_input(context=ExecutionContext(user_request=user_request)).model_copy(update={
         "capabilities": PlanningCapabilities(available_tools=(tool_name, "rag_search")),

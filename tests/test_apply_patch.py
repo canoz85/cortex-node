@@ -262,7 +262,7 @@ def test_route_authorization_native_binding_execution_and_provenance(tmp_path, r
     # read_file remains the primary hint: supporting mutations use plan authority.
     proposal = {"result": "PLAN_PROPOSED", "objective": "Update source", "message": "", "steps": [
         {"step_id": "inspect", "title": "Inspect and update", "description": "Read and update the known source text",
-         "primary_tool": "read_file", "dependencies": []}]}
+         "deliverable_kind": "semantic", "primary_tool": "read_file", "dependencies": []}]}
     planner = PlannerService(provider=FakeProvider(proposal), router=FakeRouter(route), mutating_tools=MUTATING_TOOLS)
     brain = BrainService(provider=LangChainBrainProvider(brain_llm=model, executable_tools=tools), agent_system_prompt="Execute step")
     controller = CortexController(20, planning_capabilities=PlanningCapabilities(available_tools=tuple(sorted(registry.names))))

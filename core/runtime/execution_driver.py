@@ -29,6 +29,7 @@ from core.runtime.worker_ports import (
     PlannerPort,
     ToolRuntimePort,
 )
+from core.tool_call_guard import DuplicateSuccessfulCall, reject_duplicate_successful_calls
 
 
 WorkerResult = PlannerResult | BrainResult | ToolResult | FinalizationResult
@@ -199,6 +200,18 @@ class ExecutionDriver:
                 if (plan is not None and plan.available_tools is not None
                         and request.tool_name not in plan.available_tools):
                     raise WorkerDispatchError("Tool is outside accepted plan capabilities")
+                # A restored authorization must not execute an already captured
+                # success. Use durable state, not the older authorization input.
+                dispatch_context = controller_input.model_copy(update={
+                    "identity": execution_state.protocol_visible.identity,
+                    "active_plan": plan,
+                    "active_step": execution_state.protocol_visible.active_step,
+                    "tool_execution_history": execution_state.working.tool_execution_history,
+                })
+                try:
+                    reject_duplicate_successful_calls([(request.tool_name, request.arguments)], dispatch_context)
+                except DuplicateSuccessfulCall as exc:
+                    raise WorkerDispatchError(str(exc)) from exc
                 selected_tool_runtime = tool_runtime or self._tool_runtime
                 from core.logging.live_status import current_live_status
                 status = current_live_status()

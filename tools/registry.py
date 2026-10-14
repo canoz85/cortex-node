@@ -68,6 +68,22 @@ class CapabilityMetadataError(ValueError):
 
 
 @dataclass(frozen=True)
+class ExactCollectionOutput:
+    """Trusted collection location relative only to normalized ToolResult.data.
+
+    Capability, not answer-bearing status. Never projected into Planner cards.
+    """
+
+    data_path: tuple[str, ...]
+
+    def __post_init__(self):
+        if not isinstance(self.data_path, tuple) or not self.data_path or any(
+            not isinstance(part, str) or not part for part in self.data_path
+        ):
+            raise ValueError("Exact collection output requires a nonempty field path")
+
+
+@dataclass(frozen=True)
 class ToolDefinition:
     name: str
     family: str
@@ -78,12 +94,14 @@ class ToolDefinition:
     planning: CapabilitySemantics | None = None
     # Maximum independent synchronous native calls; never grants authorization.
     max_batch_calls: int = 1
+    exact_collection_outputs: tuple[ExactCollectionOutput, ...] = ()
 
 
 # One production manifest, including explicit deployment defaults. A new
 # definition is disabled unless its deployment default is deliberately enabled.
 TOOL_DEFINITIONS = (
-    ToolDefinition("list_files", "workspace", enabled_by_default=True, max_batch_calls=24, planning=CapabilitySemantics(
+    ToolDefinition("list_files", "workspace", enabled_by_default=True, max_batch_calls=24,
+        exact_collection_outputs=(ExactCollectionOutput(("entries",)),), planning=CapabilitySemantics(
         "List immediate workspace children or identify a file", (),
         ("path, entries: immediate child names; is_file",), ("Not recursive; no file content or sizes",),
         use_when="Inspect the immediate children of a known directory.",
@@ -199,21 +217,24 @@ TOOL_DEFINITIONS = (
         ("May be queued/running; absent history is not success", "Does not download outputs"), async_kind="poll",
         use_when="Inspect a submitted Comfy job using a known prompt ID and discover its outputs.",
         avoid_when="No job identity exists or the output image itself must be downloaded.")),
-    ToolDefinition("find_files", "workspace", enabled_by_default=True, max_batch_calls=24, planning=CapabilitySemantics(
+    ToolDefinition("find_files", "workspace", enabled_by_default=True, max_batch_calls=24,
+        exact_collection_outputs=(ExactCollectionOutput(("files",)),), planning=CapabilitySemantics(
         "Discover workspace paths by basename glob, optionally recursive", (),
         ("files: sorted workspace-relative path collection",),
         ("No file content or sizes", "Case-sensitive; excludes file/directory links", "limit must be 1..100"),
         pagination="offset/limit over sorted paths",
         use_when="Discover workspace files by basename glob, optionally recursively.",
         avoid_when="Selection depends on file content or Git change status.")),
-    ToolDefinition("search_text", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
+    ToolDefinition("search_text", "workspace", enabled_by_default=True,
+        exact_collection_outputs=(ExactCollectionOutput(("matches",)),), planning=CapabilitySemantics(
         "Search workspace text and discover matching paths, optionally recursive", ("query: required literal text or regex",),
         ("matches: path, line_number, text snippet",),
         ("Case-sensitive UTF-8; invalid bytes replaced", "Snippets can truncate; not full-file content", "limit must be 1..100"),
         pagination="offset/limit over matches ordered by path then line",
         use_when="Locate implementation, symbols, literals, or regex matches inside workspace text.",
         avoid_when="The target path is already known and only complete file content is needed.")),
-    ToolDefinition("git_changed_files", "workspace", enabled_by_default=True, planning=CapabilitySemantics(
+    ToolDefinition("git_changed_files", "workspace", enabled_by_default=True,
+        exact_collection_outputs=(ExactCollectionOutput(("changed_files",)),), planning=CapabilitySemantics(
         "Discover changed repository paths", (),
         ("changed_files: path/status collection with staged and worktree flags; branch/upstream",),
         ("No file content; requires repository; ignored files omitted", "limit must be 1..100"), pagination="offset/limit over sorted changed paths",

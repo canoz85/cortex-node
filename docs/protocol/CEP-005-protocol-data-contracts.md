@@ -161,6 +161,7 @@ Required Contract Elements:
 - step identity
 - step order
 - step intent
+- deliverable_kind: `semantic` or `exact_enumeration`
 - completion status
 - retry metadata
 
@@ -172,6 +173,12 @@ Invariants:
 - Step Attempt Identity changes for retries
 - completed steps never change
 - retries create new attempts, not rewritten attempts
+- Planner classifies the intended answer. `semantic` delivers a finding,
+  explanation, selection or interpretation; supporting collections are evidence.
+  `exact_enumeration` delivers the collection itself with every member occurrence
+  preserved exactly. Planner receives no collection locators or provenance mechanics.
+- Planner proposals require deliverable_kind. Older serialized runtime steps
+  without it retain `semantic` behavior.
 
 Related CEP references:
 - CEP-001 (StepStarted, StepCompleted, StepFailed)
