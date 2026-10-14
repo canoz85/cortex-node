@@ -173,7 +173,9 @@ def test_langchain_renderer_is_an_outward_adapter_over_framework_neutral_facts()
     assert len(model.calls) == 1
     rendered = "\n".join(message.content for message in model.calls[0])
     assert "Complete the request" in rendered
-    assert '"execution_id": "stage-3a"' in rendered
+    assert '"status": "completed"' in rendered
+    assert '"execution_id"' not in rendered
+    assert '"accepted_plan"' not in rendered
     assert "BRAIN OUTCOME CONTRACT" not in rendered
 
 

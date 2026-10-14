@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Iterable, Literal
 
-from core.models import ReadFileRequest
+from core.models import ApplyPatchRequest, ReadFileRequest
 
 
 @dataclass(frozen=True)
@@ -100,6 +100,13 @@ TOOL_DEFINITIONS = (
         "Write workspace text", ("path and content: required",),
         ("path, characters_written",),
         ("Creates parents; replaces existing content by default", "Write receipt does not independently verify content"))),
+    ToolDefinition("apply_patch", "workspace", mutating=True, enabled_by_default=True,
+        args_schema=ApplyPatchRequest, planning=CapabilitySemantics(
+            "Apply a small exact text replacement to an existing workspace file", ("path, old_text, new_text: required",),
+            ("path, replacements, character counts, before/after SHA-256",),
+            ("UTF-8 text only; exact match count required; never creates files",),
+            use_when="The file and exact target text are known and a localized edit is safer than rewriting it.",
+            avoid_when="Discovery is needed, target text or match count is uncertain, or a new file should be created.")),
     ToolDefinition("make_directory", "workspace", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
         "Create a workspace directory", ("path: required workspace directory",),
         ("path, creation receipt",), ("Creates parents; existing directories allowed",))),

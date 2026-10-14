@@ -249,12 +249,14 @@ def test_complete_non_graph_lifecycle_is_controller_authorized():
     ("info", "write_file", False),
     ("info", "make_directory", False),
     ("info", "install_package", False),
+    ("info", "apply_patch", False),
     ("info", "read_file", True),
     ("action", "write_file", True),
+    ("action", "apply_patch", True),
 ])
 def test_planner_route_capabilities_gate_brain_tool_execution(route, tool_name, executes):
     calls = []
-    available_tools = ("install_package", "make_directory", "read_file", "write_file")
+    available_tools = ("apply_patch", "install_package", "make_directory", "read_file", "write_file")
 
     class ProposedPlanner:
         def run(self, request):
@@ -304,8 +306,9 @@ def test_planner_route_capabilities_gate_brain_tool_execution(route, tool_name, 
         assert calls == []
 
 
-def test_tool_dispatch_rechecks_accepted_capabilities_before_runtime_invocation():
-    request = ToolRequest(request_id="blocked", tool_name="write_file", arguments={"path": "x"})
+@pytest.mark.parametrize("tool_name", ["write_file", "apply_patch"])
+def test_tool_dispatch_rechecks_accepted_capabilities_before_runtime_invocation(tool_name):
+    request = ToolRequest(request_id="blocked", tool_name=tool_name, arguments={"path": "x"})
     step = ExecutionStep(step_id="inspect", title="Inspect", primary_tool="read_file")
     plan = ExecutionPlan(plan_id="read-only", steps=(step,), available_tools=("read_file",))
     state = ExecutionState(protocol_visible=ProtocolVisibleState(

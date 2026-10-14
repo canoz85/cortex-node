@@ -113,6 +113,19 @@ class WriteFileResult(ToolSerializableModel):
     characters_written: int = Field(default=0, ge=0)
 
 
+class ApplyPatchRequest(BaseModel):
+    """Exact replacement arguments; never coerce counts or normalize text."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    path: str = Field(min_length=1, description="Existing UTF-8 text file inside the workspace.")
+    old_text: str = Field(min_length=1, description="Exact text to replace, including whitespace.")
+    new_text: str = Field(description="Literal replacement text; empty text deletes the match.")
+    expected_occurrences: int = Field(
+        default=1, ge=1, description="Required exact, non-overlapping match count; mismatch makes no edit.",
+    )
+
+
 class AsyncToolResult(ToolSerializableModel):
     """Tool result base that validates optional provider async-job evidence."""
 

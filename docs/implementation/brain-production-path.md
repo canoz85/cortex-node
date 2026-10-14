@@ -108,14 +108,18 @@ The complete declarations, exported directly from LIFECYCLE_ACTION_SCHEMAS, are 
 
 | Native tool | Required arguments | Optional arguments |
 | --- | --- | --- |
-| brain_step_completed | message: nonempty semantic result | exact_collection: source_record_index integer ≥ 0, required data_path array of string keys/integer indexes, optional nonempty label |
+| brain_step_completed | message: nonempty semantic result | None |
 | brain_step_failed | message: nonempty evidence-grounded reason objective is unachievable | None |
 | brain_replan_requested | reason: nonempty evidence-grounded strategy-change reason; constraints: string array | None |
 
 All parameter objects forbid extra properties. No model-provided step_id, completion
 status, tool request IDs or opaque evidence references are accepted. The provider derives
-the active step from authorized BrainInput. Empty data_path selects the collection at the
-structured-evidence root; source_record_index indexes the displayed current_attempts array.
+the active step from authorized BrainInput. Completion accepts only message; model-authored
+exact_collection_* arguments and nested exact_collection objects are rejected as unexpected
+fields. Controller continues to bind execution, plan revision, step, tool request IDs and
+evidence fingerprints. Internal ExactCollection selections retain Controller-side binding
+and validation against ToolResult.data. No automatic collection selection is performed;
+model completions leave exact_collection absent.
 
 ## Provider correction decision
 
@@ -134,9 +138,9 @@ returns a typed failure; Controller owns subsequent execution retry policy.
 
 ## Remaining boundary limitation
 
-The installed Ollama SDK strips additionalProperties/minLength and the nested properties
-and required fields of exact_collection from the serialized tool schema. The schema's
-description therefore states its argument shape as well; normalization enforces it strictly.
+The installed Ollama SDK strips additionalProperties/minLength from the serialized tool
+schema; normalization enforces those constraints strictly. The completion schema exposes
+only its message argument, including across the native Ollama serialization boundary.
 Mocked-HTTP tests exercise real ChatOllama and Ollama request serialization, and protect the
 top-level argument types/descriptions, required fields and array item types that survive.
 Upgrading the SDK or improving its nested-schema transport is separate work. No SDK patch,

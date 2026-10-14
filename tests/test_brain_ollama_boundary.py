@@ -58,6 +58,7 @@ def test_native_actions_survive_real_ollama_boundary(name, args, kind, retry):
     for request in requests:
         schemas = {tool["function"]["name"]: tool["function"] for tool in request["tools"]}
         assert schemas["git_status"]["parameters"]["properties"] == {}
+        assert set(schemas["brain_step_completed"]["parameters"]["properties"]) == {"message"}
         for schema in LIFECYCLE_ACTION_SCHEMAS:
             actual = schemas[schema["function"]["name"]]
             # Ollama retains top-level arguments but strips nested object schemas

@@ -131,7 +131,7 @@ def test_bounded_correction_accepts_single_call_with_text_without_third_invocati
     assert corrected.content == "I'll read b.py next."
 
 
-def test_incidental_content_does_not_bypass_completion_provenance():
+def test_incidental_content_does_not_allow_model_authored_collection_locators():
     raw = native_action("brain_step_completed", {
         "message": "Found files.", "exact_collection_source_record_index": 0,
         "exact_collection_data_path": ["files"],
@@ -139,8 +139,11 @@ def test_incidental_content_does_not_bypass_completion_provenance():
     context = brain_input()
     provider, model, _ = setup_provider(raw)
     outcome = provider.generate(context, ())
+    assert outcome.kind == Kind.INVALID_OUTPUT
+    assert outcome.completion_evidence is None
+    assert _canonical_brain_response(raw, {}) is raw
     decision = CortexController(24).decide(controller_input(context, outcome))
-    assert decision.retry.last_error_code == "invalid_exact_collection"
+    assert decision.retry.last_error_code == "unexpected_response_content"
     assert decision.completed_step_id is decision.completion_evidence is None
     assert len(model.calls) == 1
 

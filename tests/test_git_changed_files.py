@@ -4,12 +4,12 @@ import shutil
 import pytest
 
 from conftest import get_tool, parse_result
-from core.brain_normalization import normalize_brain_output
 from core.protocol.controller import CortexController
-from core.protocol.models import ToolRequest, ToolExecutionRecord
+from core.protocol.enums import BrainOutcomeKind
+from core.protocol.models import BrainOutcome, ExactCollection, StepCompletionEvidence, ToolRequest, ToolExecutionRecord
 from core.runtime.tool_result_integration import SerializedToolRuntimePort
 from test_git_ops import _init_repo, _run
-from test_brain_outcomes import brain_input, controller_input, native_action
+from test_brain_outcomes import brain_input, controller_input
 from tools.git_ops import get_git_tools
 
 
@@ -102,10 +102,13 @@ def test_changed_files_bind_through_existing_exact_collection_provenance(tmp_pat
     runtime = SerializedToolRuntimePort(get_git_tools(str(tmp_path)))
     result = runtime.execute(ToolRequest(request_id="changes", tool_name="git_changed_files"))
     context = brain_input()
-    outcome = normalize_brain_output(native_action("brain_step_completed", {
-        "message": "One untracked file: new.txt.", "exact_collection_source_record_index": 0,
-        "exact_collection_data_path": ["changed_files"],
-    }), context, {"git_changed_files"})
+    outcome = BrainOutcome(
+        outcome=BrainOutcomeKind.STEP_COMPLETED, step_id=context.active_step.step_id,
+        completion_evidence=StepCompletionEvidence(
+            step_id=context.active_step.step_id, summary="One untracked file: new.txt.",
+            exact_collection=ExactCollection(source_record_index=0, data_path=("changed_files",)),
+        ),
+    )
     record = ToolExecutionRecord(execution_id=context.identity.execution_id, plan_id=context.active_plan.plan_id,
                                  plan_revision=context.active_plan.revision, step_id=context.active_step.step_id,
                                  tool_name="git_changed_files", result=result)

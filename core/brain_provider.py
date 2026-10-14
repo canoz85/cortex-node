@@ -155,7 +155,7 @@ def _are_valid_native_calls(
         allowed_tools = set(authorized_tools)
         registry = ToolRegistry.from_tools(authorized_tools.values()) if validate_arguments else None
         for call in calls:
-            name, arguments, _ = validate_native_call(call, allowed_tools)
+            name, arguments = validate_native_call(call, allowed_tools)
             if call.get("type", "tool_call") != "tool_call":
                 return False
             if "id" in call and (not isinstance(call["id"], str) or not call["id"].strip()):
@@ -228,31 +228,6 @@ LIFECYCLE_ACTION_SCHEMAS = (
                         "type": "string",
                         "minLength": 1,
                         "description": "The evidence-grounded semantic result: include the requested finding, summary, interpretation, comparison or calculation, not merely a completion notice.",
-                    },
-                    "exact_collection_source_record_index": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "description": (
-                            "Optional nonnegative index of the displayed eligible evidence record in current_attempts. "
-                            "Provide together with exact_collection_data_path only when that path resolves directly "
-                            "to a structured array/list already present in tool result data. "
-                            "Do not use for stdout, rendered text, prose, or a list inferred/extracted from text. "
-                            "If the semantic result is expressed in the completion message but no structured collection exists, "
-                            "omit all exact_collection arguments. Controller binds members from the original tool data."
-                        ),
-                    },
-                    "exact_collection_data_path": {
-                        "type": "array",
-                        "items": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
-                        "description": (
-                            "Path of string keys or integer indexes resolving directly to an existing structured array/list; "
-                            "[] selects the root. Required together with exact_collection_source_record_index."
-                        ),
-                    },
-                    "exact_collection_label": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Optional nonempty collection label; use only with both exact_collection reference arguments.",
                     },
                 },
                 "required": ["message"],

@@ -15,7 +15,7 @@ from core.brain_batch_policy import validate_read_only_batch
 
 from core.protocol.enums import BrainOutcomeKind as Kind, StepStatus
 from core.protocol.models import (
-    BrainInput, BrainOutcome, BrainUsage, ExactCollection, ReplanRequest,
+    BrainInput, BrainOutcome, BrainUsage, ReplanRequest,
     StepCompletionEvidence, ToolRequest,
 )
 
@@ -37,34 +37,6 @@ def _text(value, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise InvalidBrainOutput(f"missing_or_invalid_{field}")
     return value
-
-
-def _exact_collection(value) -> ExactCollection | None:
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise InvalidBrainOutput("invalid_exact_collection")
-    _only_fields(value, {"source_record_index", "data_path", "label"})
-    source_record_index = value.get("source_record_index")
-    if isinstance(source_record_index, bool) or not isinstance(source_record_index, int):
-        raise InvalidBrainOutput("invalid_exact_collection_source_record_index")
-    path = value.get("data_path")
-    if (
-        not isinstance(path, list)
-        or any(
-            isinstance(part, bool) or not isinstance(part, (str, int))
-            for part in path
-        )
-    ):
-        raise InvalidBrainOutput("invalid_exact_collection_data_path")
-    label = value.get("label", "Results")
-    if not isinstance(label, str) or not label.strip():
-        raise InvalidBrainOutput("invalid_exact_collection_label")
-    return ExactCollection(
-        source_record_index=source_record_index,
-        data_path=tuple(path),
-        label=label.strip(),
-    )
 
 
 def _parse_call(call) -> tuple[str, dict]:
@@ -140,7 +112,7 @@ def _native_outcome(
         candidates = []
         try:
             for call in calls:
-                name, arguments, _ = validate_native_call(call, allowed_tools)
+                name, arguments = validate_native_call(call, allowed_tools)
                 if call.get("type", "tool_call") != "tool_call":
                     raise InvalidBrainOutput("invalid_tool_call_type")
                 if "id" in call and (not isinstance(call["id"], str) or not call["id"].strip()):
@@ -155,7 +127,7 @@ def _native_outcome(
                                 for name, arguments in candidates),
             message="Brain requested independent read-only tool execution.",
         )
-    name, arguments, exact_collection = validate_native_call(calls[0], allowed_tools)
+    name, arguments = validate_native_call(calls[0], allowed_tools)
     if name in allowed_tools:
         return _tool_requested_outcome(
             name=name,
@@ -171,7 +143,6 @@ def _native_outcome(
             outcome=Kind.STEP_COMPLETED, step_id=step_id, message=summary,
             completion_evidence=StepCompletionEvidence(
                 step_id=step_id, summary=summary,
-                exact_collection=exact_collection,
             ),
             proposed_step_status=StepStatus.COMPLETED,
         )
@@ -195,26 +166,14 @@ def _native_outcome(
 
 def validate_native_call(
     call, allowed_tools: set[str],
-) -> tuple[str, dict, ExactCollection | None]:
+) -> tuple[str, dict]:
     """Validate a candidate without creating an outcome or ToolRequest ID."""
     name, arguments = _parse_call(call)
-    exact_collection = None
     if name in allowed_tools:
-        return name, arguments, None
+        return name, arguments
     if name == "brain_step_completed":
-        collection_fields = {
-            "exact_collection_source_record_index": "source_record_index",
-            "exact_collection_data_path": "data_path",
-            "exact_collection_label": "label",
-        }
-        _only_fields(arguments, {"message", *collection_fields})
+        _only_fields(arguments, {"message"})
         _text(arguments.get("message"), "message")
-        proposal = {
-            internal: arguments[external]
-            for external, internal in collection_fields.items()
-            if external in arguments
-        }
-        exact_collection = _exact_collection(proposal if proposal else None)
     elif name == "brain_step_failed":
         _only_fields(arguments, {"message"})
         _text(arguments.get("message"), "message")
@@ -226,7 +185,7 @@ def validate_native_call(
             raise InvalidBrainOutput("invalid_replan_constraints")
     else:
         raise InvalidBrainOutput("unknown_tool")
-    return name, arguments, exact_collection
+    return name, arguments
 
 
 def normalize_brain_output(

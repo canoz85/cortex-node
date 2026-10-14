@@ -6,13 +6,15 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from core.finalizer import Finalizer
+from core import finalizer_provider
 from core.finalizer_provider import (
+    FACTS_BUDGET,
     FINALIZER_SYSTEM_PROMPT,
     LangChainFinalAnswerRenderer,
     _bounded_value,
     finalizer_facts,
 )
-from core.protocol.enums import ExecutionStatus, StepStatus
+from core.protocol.enums import CancellationSource, ExecutionStatus, StepStatus
 from core.protocol.models import (
     AcceptedStepResult,
     AcceptedDirectResponse,
@@ -93,6 +95,100 @@ def render(req, response, enabled=False):
     return result, model.calls
 
 
+def representative_request():
+    """Three accepted steps, a ~4 KB conclusion, and verbose duplicate evidence."""
+    semantics = (
+        "Found the requested files.",
+        "Selected the three largest files.",
+        "Accepted analysis: " + "detail " * 580 + "\nFinal accepted conclusion.",
+    )
+    req = request(
+        tuple(record(f"raw-{i}", {"content": "TOOL-ONLY EVIDENCE " + "x" * 10000}) for i in range(24)),
+        tuple(accepted_result(f"step-{i}", content) for i, content in enumerate(semantics, 1)),
+    )
+    third = req.accepted_plan.steps[1].model_copy(update={"step_id": "step-3", "title": "Analysis"})
+    plan = req.accepted_plan.model_copy(update={
+        "objective": CONTEXT.user_request,
+        "available_tools": ("inspect",),
+        "steps": tuple(step.model_copy(update={
+            "description": "Redundant execution instructions. " * 100,
+            "primary_tool": "inspect",
+            "attempt": 3,
+        }) for step in (*req.accepted_plan.steps, third)),
+    })
+    return req.model_copy(update={"accepted_plan": plan, "completed_step_ids": ("step-1", "step-2", "step-3")})
+
+
+def test_success_projects_only_user_facing_facts_and_preserves_modest_semantics():
+    req = representative_request()
+    before = req.model_dump_json()
+    result, calls = render(req, AIMessage(content="Accepted analysis rendered."))
+    facts = json.loads(calls[0][-1].content.split("\n", 1)[1])
+
+    assert facts == {
+        "status": "completed",
+        "terminal_reason": "final_answer",
+        "accepted_step_results": [
+            {"step_id": f"step-{i}", "title": title, "semantic_content": accepted.semantic_content}
+            for i, (title, accepted) in enumerate(zip(
+                ("First", "Second", "Analysis"), req.accepted_step_results,
+            ), 1)
+        ],
+    }
+    assert len(json.dumps(facts, ensure_ascii=True)) <= FACTS_BUDGET
+    assert calls[0][1].content == req.context.user_request
+    assert "TOOL-ONLY EVIDENCE" not in calls[0][-1].content
+    assert req.model_dump_json() == before
+    assert result.final_answer_error is None
+
+
+def test_semantic_budget_reuses_space_and_never_falls_back_to_raw_evidence():
+    modest = representative_request().accepted_step_results[-1].semantic_content
+    req = request(
+        tuple(record(f"raw-{i}", {"content": "RAW " * 10000}) for i in range(100)),
+        (accepted_result("step-1", "HEAD " + "long detail " * 10000 + " TAIL"),
+         accepted_result("step-2", modest), accepted_result("step-3", "Short conclusion.")),
+    )
+    result, calls = render(req, AIMessage(content="Rendered accepted results."))
+    facts = json.loads(calls[0][-1].content.split("\n", 1)[1])
+    results = facts["accepted_step_results"]
+
+    assert [item["step_id"] for item in results] == ["step-1", "step-2", "step-3"]
+    assert results[1]["semantic_content"] == modest
+    assert results[2]["semantic_content"] == "Short conclusion."
+    excerpt = results[0]["semantic_content"]
+    assert excerpt["truncated"] is True
+    assert excerpt["original_chars"] == len(json.dumps(req.accepted_step_results[0].semantic_content))
+    assert "HEAD" in excerpt["excerpt"] and "TAIL" in excerpt["excerpt"]
+    assert "tool_execution_history" not in facts
+    assert len(json.dumps(facts, ensure_ascii=True)) <= FACTS_BUDGET
+    assert result.final_answer_error is None
+
+
+@pytest.mark.parametrize("content", ['"\\' * 30000, "世界" * 30000], ids=["escapes", "unicode"])
+def test_semantic_projection_budget_counts_serialized_metadata_and_escaping(content):
+    req = request(accepted_results=(accepted_result("step-1", content), accepted_result("step-2", "Intact")))
+    summary = Finalizer().finalize(req).execution_summary
+    facts = finalizer_facts(req, summary)
+
+    assert facts["accepted_step_results"][0]["semantic_content"]["truncated"] is True
+    assert facts["accepted_step_results"][1]["semantic_content"] == "Intact"
+    assert len(json.dumps(facts, ensure_ascii=True)) <= FACTS_BUDGET
+
+
+def test_projection_is_deterministic_and_independent_of_redundant_history():
+    req = representative_request()
+    summary = Finalizer().finalize(req).execution_summary
+    expected = json.dumps(finalizer_facts(req, summary), ensure_ascii=True)
+
+    assert json.dumps(finalizer_facts(req, summary), ensure_ascii=True) == expected
+    without_history = req.model_copy(update={"tool_execution_history": ()})
+    assert json.dumps(finalizer_facts(without_history, summary), ensure_ascii=True) == expected
+    _, first_calls = render(req, AIMessage(content="Same answer."))
+    _, second_calls = render(req, AIMessage(content="Same answer."))
+    assert first_calls == second_calls
+
+
 def test_multi_step_success_renders_from_evidence_once_without_mutation():
     req = request((record("step-1", {"status": "modified"}), record("step-2", {"changes": "updated protocol"})))
     before = req.model_dump_json()
@@ -119,13 +215,11 @@ def test_accepted_semantics_are_authoritative_over_misleading_raw_evidence():
     facts = finalizer_facts(req, summary)
 
     assert facts["accepted_step_results"] == [{
-        "execution_id": IDENTITY.execution_id,
-        "plan_id": "plan-1",
-        "plan_revision": 2,
         "step_id": "step-1",
+        "title": "First",
         "semantic_content": semantic_x,
     }]
-    assert facts["tool_execution_history"][0]["evidence"]["content"] == misleading_z
+    assert "tool_execution_history" not in facts
 
     result, calls = render(
         req,
@@ -133,19 +227,17 @@ def test_accepted_semantics_are_authoritative_over_misleading_raw_evidence():
     )
     model_facts = json.loads(calls[0][-1].content.split("\n", 1)[1])
     assert model_facts["accepted_step_results"][0]["semantic_content"] == semantic_x
-    assert (
-        model_facts["tool_execution_history"][0]["evidence"]["content"]
-        == misleading_z
-    )
+    assert "tool_execution_history" not in model_facts
+    assert misleading_z not in calls[0][-1].content
     assert "authoritative conclusions" in calls[0][0].content
     assert "supporting evidence and details only" in calls[0][0].content
     assert result.final_answer == "Analysis of the Error; Summary of Findings"
 
 
-def test_multiple_accepted_results_preserve_order_identity_and_empty_provenance():
-    first = accepted_result("step-1", "First accepted conclusion")
+def test_multiple_accepted_results_preserve_acceptance_order_and_empty_provenance():
+    first = accepted_result("step-2", "First accepted conclusion")
     second = accepted_result(
-        "step-2",
+        "step-1",
         "Second reasoning-only conclusion",
         revision=3,
         tool_request_ids=(),
@@ -160,9 +252,10 @@ def test_multiple_accepted_results_preserve_order_identity_and_empty_provenance(
         "Second reasoning-only conclusion",
     ]
     assert [
-        (item["step_id"], item["plan_revision"])
+        (item["step_id"], item["title"])
         for item in facts["accepted_step_results"]
-    ] == [("step-1", 2), ("step-2", 3)]
+    ] == [("step-2", "Second"), ("step-1", "First")]
+    assert all("plan_revision" not in item for item in facts["accepted_step_results"])
     assert second.completion_evidence.tool_request_ids == ()
 
 
@@ -178,7 +271,7 @@ def test_no_accepted_results_preserves_existing_model_projection_and_rendering()
     facts = json.loads(calls[0][-1].content.split("\n", 1)[1])
 
     assert facts["accepted_step_results"] == []
-    assert facts["tool_execution_history"] == []
+    assert "tool_execution_history" not in facts
     assert result.final_answer == "Existing fallback response"
     assert result.execution_summary.completed_step_ids == ()
     assert FINALIZER_SYSTEM_PROMPT == calls[0][0].content
@@ -237,6 +330,21 @@ def test_exact_identifier_and_path_members_preserve_case_and_punctuation():
     assert model.calls == []
 
 
+def test_exact_collections_and_other_semantics_bypass_projection_budget_without_raw_history(monkeypatch):
+    monkeypatch.setattr(finalizer_provider, "FACTS_BUDGET", 128)
+    members = ("src/Z.py", "src/İ.py", "src/Z.py") * 1000
+    semantic = ("Accepted analysis. " * 2000).rstrip()
+    req = request(accepted_results=(exact_result(members), accepted_result("step-2", semantic)))
+    before = req.model_dump_json()
+    result, calls = render(req, AIMessage(content="must not run"))
+
+    assert result.final_answer == "Files:\n" + "\n".join(f"- {item}" for item in members) + "\n\n" + semantic
+    assert result.final_answer_error is None
+    assert req.tool_execution_history == ()
+    assert req.model_dump_json() == before
+    assert calls == []
+
+
 def test_normal_prose_still_uses_model_renderer():
     result, calls = render(
         request(accepted_results=(accepted_result("step-1", "Accepted prose."),)),
@@ -245,6 +353,45 @@ def test_normal_prose_still_uses_model_renderer():
 
     assert result.final_answer == "Polished prose."
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status,source", [
+    (ExecutionStatus.FAILED, None),
+    (ExecutionStatus.CANCELLED, CancellationSource.LOCAL),
+    (ExecutionStatus.CANCELLED, CancellationSource.PROVIDER),
+])
+def test_terminal_failure_projection_preserves_reporting_facts_and_deterministic_rendering(status, source):
+    plan = _plan(failed=True)
+    if status == ExecutionStatus.CANCELLED:
+        plan = plan.model_copy(update={"steps": (
+            plan.steps[0], plan.steps[1].model_copy(update={"status": StepStatus.ACTIVE}),
+        )})
+    req = request(
+        (record("step-1", {"irrelevant": "raw output"}),),
+        (accepted_result("step-1", "First step completed."),),
+    ).model_copy(update={
+        "status": status, "accepted_plan": plan, "completed_step_ids": ("step-1",),
+        "terminal_reason": "Retry budget exhausted." if source is None else "Execution cancelled by request.",
+        "cancellation_source": source,
+    })
+    before = req.model_dump_json()
+    result, calls = render(req, AIMessage(content="must not run"))
+    facts = finalizer_facts(req, result.execution_summary)
+
+    assert facts["status"] == status.value
+    assert facts["terminal_reason"] == req.terminal_reason
+    assert facts["completed_step_ids"] == ("step-1",)
+    assert facts["failed_step_ids"] == (("step-2",) if source is None else ())
+    if source is not None:
+        assert facts["cancellation_source"] == source.value
+        assert f"Cancellation source: {source.value}." in result.execution_summary.summary_text
+    assert facts["accepted_step_results"][0]["semantic_content"] == "First step completed."
+    assert "accepted_plan" not in facts and "tool_execution_history" not in facts
+    assert req.terminal_reason in result.final_answer
+    assert "First step completed." in result.final_answer
+    assert result.execution_summary.status == status
+    assert req.model_dump_json() == before
+    assert calls == []
 
 
 def test_failed_execution_is_rendered_deterministically_without_recovery_inventions():

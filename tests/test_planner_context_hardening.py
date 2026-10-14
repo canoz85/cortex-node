@@ -201,6 +201,7 @@ def test_selection_guidance_fields_are_independently_optional(monkeypatch, guida
 
 def test_selection_guidance_is_limited_to_requested_overlapping_capabilities():
     guided_names = {
+        "apply_patch",
         "list_files", "find_files", "search_text", "read_file",
         "git_status", "git_changed_files", "git_diff", "git_log", "git_show",
         "rag_search", "read_knowledge_file", "rag_refresh_index",

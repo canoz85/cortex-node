@@ -11,39 +11,6 @@
             "type": "string",
             "minLength": 1,
             "description": "The evidence-grounded semantic result: include the requested finding, summary, interpretation, comparison or calculation, not merely a completion notice."
-          },
-          "exact_collection": {
-            "type": "object",
-            "description": "Reference an exact collection in one current_attempts record's structured evidence. Required fields: source_record_index (nonnegative integer index in current_attempts) and data_path (array of string keys or integer indexes; [] selects the root). Optional label is a nonempty string. Do not copy members; Controller binds them from the original tool data.",
-            "properties": {
-              "source_record_index": {
-                "type": "integer",
-                "minimum": 0,
-                "description": "Index in the displayed current_attempts array."
-              },
-              "data_path": {
-                "type": "array",
-                "items": {
-                  "anyOf": [
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "type": "integer"
-                    }
-                  ]
-                }
-              },
-              "label": {
-                "type": "string",
-                "minLength": 1
-              }
-            },
-            "required": [
-              "source_record_index",
-              "data_path"
-            ],
-            "additionalProperties": false
           }
         },
         "required": [
