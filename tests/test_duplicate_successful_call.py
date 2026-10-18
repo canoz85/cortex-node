@@ -306,12 +306,14 @@ def test_resumed_batch_authorization_is_rechecked_against_successful_history(set
     ("search_text", {"query": "Snake", "file_pattern": "*.py", "recursive": True}),
 ])
 @pytest.mark.parametrize("obeys_correction", [True, False])
-def test_live_loop_shape_projects_success_then_rejects_duplicate_with_one_correction(setup, name, arguments, obeys_correction):
+def test_live_loop_shape_projects_success_then_rejects_duplicate_with_bounded_corrections(setup, name, arguments, obeys_correction):
     case = setup
     (case.root / "Snake").mkdir()
-    model = SequenceModel(native_action(name, arguments), native_action(name, arguments),
-                          native_action("brain_step_completed", {"message": "Used prior evidence."})
-                          if obeys_correction else native_action(name, arguments))
+    replies = [native_action(name, arguments), native_action(name, arguments),
+               native_action("brain_step_completed", {"message": "Used prior evidence."})]
+    if not obeys_correction:
+        replies = [native_action(name, arguments)] * 4
+    model = SequenceModel(*replies)
     brain = BrainService(provider=LangChainBrainProvider(brain_llm=model, executable_tools=case.tools),
                          agent_system_prompt="Execute the active step.")
     driver = ExecutionDriver(coordinator=ControllerCoordinator(case.controller), planner=Mock(), brain=brain,
@@ -330,7 +332,7 @@ def test_live_loop_shape_projects_success_then_rejects_duplicate_with_one_correc
         assert attempt["evidence"]["matches"] == []
     assert "duplicate_successful_call" in model.calls[2][-1].content
     assert "no tool was executed" in model.calls[2][-1].content
-    assert len(case.calls) == 1 and len(model.calls) == 3
+    assert len(case.calls) == 1 and len(model.calls) == (3 if obeys_correction else 4)
     assert len(after_success.execution_state.working.tool_execution_history) == 1
     if obeys_correction:
         assert after_success.worker_result.kind == Kind.STEP_COMPLETED

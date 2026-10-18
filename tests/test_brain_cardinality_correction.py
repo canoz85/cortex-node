@@ -120,17 +120,18 @@ def test_batch_correction_can_return_a_lifecycle_call():
         "name": "read_file", "args": "{bad", "id": "bad", "error": "invalid JSON",
     }]), "invalid_native_tool_call"),
 ])
-def test_invalid_correction_is_exhausted_without_a_third_invocation(corrected, error, caplog):
-    provider, model, tool = setup_provider(batch(), corrected)
+def test_invalid_correction_reuses_budget_only_for_correctable_responses(corrected, error, caplog):
+    provider, model, tool = setup_provider(batch(), corrected, corrected)
     with caplog.at_level("DEBUG", logger="core.brain_provider"):
         outcome = provider.generate(brain_input(), ())
     assert outcome.kind == Kind.INVALID_OUTPUT
     assert outcome.error_code == error
     assert outcome.tool_request is None
     assert outcome.completion_evidence is None
-    assert len(model.calls) == 2
+    correctable = error in {"exactly_one_tool_call_required", "native_tool_call_required"}
+    assert len(model.calls) == (3 if correctable else 2)
     tool.invoke.assert_not_called()
-    assert any("attempt=2" in r.message and "correction_exhausted=True" in r.message
+    assert any(f"attempt={len(model.calls)}" in r.message and f"correction_exhausted={correctable}" in r.message
                for r in caplog.records)
 
 

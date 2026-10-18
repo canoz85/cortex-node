@@ -96,14 +96,14 @@ def test_batches_use_bound_schemas_at_all_boundaries(executables, name, count):
 
 
 @pytest.mark.parametrize("name", ["read_file", "find_files", "list_files"])
-def test_25_calls_are_rejected_at_all_boundaries_without_third_model_call(executables, name):
+def test_25_calls_are_rejected_at_all_boundaries_with_bounded_corrections(executables, name):
     tools, schema_for = executables
     context = context_for()
     raw = group(name, 25)
     assert not _is_permitted_native_batch(raw, {tool.name: tool for tool in tools})
-    model = SequenceModel(raw, raw)
+    model = SequenceModel(raw, raw, raw)
     output = LangChainBrainProvider(brain_llm=model, executable_tools=tools).generate(context, ())
-    assert output.kind == Kind.INVALID_OUTPUT and len(model.calls) == 2
+    assert output.kind == Kind.INVALID_OUTPUT and len(model.calls) == 3
     assert "at most 24" in model.calls[1][-1].content
     normalized = normalize_brain_output(raw, context, set(context.active_plan.available_tools),
                                         argument_schema_for=schema_for)
@@ -192,9 +192,9 @@ def test_invalid_batches_fail_closed_at_all_boundaries(executables, monkeypatch,
         raw.tool_calls[1]["args"] = {"offset": "not an integer"}
     authorized = {tool.name: tool for tool in tools if tool.name in context.active_plan.available_tools}
     assert not _is_permitted_native_batch(raw, authorized, argument_schema_for=schema_for)
-    model = SequenceModel(raw, raw)
+    model = SequenceModel(raw, raw, raw)
     assert LangChainBrainProvider(brain_llm=model, executable_tools=tools).generate(context, ()).kind == Kind.INVALID_OUTPUT
-    assert len(model.calls) <= 2
+    assert len(model.calls) <= 3
     assert normalize_brain_output(raw, context, set(authorized), argument_schema_for=schema_for).kind == Kind.INVALID_OUTPUT
     decision = CortexController(24, argument_schema_for=schema_for).decide(
         input_for(state_for(context), injected_proposal(raw)),
@@ -387,7 +387,7 @@ def test_list_files_batches_reject_invalid_groups_at_all_boundaries(executables,
     with pytest.raises(ValueError):
         validate_read_only_batch(candidates, authorized, argument_schema_for=schema_for)
     assert not _is_permitted_native_batch(raw, authorized, argument_schema_for=schema_for)
-    model = SequenceModel(raw, raw)
+    model = SequenceModel(raw, raw, raw)
     output = LangChainBrainProvider(brain_llm=model, executable_tools=tools).generate(context, ())
     assert output.kind == Kind.INVALID_OUTPUT
     assert output.tool_request is output.tool_requests is None

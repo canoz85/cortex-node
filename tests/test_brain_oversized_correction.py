@@ -67,9 +67,9 @@ def test_oversized_correction_accepts_model_selected_maximum_batch(content):
     (native_action("unknown", {}), Kind.INVALID_OUTPUT, "unknown_tool"),
     (native_action("read_file", {"path": "chosen"}), Kind.TOOL_REQUESTED, None),
 ])
-def test_oversized_correction_output_uses_normal_validation_without_third_call(corrected, kind, error):
-    outcome, model = provider_output(native_batch(READ_FILE_BATCH_LIMIT + 1), corrected)
-    assert len(model.calls) == 2
+def test_oversized_correction_output_is_revalidated_with_shared_budget(corrected, kind, error):
+    outcome, model = provider_output(native_batch(READ_FILE_BATCH_LIMIT + 1), corrected, corrected)
+    assert len(model.calls) == (3 if error in {"exactly_one_tool_call_required", "native_tool_call_required"} else 2)
     assert outcome.kind == kind
     assert outcome.error_code == error
     assert outcome.tool_requests is None
@@ -122,15 +122,16 @@ def test_invalid_oversized_group_remains_strict_without_correction(bad_call):
 
 
 @pytest.mark.parametrize("arguments", [{}, {"path": "a", "limit": 0}])
-def test_schema_invalid_oversized_group_uses_only_one_argument_correction(arguments):
+def test_schema_invalid_oversized_group_shares_argument_and_batch_correction_budget(arguments):
     calls = [*native_batch(READ_FILE_BATCH_LIMIT).tool_calls,
              {"name": "read_file", "args": arguments, "id": "bad"}]
     raw = SimpleNamespace(content="Incidental text", tool_calls=calls)
-    # Repairing only arguments still leaves an oversized batch; no third call.
+    # Repairing only arguments still leaves an oversized batch to revalidate.
     repaired = native_batch(READ_FILE_BATCH_LIMIT + 1)
-    outcome, model = provider_output(raw, repaired)
-    assert len(model.calls) == 2 and outcome.kind == Kind.INVALID_OUTPUT
+    outcome, model = provider_output(raw, repaired, repaired)
+    assert len(model.calls) == 3 and outcome.kind == Kind.INVALID_OUTPUT
     assert "invalid_native_tool_arguments" in model.calls[1][-1].content
+    assert "call limit was exceeded" in model.calls[2][-1].content
     assert outcome.tool_request is outcome.tool_requests is None
 
 

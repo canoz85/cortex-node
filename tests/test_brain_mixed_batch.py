@@ -38,7 +38,7 @@ def assert_boundaries(raw, tools, schema_for, *, accepted, context=None):
         with pytest.raises(ValueError):
             validate_read_only_batch(candidates, authorized, argument_schema_for=schema_for)
     assert _is_permitted_native_batch(raw, authorized, argument_schema_for=schema_for) is accepted
-    model = SequenceModel(raw, raw)
+    model = SequenceModel(raw, raw, raw)
     output = LangChainBrainProvider(brain_llm=model, executable_tools=tools).generate(context, ())
     normalized = normalize_brain_output(raw, context, set(authorized), argument_schema_for=schema_for)
     assert output.kind == normalized.kind == (Kind.TOOL_REQUESTED if accepted else Kind.INVALID_OUTPUT)
@@ -54,7 +54,7 @@ def assert_boundaries(raw, tools, schema_for, *, accepted, context=None):
         assert decision.pending_tool_request == output.tool_requests[0]
         assert decision.tool_request_continuation.remaining == output.tool_requests[1:]
     else:
-        assert len(model.calls) <= 2
+        assert len(model.calls) <= 3
         assert output.tool_request is output.tool_requests is None
         assert decision.decision_type == Decision.TERMINATE
         assert decision.pending_tool_request is decision.tool_request_continuation is None

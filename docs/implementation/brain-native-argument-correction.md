@@ -1,6 +1,6 @@
-# Executable argument correction at the Brain provider boundary
+# Bounded native-action correction at the Brain provider boundary
 
-## Root cause
+## Original argument-validation gap
 
 `LangChainBrainProvider.generate()` called `_ensure_native_call()` before its
 final executable-schema check. `_ensure_native_call()` offered one correction
@@ -36,7 +36,10 @@ False, preventing the response from entering the existing batch correction path.
    before `_ensure_native_call()` makes its correction decision.
 5. `_ensure_native_call()` appends the rejected native AIMessage and a bounded
    structured correction instruction to the same messages and invokes the
-   already-bound model once. It creates no ToolRequest or execution record and
+   already-bound model. One shared budget permits at most two correction
+   responses after the initial response: three provider invocations maximum.
+   Every correction response re-enters the same missing-call, batch, duplicate
+   and argument checks. It creates no ToolRequest or execution record and
    invokes no executable tool. The correction is shared with all other triggers;
    triggers do not receive independent correction budgets.
 6. Corrected output is checked again before normalization creates a ToolRequest.
@@ -87,7 +90,7 @@ No tool name or field name is hardcoded into classification or repair.
   and normal Controller-authorized execution. Rejected calls create no execution
   records or request identities. The corrected proposal's identity is the same
   identity that a valid first response with those arguments would receive.
-- Persistently invalid: two provider invocations maximum, then `INVALID_OUTPUT`
+- Persistently invalid: three provider invocations maximum, then `INVALID_OUTPUT`
   with `invalid_native_tool_arguments` and the existing message. Controller's
   configured retry/failure policy is unchanged. Correction exceptions remain
   `PROVIDER_FAILURE` and receive no new provider retry.
@@ -95,11 +98,15 @@ No tool name or field name is hardcoded into classification or repair.
 - Multi-call: every member must pass before any proposal is executable. A valid
   member of an invalid response never executes early. The corrected response is
   checked as a whole against existing eligibility, limits and duplicate rules.
-  Repairing arguments but retaining an oversized/disallowed batch fails after
-  the same single correction; no separate third invocation is added.
+  Repairing arguments but retaining an oversized/disallowed batch can consume
+  the remaining correction opportunity; triggers never receive separate budgets.
 - Duplicate protection: repaired arguments cannot bypass successful-history
   comparison. Request identity, successful history, checkpoint serialization and
   Controller/driver duplicate checks are unchanged.
+- A duplicate followed by a textual pseudo-call is classified again as
+  `missing_native_call`. The second correction must emit a real native action;
+  text is never converted into a tool or lifecycle call. Repeated duplicate
+  calls or textual responses exhaust the same two-correction budget and fail closed.
 
 ## Lifecycle and malformed-output distinction
 
@@ -108,7 +115,7 @@ They are validated as part of `validate_native_call()` before executable-schema
 classification, and the existing tests intentionally treat malformed lifecycle
 claims/envelopes as non-correctable. This fix targets authorized executable
 arguments; it does not broaden lifecycle recovery. A correction can select a
-valid bound lifecycle action, but an invalid lifecycle action in either response
+valid bound lifecycle action, but an invalid lifecycle action in any response
 cannot produce completion, failure or replan evidence.
 
 Malformed call envelopes, unknown/unauthorized tools, non-object arguments,
@@ -119,11 +126,13 @@ response remains intact in exchange logging.
 
 ## Observability and tests
 
-The existing invocation, token-usage and exchange hooks run for both actual
-provider calls. Debug compliance logging adds the bounded reason
-`correction_reason=invalid_native_tool_arguments`. Console output remains concise
+The invocation, token-usage and raw exchange hooks run for every actual provider
+call, including both correction responses. Raw responses are logged before
+incidental-content canonicalization. Debug compliance logging reports attempt
+number, correction reason, whether a correction was triggered, budget exhaustion,
+and final acceptance. Console output remains concise
 and never prints validation traces. No Planner, Finalizer, ExactCollection,
-capability-card, graph, mutation, provenance, schema-limit or retry-count changes
+capability-card, graph, mutation, provenance, schema-limit or Controller retry-count changes
 are part of this fix.
 
 `tests/test_brain_argument_correction.py` covers the reproduced web limit and
@@ -135,20 +144,20 @@ incidental-text, oversized-batch, schema-ownership and read-file batch tests now
 distinguish repairable schema errors from malformed candidates.
 
 Deferred work includes recovering malformed native JSON/envelopes, lifecycle
-argument correction, adding a dictionary-only JSON Schema validator, and
-multi-stage repair for responses with several independent disqualifiers. The
-current single correction budget is intentionally retained.
+argument correction, and adding a dictionary-only JSON Schema validator. Switching
+between the existing correction classifications uses the same bounded loop;
+malformed native envelopes and lifecycle arguments retain strict rejection.
 
 ## Validation results
 
-Validation on 2026-10-16, with mocked HTTP/model transports and no live calls:
+Validation on 2026-10-18, with mocked HTTP/model transports and no live calls:
 
 | Check | Result |
 | --- | --- |
-| New argument-correction regressions | 38 passed |
-| Focused provider/normalization/schema/driver/batch/duplicate/web/replay suite | 564 passed |
-| Broader offline suite (`--ignore=tests/live`) | 1,506 passed, 6 pre-existing failures, 3 skipped |
-| Core/tools coverage | 87.09%; required 71% passed |
+| New shared correction-loop regressions | 14 passed |
+| Focused Brain provider/native/batch/argument/duplicate suite | 453 passed |
+| Broader offline suite (`--ignore=tests/live`) | 1,710 passed, 6 pre-existing failures, 3 skipped |
+| Core/tools coverage | 87.57%; required 71% passed |
 | `git diff --check` | Passed |
 
 The broader failures are the same six baseline failures previously reproduced
@@ -161,7 +170,8 @@ No new suite failures were introduced.
 Focused command:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -o addopts='' -q -p no:cacheprovider --no-cov --tb=short tests/test_brain_argument_correction.py tests/test_brain_outcomes.py tests/test_brain_input_authority.py tests/test_brain_ollama_boundary.py tests/test_brain_cardinality_correction.py tests/test_brain_incidental_content.py tests/test_brain_oversized_correction.py tests/test_brain_batch_policy_ownership.py tests/test_brain_read_file_batch.py tests/test_brain_metadata_batch.py tests/test_brain_mixed_batch.py tests/test_duplicate_successful_call.py tests/test_execution_driver.py tests/test_web_ops.py tests/test_web_fetch_runtime.py tests/test_planner_runtime_flow.py
+$brainTests = @(rg --files tests -g 'test_brain*.py')
+& .\.venv\Scripts\python.exe -m pytest -o addopts= -q -p no:cacheprovider --no-cov @brainTests tests/test_duplicate_successful_call.py --tb=short
 ```
 
 Broader command:

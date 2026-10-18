@@ -87,11 +87,11 @@ def test_native_actions_survive_real_ollama_boundary(name, args, kind, retry):
 
 
 def test_exhausted_textual_pseudo_calls_are_typed_failure():
-    provider, requests = boundary([{"content": 'brain_step_completed{"message":"Done"}'}] * 2)
+    provider, requests = boundary([{"content": 'brain_step_completed{"message":"Done"}'}] * 3)
     outcome = provider.generate(git_brain_input(), ())
     assert outcome.kind == Kind.INVALID_OUTPUT
     assert outcome.error_code == "unexpected_response_content"
-    assert len(requests) == 2
+    assert len(requests) == 3
     assert requests[0]["tools"] == requests[1]["tools"]
 
 

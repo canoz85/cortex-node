@@ -177,21 +177,22 @@ def test_web_fetch_upper_bound_repairs_then_executes_once_and_survives_checkpoin
 @pytest.mark.parametrize("first", [
     native_action("schema_probe", {}), AIMessage(content="No native call"),
 ])
-def test_second_invalid_response_fails_without_requests_or_third_invocation(first, monkeypatch, caplog):
-    provider, model, tool = setup_probe(first, native_action("schema_probe", {"path": 12}))
+def test_repeated_invalid_response_exhausts_budget_without_requests(first, monkeypatch, caplog):
+    invalid = native_action("schema_probe", {"path": 12})
+    provider, model, tool = setup_probe(first, invalid, invalid)
     create_request = Mock(wraps=normalization._tool_request)
     monkeypatch.setattr(normalization, "_tool_request", create_request)
     context = context_for(tool.name)
     with caplog.at_level("DEBUG", logger="core.brain_provider"):
         outcome = provider.generate(context, ())
-    assert len(model.calls) == 2 and outcome.kind == Kind.INVALID_OUTPUT
+    assert len(model.calls) == 3 and outcome.kind == Kind.INVALID_OUTPUT
     assert outcome.error_code == "invalid_native_tool_arguments"
     assert outcome.message == "Brain returned invalid native tool arguments."
     assert outcome.tool_request is outcome.tool_requests is None
     create_request.assert_not_called()
     tool.invoke.assert_not_called()
     assert context.tool_execution_history == ()
-    assert any("attempt=2" in record.message and "correction_exhausted=True" in record.message for record in caplog.records)
+    assert any("attempt=3" in record.message and "correction_exhausted=True" in record.message for record in caplog.records)
     # Controller keeps its existing configured failure policy (no new retries).
     state = state_for(context)
     state = state.model_copy(update={"protocol_visible": state.protocol_visible.model_copy(update={"retry": RetryMetadata(max_retries=0)})})
@@ -217,7 +218,7 @@ def test_invalid_batch_member_keeps_entire_response_atomic(tmp_path, monkeypatch
     lookup = partial(get_tool_argument_schema, registry=registry)
     first = native_batch(args=[{"path": "good.txt"}, {"path": "repaired.txt", "limit": 0}])
     corrected = first if still_invalid else native_batch(args=[{"path": "good.txt"}, {"path": "repaired.txt", "limit": 10}])
-    model = SequenceModel(first, corrected)
+    model = SequenceModel(first, corrected, corrected)
     context = context_for("read_file")
     create_request = Mock(wraps=normalization._tool_request)
     monkeypatch.setattr(normalization, "_tool_request", create_request)
@@ -232,7 +233,7 @@ def test_invalid_batch_member_keeps_entire_response_atomic(tmp_path, monkeypatch
 
     model.invoke = inspect
     outcome = LangChainBrainProvider(brain_llm=model, executable_tools=tools).generate(context, ())
-    assert len(model.calls) == 2
+    assert len(model.calls) == (3 if still_invalid else 2)
     issue, = feedback_in(model)["issues"]
     assert issue["call_index"] == 1 and issue["field"] == ["limit"]
     execute.assert_not_called()
@@ -263,9 +264,10 @@ def test_corrected_arguments_cannot_bypass_successful_duplicate_guard():
     context = context.model_copy(update={"tool_execution_history": (record,)})
     provider, model, tool = setup_probe(
         native_action("schema_probe", {}), native_action("schema_probe", {"path": "already-read"}),
+        native_action("schema_probe", {"path": "already-read"}),
     )
     outcome = provider.generate(context, ())
-    assert len(model.calls) == 2 and outcome.error_code == "duplicate_successful_call"
+    assert len(model.calls) == 3 and outcome.error_code == "duplicate_successful_call"
     assert outcome.tool_request is None and context.tool_execution_history == (record,)
     tool.invoke.assert_not_called()
 

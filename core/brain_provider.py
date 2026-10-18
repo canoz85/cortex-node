@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_ARGUMENT_ISSUES = 8
 _MAX_ARGUMENT_FEEDBACK_CHARS = 4000
+_MAX_NATIVE_CORRECTIONS = 2
 
 
 def _native_argument_feedback(raw, authorized_tools, *, argument_schema_for):
@@ -92,94 +93,101 @@ def _ensure_native_call(
     authorized_tools: dict[str, object],
     argument_schema_for: Callable[[str], type | None] | None = None,
     brain_input: BrainInput | None = None,
+    show_raw_llm: bool = False,
 ):
     if argument_schema_for is None:
         argument_schema_for = partial(
             get_tool_argument_schema, registry=ToolRegistry.from_tools(authorized_tools.values()),
         )
-    calls = getattr(raw, "tool_calls", None)
-    missing_call = not calls and not getattr(raw, "invalid_tool_calls", None)
-    argument_feedback = _native_argument_feedback(
-        raw, authorized_tools, argument_schema_for=argument_schema_for,
-    )
-    valid_batch = _is_valid_native_batch(raw, authorized_tools)
-    disallowed_batch = valid_batch and not _is_permitted_native_batch(
-        raw, authorized_tools, argument_schema_for=argument_schema_for,
-    )
-    duplicate_feedback = None
-    if (brain_input is not None and calls and not disallowed_batch
-            and not getattr(raw, "content", None) and not getattr(raw, "invalid_tool_calls", None)
-            and _are_valid_native_calls(calls, authorized_tools, allow_unknown_schema=True)):
-        try:
-            reject_duplicate_successful_calls(
-                [(call["name"], call["args"]) for call in calls if call["name"] in authorized_tools],
-                brain_input, argument_schema_for=argument_schema_for,
+    # The initial response is already available; at most two further invocations.
+    for attempt in range(1, _MAX_NATIVE_CORRECTIONS + 2):
+        raw = _canonical_brain_response(raw, authorized_tools)
+        calls = getattr(raw, "tool_calls", None)
+        missing_call = not calls and not getattr(raw, "invalid_tool_calls", None)
+        argument_feedback = _native_argument_feedback(
+            raw, authorized_tools, argument_schema_for=argument_schema_for,
+        )
+        valid_batch = _is_valid_native_batch(raw, authorized_tools)
+        disallowed_batch = valid_batch and not _is_permitted_native_batch(
+            raw, authorized_tools, argument_schema_for=argument_schema_for,
+        )
+        duplicate_feedback = None
+        if (brain_input is not None and calls and not disallowed_batch
+                and not getattr(raw, "content", None) and not getattr(raw, "invalid_tool_calls", None)
+                and _are_valid_native_calls(calls, authorized_tools, allow_unknown_schema=True)):
+            try:
+                reject_duplicate_successful_calls(
+                    [(call["name"], call["args"]) for call in calls if call["name"] in authorized_tools],
+                    brain_input, argument_schema_for=argument_schema_for,
+                )
+            except DuplicateSuccessfulCall as exc:
+                duplicate_feedback = str(exc)
+        correction_reason = (
+            "invalid_native_tool_arguments" if argument_feedback is not None else
+            "duplicate_successful_call" if duplicate_feedback is not None else
+            "unsupported_native_batch" if disallowed_batch else
+            "missing_native_call" if missing_call else None
+        )
+        if correction_reason is None or attempt > _MAX_NATIVE_CORRECTIONS:
+            return raw, attempt, correction_reason
+        _log_native_call_attempt(raw, attempt, correction_triggered=True,
+                                 correction_reason=correction_reason, accepted=False)
+
+        if argument_feedback is not None:
+            instruction = (
+                "The previous native action was rejected; no tool was executed.\n"
+                + json.dumps(argument_feedback, ensure_ascii=True, separators=(",", ":"))
+                + "\nRepair the arguments using the currently bound schemas, or choose another bound native action. "
+                "Return a permitted native action with empty content. "
+                "The entire response must validate before any member can execute."
             )
-        except DuplicateSuccessfulCall as exc:
-            duplicate_feedback = str(exc)
-    correction_triggered = missing_call or disallowed_batch or duplicate_feedback is not None or argument_feedback is not None
-    correction_reason = (
-        "invalid_native_tool_arguments" if argument_feedback is not None else
-        "duplicate_successful_call" if duplicate_feedback is not None else
-        "unsupported_native_batch" if disallowed_batch else
-        "missing_native_call" if missing_call else None
-    )
-    _log_native_call_attempt(raw, 1, correction_triggered=correction_triggered, correction_reason=correction_reason)
-    if not correction_triggered:
-        return raw, provider_messages
-
-    if argument_feedback is not None:
-        instruction = (
-            "The previous native action was rejected; no tool was executed.\n"
-            + json.dumps(argument_feedback, ensure_ascii=True, separators=(",", ":"))
-            + "\nRepair the arguments using the currently bound schemas, or choose another bound native action. "
-            "Return a permitted native action with empty content. "
-            "The entire response must validate before any member can execute."
+            rejected_response = [raw] if isinstance(raw, AIMessage) else []
+        elif duplicate_feedback is not None:
+            instruction = duplicate_feedback + " Return a currently bound native action with empty content."
+            rejected_response = [raw] if isinstance(raw, AIMessage) else []
+        elif disallowed_batch and _is_oversized_native_batch(
+            raw, authorized_tools, argument_schema_for=argument_schema_for,
+        ):
+            limits = ", ".join(
+                f"{name}: {batch_call_limit(name, argument_schema_for=argument_schema_for)}"
+                for name in dict.fromkeys(call["name"] for call in calls)
+            )
+            instruction = (
+                f"The previous response contained {len(calls)} calls in an otherwise valid "
+                "independent read-only batch, but a call limit was exceeded. "
+                f"Return one native action containing at most {MAX_BATCH_CALLS} of those useful calls. "
+                f"Per-tool call limits: {limits}. Do not add new calls. Leave content empty."
+            )
+            rejected_response = [raw] if isinstance(raw, AIMessage) else []
+        elif disallowed_batch:
+            instruction = (
+                "The previous response contained multiple native calls and was not accepted. "
+                "Choose exactly one next action from the useful candidates for this turn. "
+                "Return exactly one native call using a currently bound tool. "
+                "Do not batch or parallelize calls. "
+                "Leave content empty."
+            )
+            rejected_response = [raw] if isinstance(raw, AIMessage) else []
+        else:
+            instruction = (
+                "The previous response contained no native call and was not accepted. "
+                "Return exactly one native tool call using a currently bound tool, "
+                "with its required arguments and empty content."
+            )
+            rejected_response = [AIMessage(content=raw.content)] if isinstance(raw, AIMessage) else []
+        provider_messages = [
+            *provider_messages,
+            *rejected_response,
+            SystemMessage(content=instruction),
+        ]
+        begin_provider_invocation(worker="brain")
+        raw = llm.invoke(provider_messages)
+        add_response_usage(raw, worker="brain")
+        log_llm_exchange(
+            worker="brain", operation="step", messages=provider_messages, response=raw,
+            execution_id=brain_input.identity.execution_id if brain_input is not None else None,
+            enabled=show_raw_llm,
         )
-        rejected_response = [raw] if isinstance(raw, AIMessage) else []
-    elif duplicate_feedback is not None:
-        instruction = duplicate_feedback + " Return a currently bound native action with empty content."
-        rejected_response = [raw] if isinstance(raw, AIMessage) else []
-    elif disallowed_batch and _is_oversized_native_batch(
-        raw, authorized_tools, argument_schema_for=argument_schema_for,
-    ):
-        limits = ", ".join(
-            f"{name}: {batch_call_limit(name, argument_schema_for=argument_schema_for)}"
-            for name in dict.fromkeys(call["name"] for call in calls)
-        )
-        instruction = (
-            f"The previous response contained {len(calls)} calls in an otherwise valid "
-            "independent read-only batch, but a call limit was exceeded. "
-            f"Return one native action containing at most {MAX_BATCH_CALLS} of those useful calls. "
-            f"Per-tool call limits: {limits}. Do not add new calls. Leave content empty."
-        )
-        rejected_response = [raw] if isinstance(raw, AIMessage) else []
-    elif disallowed_batch:
-        instruction = (
-            "The previous response contained multiple native calls and was not accepted. "
-            "Choose exactly one next action from the useful candidates for this turn. "
-            "Return exactly one native call using a currently bound tool. "
-            "Do not batch or parallelize calls. "
-            "Leave content empty."
-        )
-        rejected_response = [raw] if isinstance(raw, AIMessage) else []
-    else:
-        instruction = (
-            "The previous response contained no native call and was not accepted. "
-            "Return exactly one native tool call using a currently bound tool, "
-            "with its required arguments and empty content."
-        )
-        rejected_response = [AIMessage(content=raw.content)] if isinstance(raw, AIMessage) else []
-    corrected_messages = [
-        *provider_messages,
-        *rejected_response,
-        SystemMessage(content=instruction),
-    ]
-    begin_provider_invocation(worker="brain")
-    corrected = llm.invoke(corrected_messages)
-    add_response_usage(corrected, worker="brain")
-
-    return corrected, corrected_messages
 
 
 def _is_valid_native_batch(raw, authorized_tools: dict[str, object]) -> bool:
@@ -295,6 +303,7 @@ def _log_native_call_attempt(
     raw, attempt: int, *, correction_triggered: bool = False,
     correction_exhausted: bool = False,
     correction_reason: str | None = None,
+    accepted: bool = False,
 ) -> None:
     calls = getattr(raw, "tool_calls", None)
     names = [
@@ -303,9 +312,9 @@ def _log_native_call_attempt(
     ] if isinstance(calls, (list, tuple)) else []
     logger.debug(
         "Brain native-call compliance: attempt=%s call_count=%s "
-        "tool_call_names=%s correction_triggered=%s correction_exhausted=%s correction_reason=%s",
+        "tool_call_names=%s correction_triggered=%s correction_exhausted=%s correction_reason=%s accepted=%s",
         attempt, len(calls) if isinstance(calls, (list, tuple)) else 0, names,
-        correction_triggered, correction_exhausted, correction_reason,
+        correction_triggered, correction_exhausted, correction_reason, accepted,
     )
 
 LIFECYCLE_ACTION_SCHEMAS = (
@@ -450,21 +459,14 @@ class LangChainBrainProvider:
                 response=raw, execution_id=brain_input.identity.execution_id,
                 enabled=self.show_raw_llm,
             )
-            raw, retry_messages = _ensure_native_call(
+            raw, attempt, correction_reason = _ensure_native_call(
                 llm=llm, provider_messages=provider_messages,
-                raw=_canonical_brain_response(
-                    raw, authorized_by_name,
-                ),
+                raw=raw,
                 authorized_tools=authorized_by_name,
                 argument_schema_for=argument_schema_for,
                 brain_input=brain_input,
+                show_raw_llm=self.show_raw_llm,
             )
-            if retry_messages is not provider_messages:
-                log_llm_exchange(
-                    worker="brain", operation="step", messages=retry_messages,
-                    response=raw, execution_id=brain_input.identity.execution_id,
-                    enabled=self.show_raw_llm,
-                )
             canonical = _canonical_brain_response(
                 raw, authorized_by_name,
             )
@@ -479,8 +481,8 @@ class LangChainBrainProvider:
             )
 
         if _native_argument_feedback(canonical, authorized_by_name, argument_schema_for=argument_schema_for):
-            # Reject the second invalid response before normalization can create
-            # ToolRequest identities. There is no recursive correction attempt.
+            # Reject invalid arguments after the bounded correction loop before
+            # normalization can create ToolRequest identities.
             outcome = BrainOutcome(
                 outcome=BrainOutcomeKind.INVALID_OUTPUT,
                 step_id=brain_input.active_step.step_id if brain_input.active_step else None,
@@ -505,8 +507,10 @@ class LangChainBrainProvider:
                 error_code="invalid_native_tool_arguments",
                 message="Brain returned invalid native tool arguments.",
             )
-        if retry_messages is not provider_messages:
-            _log_native_call_attempt(
-                raw, 2, correction_exhausted=outcome.outcome == BrainOutcomeKind.INVALID_OUTPUT,
-            )
+        _log_native_call_attempt(
+            raw, attempt, correction_exhausted=(attempt > _MAX_NATIVE_CORRECTIONS
+                                              and outcome.outcome == BrainOutcomeKind.INVALID_OUTPUT),
+            correction_reason=correction_reason,
+            accepted=outcome.outcome != BrainOutcomeKind.INVALID_OUTPUT,
+        )
         return outcome.model_copy(update={"usage": normalize_brain_usage(raw)})

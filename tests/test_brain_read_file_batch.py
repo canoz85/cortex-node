@@ -120,10 +120,10 @@ def test_valid_disallowed_groups_never_execute_and_use_at_most_one_correction(ra
 
 @pytest.mark.parametrize("args", [{}, {"path": []}, {"path": "a", "offset": -1},
                                    {"path": "a", "unexpected": True}, {"path": "a", "limit": 0}])
-def test_invalid_argument_group_uses_one_correction_then_fails_closed(args):
+def test_invalid_argument_group_uses_bounded_corrections_then_fails_closed(args):
     raw = native_batch(args=[{"path": "good"}, args])
-    output, model = provider_output(raw, raw)
-    assert output.kind == Kind.INVALID_OUTPUT and len(model.calls) == 2
+    output, model = provider_output(raw, raw, raw)
+    assert output.kind == Kind.INVALID_OUTPUT and len(model.calls) == 3
     assert output.error_code == "invalid_native_tool_arguments"
     assert output.tool_request is output.tool_requests is None
     assert "invalid_native_tool_arguments" in model.calls[1][-1].content
@@ -395,8 +395,9 @@ def test_correction_can_return_permitted_batch_but_invalid_singleton_arguments_r
     duplicate = native_batch(args=[{"path": "same"}, {"path": "same"}])
     output, model = provider_output(duplicate, native_batch())
     assert len(output.tool_requests) == 2 and len(model.calls) == 2
-    output, model = provider_output(duplicate, native_action("read_file", {}))
-    assert output.kind == Kind.INVALID_OUTPUT and len(model.calls) == 2
+    invalid = native_action("read_file", {})
+    output, model = provider_output(duplicate, invalid, invalid)
+    assert output.kind == Kind.INVALID_OUTPUT and len(model.calls) == 3
 
 
 def test_batch_result_does_not_grant_execution_authority_to_legacy_toolnode():

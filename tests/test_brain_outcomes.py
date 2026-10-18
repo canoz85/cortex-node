@@ -551,10 +551,10 @@ def test_brain_live_invocations_count_each_actual_provider_call():
 ])
 def test_textual_lifecycle_is_never_salvaged_after_compliance_retry(name, arguments):
     text = AIMessage(content=f"{name}({arguments})")
-    model = SequenceModel(text, text)
+    model = SequenceModel(text, text, text)
     provider = LangChainBrainProvider(brain_llm=model, executable_tools=executable_tools("read_file"))
     result = provider.generate(brain_input(), ())
-    assert len(model.calls) == 2
+    assert len(model.calls) == 3
     assert result.kind == Kind.INVALID_OUTPUT
     assert result.error_code == "unexpected_response_content"
     assert result.completion_evidence is None
@@ -582,7 +582,7 @@ def test_provider_invocation_retries_only_missing_native_calls(reply, kind):
     provider = LangChainBrainProvider(brain_llm=model, executable_tools=executable_tools("read_file"))
     result = provider.generate(brain_input(), (BrainMessage(role="human", content="read all"),))
     assert result.kind == kind
-    assert len(model.calls) == (2 if kind == Kind.INVALID_OUTPUT else 1)
+    assert len(model.calls) == (3 if kind == Kind.INVALID_OUTPUT else 1)
     assert isinstance(result, BrainOutcome)
 
 
