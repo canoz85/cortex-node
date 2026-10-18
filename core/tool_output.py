@@ -49,7 +49,26 @@ def _structured_result_data(unwrapped: dict, tool_name: str):
 def _extract_integrity_and_pagination(
     raw_content: str,
     unwrapped: object | None,
+    *,
+    tool_name: str = "",
 ) -> tuple[ContentIntegrity, PaginationMetadata | None]:
+    if tool_name == "source_snapshot":
+        return ContentIntegrity(), None  # Complete internal-write receipt, not paged page text.
+    evidence_fields = {
+        "web_fetch": ("text", "truncated", "total_text_bytes"),
+        "source_diff": ("diff", "diff_truncated", "total_diff_bytes"),
+    }.get(tool_name)
+    if evidence_fields and isinstance(unwrapped, dict):
+        data = unwrapped.get("data")
+        text_field, truncated_field, bytes_field = evidence_fields
+        if isinstance(data, dict) and isinstance(data.get(text_field), str):
+            # Bounded evidence is not a page with an invented continuation.
+            truncated = data.get(truncated_field) is True
+            return ContentIntegrity(
+                is_truncated=truncated, stdout_truncated=truncated,
+                original_bytes=data.get(bytes_field, 0),
+                captured_bytes=len(data[text_field].encode("utf-8")),
+            ), None
     is_truncated = False
     total_items = 0
     returned_items = 0
@@ -119,7 +138,7 @@ def _extract_integrity_and_pagination(
 def _normalize_transport_payload(raw_content: str, *, tool_name: str = "") -> NormalizedToolPayload:
     parsed = parse_tool_output(raw_content)
     unwrapped = unwrap_tool_output(raw_content)
-    integrity, pagination = _extract_integrity_and_pagination(raw_content, unwrapped)
+    integrity, pagination = _extract_integrity_and_pagination(raw_content, unwrapped, tool_name=tool_name)
 
     success = (
         parsed.success

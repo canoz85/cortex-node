@@ -80,8 +80,6 @@ def test_single_valid_native_action_discards_only_canonical_content(
     {"name": "unknown", "args": {}, "id": "bad"},
     {"name": "write_file", "args": {"path": "a", "content": "x"}, "id": "bad"},
     {"name": "read_file", "args": "not an object", "id": "bad"},
-    {"name": "read_file", "args": {}, "id": "bad"},
-    {"name": "read_file", "args": {"path": []}, "id": "bad"},
     {"name": "read_file", "args": {"path": "a.py"}, "id": "bad", "extra": True},
     {"name": "read_file", "args": {"path": "a.py"}, "id": "", "type": "tool_call"},
     {"name": "read_file", "args": {"path": "a.py"}, "id": "bad", "type": "other"},
@@ -102,6 +100,17 @@ def test_incidental_text_does_not_tolerate_invalid_calls(call):
     assert outcome.kind == Kind.INVALID_OUTPUT
     assert outcome.tool_request is outcome.completion_evidence is None
     assert len(model.calls) == 1
+    assert _canonical_brain_response(raw, {"read_file": tool}) is raw
+    tool.invoke.assert_not_called()
+
+
+@pytest.mark.parametrize("arguments", [{}, {"path": []}])
+def test_schema_invalid_single_call_with_incidental_text_can_be_corrected(arguments):
+    raw = native_action("read_file", arguments).model_copy(update={"content": "Incidental text"})
+    provider, model, tool = setup_provider(raw, native_action("read_file", {"path": "repaired"}))
+    outcome = provider.generate(brain_input(), ())
+    assert outcome.kind == Kind.TOOL_REQUESTED and len(model.calls) == 2
+    assert "invalid_native_tool_arguments" in model.calls[1][-1].content
     assert _canonical_brain_response(raw, {"read_file": tool}) is raw
     tool.invoke.assert_not_called()
 
@@ -269,8 +278,6 @@ def test_oversized_batch_text_reaches_bounded_correction_without_truncation(
     {"name": "read_file", "args": {"path": "b"}, "id": "bad", "type": "other"},
     {"name": "unknown", "args": {}, "id": "bad"},
     {"name": "write_file", "args": {"path": "b", "content": "x"}, "id": "bad"},
-    {"name": "read_file", "args": {}, "id": "bad"},
-    {"name": "read_file", "args": {"path": "b", "limit": 0}, "id": "bad"},
 ])
 def test_invalid_multicall_with_content_stays_strict_without_correction(bad_call):
     original = SimpleNamespace(content="Incidental batch description", tool_calls=[
@@ -283,13 +290,21 @@ def test_invalid_multicall_with_content_stays_strict_without_correction(bad_call
     assert outcome.tool_request is outcome.tool_requests is None
     assert len(model.calls) == 1
     canonical = _canonical_brain_response(original, {"read_file": tool})
-    if (bad_call is not None and bad_call.get("name") == "read_file"
-            and bad_call.get("args") in ({}, {"path": "b", "limit": 0})):
-        # Parseable argument objects lose incidental text, then fail argument
-        # validation. Canonicalization must not confer execution eligibility.
-        assert canonical.content == "" and canonical.tool_calls is original.tool_calls
-    else:
-        assert canonical is original
+    assert canonical is original
+    tool.invoke.assert_not_called()
+
+
+@pytest.mark.parametrize("arguments", [{}, {"path": "b", "limit": 0}])
+def test_schema_invalid_multicall_with_content_is_correctable_but_never_partially_accepted(arguments):
+    original = SimpleNamespace(content="Incidental batch description", tool_calls=[
+        native_batch().tool_calls[0], {"name": "read_file", "args": arguments, "id": "bad"},
+    ])
+    provider, model, tool = setup_provider(original, native_action("read_file", {"path": "repaired"}))
+    tool.args_schema = ReadFileRequest
+    outcome = provider.generate(brain_input(), ())
+    assert outcome.kind == Kind.TOOL_REQUESTED and len(model.calls) == 2
+    assert "invalid_native_tool_arguments" in model.calls[1][-1].content
+    assert outcome.tool_request.arguments == {"path": "repaired"}
     tool.invoke.assert_not_called()
 
 

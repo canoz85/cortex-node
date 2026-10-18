@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Iterable, Literal
 
-from core.models import ApplyPatchRequest, ReadFileRequest
+from core.models import ApplyPatchRequest, CurrentTimeRequest, ReadFileRequest, SourceUrlRequest, WebFetchRequest
 
 
 @dataclass(frozen=True)
@@ -165,9 +165,48 @@ TOOL_DEFINITIONS = (
     ToolDefinition("token_usage", "general", enabled_by_default=True, planning=CapabilitySemantics(
         "Inspect recorded token usage", (), ("prompt/completion/total token counts",),
         ("May be unavailable before any response",))),
-    ToolDefinition("current_time", "general", enabled_by_default=True, planning=CapabilitySemantics(
-        "Read the local system clock", (), ("iso, formatted",),
-        ("Local system time; no timezone conversion",))),
+    ToolDefinition("current_time", "general", enabled_by_default=True, args_schema=CurrentTimeRequest,
+        planning=CapabilitySemantics(
+            "Read the offset-aware local system clock and optionally calculate elapsed time from an offset-aware ISO timestamp",
+            (),
+            ("iso, formatted, utc_iso, utc_offset", "when reference_time is supplied: reference_time, elapsed_seconds"),
+            ("reference_time must include an explicit timezone offset (or Z)", "Never infer timezone for naive timestamps",
+             "For elapsed-time questions, pass reference_time and use tool-calculated elapsed_seconds"))),
+    ToolDefinition("web_fetch", "general", enabled_by_default=True, args_schema=WebFetchRequest,
+        planning=CapabilitySemantics(
+            "Read text content from a known public web URL", ("url: required public page URL",),
+            ("final URL, page title, extracted text, retrieval metadata",),
+            ("Public HTTP/HTTPS only; HTML only; not a search engine",
+             "JavaScript-rendered content may be incomplete",
+             "Text may be truncated; no continuation; response limited to 2 MiB"),
+            use_when="A specific web page URL is known and the user only needs its current content.",
+            avoid_when="Reading saved baseline metadata (source_status), saving/comparing a source baseline, URL discovery, PDF/binary files, or browser interaction/JavaScript execution is required.")),
+    ToolDefinition("source_snapshot", "general", mutating=True, enabled_by_default=True, args_schema=SourceUrlRequest,
+        planning=CapabilitySemantics(
+            "Save the current complete text of a known public web source as a baseline for future comparisons",
+            ("url: required public page URL",), ("baseline created/replaced, final URL, title, retrieval time, text hash and character count",),
+            ("Public HTTP/HTTPS HTML only; incomplete extraction is rejected", "Explicitly replaces an existing baseline",),
+            use_when="The user asks to start tracking a page, save its current state, establish a baseline, or reset/update the baseline.",
+            avoid_when="The user only wants to read/summarize the current page, asks what changed since an existing baseline, or wants saved baseline metadata (source_status).")),
+    ToolDefinition("source_diff", "general", enabled_by_default=True, args_schema=SourceUrlRequest,
+        planning=CapabilitySemantics(
+            "Compare the current complete text of a tracked public web source with its saved baseline",
+            ("url: required previously tracked public page URL",), ("changed/unchanged text, bounded unified diff, baseline/current hashes and retrieval metadata",),
+            ("Requires a complete saved baseline and complete HTTP/HTTPS HTML extraction",
+             "Diff evidence may be truncated; never advances the baseline", "Compares extracted text, not raw HTML or rendered JavaScript",),
+            use_when="The user asks whether a tracked source changed or what changed since the saved baseline.",
+            avoid_when="No baseline has been established, the user wants only current content, the user explicitly wants to replace the baseline, or only saved baseline metadata is needed (source_status).")),
+    ToolDefinition("source_status", "general", enabled_by_default=True, args_schema=SourceUrlRequest,
+        planning=CapabilitySemantics(
+            "Read saved baseline metadata for a tracked public web source",
+            ("url: required previously tracked public page URL",),
+            ("saved retrieved_at, title, final_url, content_type, content_hash, total_chars; canonical_url, baseline_exists",),
+            ("Requires an existing saved baseline; reads persistent baseline metadata only",
+             "Does not fetch current web content or compare changes; does not modify or advance the baseline",
+             "Runtime metadata is authoritative over conversation history or Planner memory, which may be stale after baseline replacement",
+             "For baseline age, pass saved retrieved_at to current_time(reference_time=...) for tool-calculated elapsed_seconds"),
+            use_when="The user asks about the saved baseline itself: when it was captured, its hash, title, saved character count, or saved URL metadata. Read persistent runtime evidence for these facts.",
+            avoid_when="Current page content: web_fetch; save/replace a baseline: source_snapshot; whether content changed: source_diff.")),
     ToolDefinition("rag_search", "general", enabled_by_default=True, planning=CapabilitySemantics(
         "Search indexed knowledge", ("query: required",),
         ("ranked chunks and sources",), ("Can be stale; not live workspace discovery",),
@@ -307,6 +346,8 @@ def build_tool_registry(workspace_root, knowledge_root, rag_service, model, *, r
     from tools.sap_ops import get_sap_tools
     from tools.scada_ops import get_scada_tools
     from tools.vision_ops import get_vision_tools
+    from tools.web_ops import get_web_tools
+    from tools.source_ops import get_source_tools
 
     registry = ToolRegistry.from_tools([
         *get_file_tools(workspace_root, knowledge_dir=knowledge_root),
@@ -319,6 +360,8 @@ def build_tool_registry(workspace_root, knowledge_root, rag_service, model, *, r
         *get_vision_tools(workspace_root),
         *get_comfy_tools(workspace_root, resource_coordinator=resource_coordinator),
         *get_discovery_tools(workspace_root),
+        *get_web_tools(),
+        *get_source_tools(workspace_root, knowledge_root),
     ])
     definitions = {definition.name for definition in TOOL_DEFINITIONS}
     if len(definitions) != len(TOOL_DEFINITIONS):

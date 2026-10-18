@@ -120,10 +120,13 @@ def test_valid_disallowed_groups_never_execute_and_use_at_most_one_correction(ra
 
 @pytest.mark.parametrize("args", [{}, {"path": []}, {"path": "a", "offset": -1},
                                    {"path": "a", "unexpected": True}, {"path": "a", "limit": 0}])
-def test_invalid_argument_group_is_strict_without_correction(args):
+def test_invalid_argument_group_uses_one_correction_then_fails_closed(args):
     raw = native_batch(args=[{"path": "good"}, args])
-    output, model = provider_output(raw)
-    assert output.kind == Kind.INVALID_OUTPUT and len(model.calls) == 1
+    output, model = provider_output(raw, raw)
+    assert output.kind == Kind.INVALID_OUTPUT and len(model.calls) == 2
+    assert output.error_code == "invalid_native_tool_arguments"
+    assert output.tool_request is output.tool_requests is None
+    assert "invalid_native_tool_arguments" in model.calls[1][-1].content
 
 
 def test_payload_exclusivity_and_wrong_kind_are_enforced():

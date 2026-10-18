@@ -92,6 +92,17 @@ class TokenUsage(BaseModel):
         )
 
 
+class CurrentTimeRequest(BaseModel):
+    """Read the clock, optionally measuring elapsed time from an explicit offset."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    format: str = Field(default="%Y-%m-%d %H:%M:%S", description="Optional strftime display format.")
+    reference_time: str | None = Field(
+        default=None, description="ISO-8601 datetime with an explicit UTC offset (or Z); never infer a timezone.",
+    )
+
+
 class WriteFileRequest(BaseModel):
     """Validated arguments for the write_file tool."""
 
@@ -100,6 +111,29 @@ class WriteFileRequest(BaseModel):
     path: str = Field(min_length=1)
     content: str
     overwrite: bool = True
+
+
+MAX_WEB_FETCH_CHARS = 200_000
+
+
+class WebFetchRequest(BaseModel):
+    """Bounded single-page observation; no search or continuation arguments."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    url: str = Field(min_length=1, max_length=8192, description="Known public HTTP/HTTPS page URL.")
+    max_chars: int = Field(
+        default=50_000, ge=1, le=MAX_WEB_FETCH_CHARS,
+        description="Maximum extracted text characters; excess text is explicitly truncated.",
+    )
+
+
+class SourceUrlRequest(BaseModel):
+    """Known-source identity only; storage and transport remain runtime-owned."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    url: str = Field(min_length=1, max_length=8192, description="Known public HTTP/HTTPS page URL.")
 
 
 class WriteFileResult(ToolSerializableModel):

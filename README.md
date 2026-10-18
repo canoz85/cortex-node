@@ -25,6 +25,17 @@ injected test/integration compatibility path; it is not production topology.
 
 ## What the current code does
 
+Known public HTML pages can be read with the read-only `web_fetch(url, max_chars=50000)`
+tool. It validates public destinations and redirects, bounds response size, and
+returns extracted text with retrieval and truncation metadata. See the
+[web fetch contract](docs/implementation/web-fetch.md) for safety and output details.
+
+`source_snapshot(url)` explicitly saves or replaces a complete public-page text
+baseline. `source_diff(url)` compares current text with that baseline without
+updating it. `source_status(url)` reads saved baseline metadata from persistent
+storage without network access or baseline changes. See [source tracking](docs/implementation/source-tracking.md) for
+storage, comparison limits, and a manual smoke sequence.
+
 ### Planner / Controller / Brain split
 
 The ownership boundaries are explicit in the active prompts and protocol contracts:

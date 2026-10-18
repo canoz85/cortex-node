@@ -1,12 +1,24 @@
-from datetime import datetime
+from datetime import datetime, timezone
+import re
 
 from langchain_core.tools import tool
 
-from core.error_codes import INFO_TIME_FORMAT_ERROR, INFO_TOKEN_USAGE_UNAVAILABLE
+from core.error_codes import INFO_TIME_FORMAT_ERROR, INFO_TIME_REFERENCE_INVALID, INFO_TOKEN_USAGE_UNAVAILABLE
 from core.graph_constants import MAX_REASONING_STEPS
-from core.models import ToolOutputEnvelope
+from core.models import CurrentTimeRequest, ToolOutputEnvelope
 
 _runtime: dict = {}
+
+
+# Calendar datetimes with minute/second precision and explicit ISO offsets.
+# Guard fromisoformat's permissive separators and out-of-range offset minutes.
+_REFERENCE_TIME_PATTERN = re.compile(
+    r"(?:[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{8})T"
+    r"(?:[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:[.,][0-9]{1,6})?)?"
+    r"|[0-9]{4}(?:[0-9]{2}(?:[.,][0-9]{1,6})?)?)"
+    r"(?:Z|[+-](?:[01][0-9]|2[0-3])(?::?[0-5][0-9])?)"
+)
+
 
 def _to_non_negative_int(value: object) -> int:
     try:
@@ -54,20 +66,52 @@ def get_info_tools(model: str, workspace_dir: str):
             data=usage,
         ).to_tool_output()
 
-    @tool
-    def current_time(format: str = "%Y-%m-%d %H:%M:%S") -> str:
-        """Return the current local system time using an optional strftime format."""
+    @tool(args_schema=CurrentTimeRequest)
+    def current_time(format: str = "%Y-%m-%d %H:%M:%S", reference_time: str | None = None) -> str:
+        """Read offset-aware local/UTC time using an optional strftime display format.
+
+        For elapsed-time requests, pass reference_time as an ISO-8601 calendar
+        datetime with an explicit offset or Z. This tool calculates elapsed_seconds
+        in Python; never infer a timezone or subtract timestamps in the model.
+        """
+        reference = None
+        if reference_time is not None:
+            try:
+                if _REFERENCE_TIME_PATTERN.fullmatch(reference_time) is None:
+                    raise ValueError("Expected an ISO-8601 datetime with an explicit UTC offset.")
+                reference = datetime.fromisoformat(reference_time)
+                if reference.tzinfo is None or reference.utcoffset() is None:
+                    raise ValueError("An explicit UTC offset is required.")
+            except ValueError:
+                return ToolOutputEnvelope(
+                    success=False,
+                    message="reference_time must be a valid ISO-8601 datetime with an explicit UTC offset (or Z); never infer a timezone.",
+                    error_code=INFO_TIME_REFERENCE_INVALID,
+                    error_details={"field": "reference_time"},
+                ).to_tool_output()
         try:
-            now = datetime.now()
+            now = datetime.now().astimezone()
+            utc_now = now.astimezone(timezone.utc)
+            local_iso = now.isoformat()
+            # isoformat preserves even second-resolution system UTC offsets.
+            utc_offset = local_iso[len(now.replace(tzinfo=None).isoformat()):]
             formatted = now.strftime(format)
+            data = {
+                "iso": local_iso,
+                "formatted": formatted,
+                "format": format,
+                "utc_iso": utc_now.isoformat(),
+                "utc_offset": utc_offset,
+            }
+            if reference is not None:
+                data.update(
+                    reference_time=reference.isoformat(),
+                    elapsed_seconds=(utc_now - reference.astimezone(timezone.utc)).total_seconds(),
+                )
             return ToolOutputEnvelope(
                 success=True,
                 message="Current local system time",
-                data={
-                    "iso": now.isoformat(),
-                    "formatted": formatted,
-                    "format": format,
-                },
+                data=data,
             ).to_tool_output()
         except Exception as exc:
             return ToolOutputEnvelope(

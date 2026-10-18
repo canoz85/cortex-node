@@ -7,6 +7,8 @@ from functools import partial
 from typing import Callable
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from pydantic import ValidationError
+from pydantic.v1 import ValidationError as LegacyValidationError
 
 from core.brain import BrainMessage
 from core.brain_normalization import (
@@ -26,6 +28,62 @@ from core.brain_batch_policy import (
 
 logger = logging.getLogger(__name__)
 
+_MAX_ARGUMENT_ISSUES = 8
+_MAX_ARGUMENT_FEEDBACK_CHARS = 4000
+
+
+def _native_argument_feedback(raw, authorized_tools, *, argument_schema_for):
+    """Diagnose executable arguments only, without creating runtime requests.
+
+    Malformed/unauthorized calls and invalid lifecycle actions retain their
+    existing strict normalization path. Never recover text or invalid_tool_calls.
+    """
+    calls = getattr(raw, "tool_calls", None)
+    if (not isinstance(calls, (list, tuple)) or not calls
+            or getattr(raw, "invalid_tool_calls", None)
+            or not _are_valid_native_calls(calls, authorized_tools, validate_arguments=False)):
+        return None
+    feedback = {"code": "invalid_native_tool_arguments", "issues": [], "issues_truncated": False}
+    for index, call in enumerate(calls):
+        if call["name"] not in authorized_tools:
+            continue
+        schema = argument_schema_for(call["name"])
+        if schema is None or isinstance(schema, dict):
+            continue  # No new validator or fallback for unavailable executable schemas.
+        validate = getattr(schema, "model_validate", None)
+        if not callable(validate):
+            validate = getattr(schema, "parse_obj", None)
+        if not callable(validate):
+            continue
+        try:
+            validate(call["args"])
+        except (ValidationError, LegacyValidationError) as exc:
+            errors = (exc.errors(include_input=False, include_url=False, include_context=False)
+                      if isinstance(exc, ValidationError) else exc.errors())
+        except (ValueError, TypeError):
+            # Equivalent validators may not expose structured diagnostics.
+            errors = [{"loc": (), "type": "schema_validation_failed",
+                       "msg": "Arguments must match the executable schema."}]
+        else:
+            continue
+        for error in errors:
+            issue = {
+                "tool": call["name"][:96], "call_index": index,
+                "field": [part if isinstance(part, int) else str(part)[:32]
+                          for part in error.get("loc", ())[:8]],
+                "type": str(error.get("type", "schema_validation_failed"))[:64],
+                "reason": ("Arguments must match the executable schema."
+                           if error.get("type") in {"value_error", "assertion_error"}
+                           else " ".join(str(error.get("msg", "Invalid argument.")).split())[:160]),
+            }
+            candidate = {**feedback, "issues": [*feedback["issues"], issue]}
+            if (len(feedback["issues"]) == _MAX_ARGUMENT_ISSUES
+                    or len(json.dumps(candidate, ensure_ascii=True)) > _MAX_ARGUMENT_FEEDBACK_CHARS):
+                feedback["issues_truncated"] = True
+                return feedback
+            feedback["issues"].append(issue)
+    return feedback if feedback["issues"] else None
+
 def _ensure_native_call(
     *,
     llm,
@@ -41,6 +99,9 @@ def _ensure_native_call(
         )
     calls = getattr(raw, "tool_calls", None)
     missing_call = not calls and not getattr(raw, "invalid_tool_calls", None)
+    argument_feedback = _native_argument_feedback(
+        raw, authorized_tools, argument_schema_for=argument_schema_for,
+    )
     valid_batch = _is_valid_native_batch(raw, authorized_tools)
     disallowed_batch = valid_batch and not _is_permitted_native_batch(
         raw, authorized_tools, argument_schema_for=argument_schema_for,
@@ -56,12 +117,27 @@ def _ensure_native_call(
             )
         except DuplicateSuccessfulCall as exc:
             duplicate_feedback = str(exc)
-    correction_triggered = missing_call or disallowed_batch or duplicate_feedback is not None
-    _log_native_call_attempt(raw, 1, correction_triggered=correction_triggered)
+    correction_triggered = missing_call or disallowed_batch or duplicate_feedback is not None or argument_feedback is not None
+    correction_reason = (
+        "invalid_native_tool_arguments" if argument_feedback is not None else
+        "duplicate_successful_call" if duplicate_feedback is not None else
+        "unsupported_native_batch" if disallowed_batch else
+        "missing_native_call" if missing_call else None
+    )
+    _log_native_call_attempt(raw, 1, correction_triggered=correction_triggered, correction_reason=correction_reason)
     if not correction_triggered:
         return raw, provider_messages
 
-    if duplicate_feedback is not None:
+    if argument_feedback is not None:
+        instruction = (
+            "The previous native action was rejected; no tool was executed.\n"
+            + json.dumps(argument_feedback, ensure_ascii=True, separators=(",", ":"))
+            + "\nRepair the arguments using the currently bound schemas, or choose another bound native action. "
+            "Return a permitted native action with empty content. "
+            "The entire response must validate before any member can execute."
+        )
+        rejected_response = [raw] if isinstance(raw, AIMessage) else []
+    elif duplicate_feedback is not None:
         instruction = duplicate_feedback + " Return a currently bound native action with empty content."
         rejected_response = [raw] if isinstance(raw, AIMessage) else []
     elif disallowed_batch and _is_oversized_native_batch(
@@ -218,6 +294,7 @@ def _canonical_brain_response(raw, authorized_tools: dict[str, object]):
 def _log_native_call_attempt(
     raw, attempt: int, *, correction_triggered: bool = False,
     correction_exhausted: bool = False,
+    correction_reason: str | None = None,
 ) -> None:
     calls = getattr(raw, "tool_calls", None)
     names = [
@@ -226,9 +303,9 @@ def _log_native_call_attempt(
     ] if isinstance(calls, (list, tuple)) else []
     logger.debug(
         "Brain native-call compliance: attempt=%s call_count=%s "
-        "tool_call_names=%s correction_triggered=%s correction_exhausted=%s",
+        "tool_call_names=%s correction_triggered=%s correction_exhausted=%s correction_reason=%s",
         attempt, len(calls) if isinstance(calls, (list, tuple)) else 0, names,
-        correction_triggered, correction_exhausted,
+        correction_triggered, correction_exhausted, correction_reason,
     )
 
 LIFECYCLE_ACTION_SCHEMAS = (
@@ -401,10 +478,20 @@ class LangChainBrainProvider:
                 message=f"Brain provider failed ({type(exc).__name__}).",
             )
 
-        outcome = normalize_brain_output(
-            canonical, brain_input, set(self.executable_tools) & authorized_tool_names,
-            argument_schema_for=argument_schema_for,
-        )
+        if _native_argument_feedback(canonical, authorized_by_name, argument_schema_for=argument_schema_for):
+            # Reject the second invalid response before normalization can create
+            # ToolRequest identities. There is no recursive correction attempt.
+            outcome = BrainOutcome(
+                outcome=BrainOutcomeKind.INVALID_OUTPUT,
+                step_id=brain_input.active_step.step_id if brain_input.active_step else None,
+                error_code="invalid_native_tool_arguments",
+                message="Brain returned invalid native tool arguments.",
+            )
+        else:
+            outcome = normalize_brain_output(
+                canonical, brain_input, set(self.executable_tools) & authorized_tool_names,
+                argument_schema_for=argument_schema_for,
+            )
         # A proposal must also satisfy the bound tool schemas. Normalization's
         # batch policy cannot override a provider schema rejection.
         calls = getattr(canonical, "tool_calls", None)

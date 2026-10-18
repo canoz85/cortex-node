@@ -110,8 +110,6 @@ def test_oversized_group_with_another_disqualifier_keeps_choose_one_correction(d
 @pytest.mark.parametrize("bad_call", [
     {"name": "unknown", "args": {}, "id": "bad"},
     {"name": "read_file", "args": "not an object", "id": "bad"},
-    {"name": "read_file", "args": {}, "id": "bad"},
-    {"name": "read_file", "args": {"path": "a", "limit": 0}, "id": "bad"},
     {"name": "read_file", "args": {"path": "a"}, "id": "bad", "extra": True},
 ])
 def test_invalid_oversized_group_remains_strict_without_correction(bad_call):
@@ -121,6 +119,19 @@ def test_invalid_oversized_group_remains_strict_without_correction(bad_call):
     assert outcome.kind == Kind.INVALID_OUTPUT
     assert outcome.tool_requests is None and outcome.tool_request is None
     assert len(model.calls) == 1
+
+
+@pytest.mark.parametrize("arguments", [{}, {"path": "a", "limit": 0}])
+def test_schema_invalid_oversized_group_uses_only_one_argument_correction(arguments):
+    calls = [*native_batch(READ_FILE_BATCH_LIMIT).tool_calls,
+             {"name": "read_file", "args": arguments, "id": "bad"}]
+    raw = SimpleNamespace(content="Incidental text", tool_calls=calls)
+    # Repairing only arguments still leaves an oversized batch; no third call.
+    repaired = native_batch(READ_FILE_BATCH_LIMIT + 1)
+    outcome, model = provider_output(raw, repaired)
+    assert len(model.calls) == 2 and outcome.kind == Kind.INVALID_OUTPUT
+    assert "invalid_native_tool_arguments" in model.calls[1][-1].content
+    assert outcome.tool_request is outcome.tool_requests is None
 
 
 def test_unauthorized_oversized_group_remains_strict_without_correction():

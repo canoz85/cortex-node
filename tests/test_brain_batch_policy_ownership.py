@@ -62,12 +62,15 @@ def test_changed_authoritative_schema_is_shared_by_executable_policy_and_provide
     assert policy.normalized_batch_arguments("read_file", {"path": "a"})["limit"] == 7
     with pytest.raises(ValidationError):
         policy.normalized_batch_arguments("read_file", {"path": "a", "limit": 8})
-    model = SequenceModel(native_batch(args=[{"path": "a"}, {"path": "b", "limit": 8}]))
+    model = SequenceModel(native_batch(args=[{"path": "a"}, {"path": "b", "limit": 8}]),
+                          native_batch(args=[{"path": "a"}, {"path": "b", "limit": 7}]))
     output = provider_module.LangChainBrainProvider(brain_llm=model, executable_tools=tools).generate(
         brain_input(), (),
     )
-    assert output.kind == Kind.INVALID_OUTPUT
-    assert len(model.calls) == 1
+    assert output.kind == Kind.TOOL_REQUESTED
+    assert output.tool_requests[1].arguments["limit"] == 7
+    assert "invalid_native_tool_arguments" in model.calls[1][-1].content
+    assert len(model.calls) == 2
 
 
 @pytest.mark.parametrize("missing", ["definition", "declared_schema", "executable", "bound_schema"])

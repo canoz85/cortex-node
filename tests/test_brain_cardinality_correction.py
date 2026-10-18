@@ -138,8 +138,6 @@ def test_invalid_correction_is_exhausted_without_a_third_invocation(corrected, e
     {"name": "unknown", "args": {}, "id": "bad"},
     {"name": "write_file", "args": {"path": "a", "content": "x"}, "id": "bad"},
     {"name": "read_file", "args": "not an object", "id": "bad"},
-    {"name": "read_file", "args": {}, "id": "bad"},
-    {"name": "read_file", "args": {"path": []}, "id": "bad"},
     {"name": "read_file", "args": {"path": "a.py"}, "id": "bad", "extra": True},
     {"name": "brain_step_completed", "args": {
         "message": "Done", "exact_collection_source_record_index": 0,
@@ -157,6 +155,18 @@ def test_invalid_batch_candidates_do_not_trigger_cardinality_correction(bad_call
     assert len(model.calls) == 1
     tool.invoke.assert_not_called()
     assert any("correction_triggered=False" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("arguments", [{}, {"path": []}])
+def test_schema_invalid_candidates_use_argument_correction_before_cardinality(arguments):
+    raw = SimpleNamespace(content="", tool_calls=[batch().tool_calls[0],
+                          {"name": "read_file", "args": arguments, "id": "bad"}])
+    provider, model, tool = setup_provider(raw, native_action("read_file", {"path": "repaired"}))
+    outcome = provider.generate(brain_input(), ())
+    assert outcome.kind == Kind.TOOL_REQUESTED and len(model.calls) == 2
+    assert "invalid_native_tool_arguments" in model.calls[1][-1].content
+    assert model.calls[1][-1].content != CORRECTION
+    tool.invoke.assert_not_called()
 
 
 def test_batch_with_invalid_native_calls_is_not_cardinality_only():
