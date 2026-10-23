@@ -56,6 +56,7 @@ def _extract_integrity_and_pagination(
         return ContentIntegrity(), None  # Complete internal-write receipt, not paged page text.
     evidence_fields = {
         "web_fetch": ("text", "truncated", "total_text_bytes"),
+        "rendered_web_fetch": ("text", "truncated", "total_text_bytes"),
         "source_diff": ("diff", "diff_truncated", "total_diff_bytes"),
     }.get(tool_name)
     if evidence_fields and isinstance(unwrapped, dict):

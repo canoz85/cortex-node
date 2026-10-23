@@ -34,9 +34,11 @@ def test_registry_rejects_duplicates_mismatches_and_unknown_names():
 
 def test_production_tools_all_registered_and_enabled_explicitly(tmp_path):
     registry = build_tool_registry(str(tmp_path), str(tmp_path), SimpleNamespace(), "test")
-    assert len(registry.names) == len(TOOL_DEFINITIONS) == 33
+    assert len(registry.names) == len(TOOL_DEFINITIONS) == 34
     assert registry.names == {entry.name for entry in TOOL_DEFINITIONS}
-    assert {tool.name for tool in default_enabled_tools(registry)} == registry.names
+    assert {tool.name for tool in default_enabled_tools(registry)} == {
+        entry.name for entry in TOOL_DEFINITIONS if entry.enabled_by_default
+    }
     assert {"find_files", "search_text", "git_changed_files"} <= registry.names
     assert MUTATING_TOOLS == {
         "write_file", "make_directory", "install_package", "execute_abap_report",

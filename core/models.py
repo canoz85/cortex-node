@@ -128,6 +128,10 @@ class WebFetchRequest(BaseModel):
     )
 
 
+class RenderedWebFetchRequest(WebFetchRequest):
+    """Independent rendered observation; retains strict public URL input shape."""
+
+
 class SourceUrlRequest(BaseModel):
     """Known-source identity only; storage and transport remain runtime-owned."""
 

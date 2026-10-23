@@ -592,6 +592,33 @@ def main():
                 return str(message.content)
         raise RuntimeError("run_prompt completed without an accepted final answer")
 
+    def read_user_prompt() -> str | None:
+        first_line = input("\nYou> ")
+
+        command = first_line.strip().lower()
+
+        if command in {"exit", "quit"}:
+            return None
+
+        if command == "/multi":
+            print("[Multiline mode. Finish with a line containing only ::end]")
+            print("[Use /cancel to discard]")
+
+            lines = []
+
+            while True:
+                line = input()
+
+                if line == "::end":
+                    return "\n".join(lines).strip()
+
+                if line.strip().lower() == "/cancel":
+                    return ""
+
+                lines.append(line)
+
+        return first_line.strip()
+
     def complete_turn(user_prompt: str) -> str:
         live_status = LiveStatus()
         live_status.start("planner")
@@ -621,13 +648,17 @@ def main():
         print("Interactive mode: type 'exit' to quit.")
         while True:
             try:
-                user_prompt = input("\nYou> ").strip()
-                if user_prompt.lower() in {"exit", "quit"}:
+                user_prompt = read_user_prompt()
+
+                if user_prompt is None:
                     print("Stopping CortexNode.")
                     break
+
                 if not user_prompt:
                     continue
+
                 complete_turn(user_prompt)
+                
             except KeyboardInterrupt:
                 print("\nStopping CortexNode.")
                 break

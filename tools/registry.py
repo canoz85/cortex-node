@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Iterable, Literal
 
-from core.models import ApplyPatchRequest, CurrentTimeRequest, ReadFileRequest, SourceUrlRequest, WebFetchRequest
+from core.models import ApplyPatchRequest, CurrentTimeRequest, ReadFileRequest, SourceUrlRequest, WebFetchRequest, RenderedWebFetchRequest
 
 
 @dataclass(frozen=True)
@@ -172,15 +172,26 @@ TOOL_DEFINITIONS = (
             ("iso, formatted, utc_iso, utc_offset", "when reference_time is supplied: reference_time, elapsed_seconds"),
             ("reference_time must include an explicit timezone offset (or Z)", "Never infer timezone for naive timestamps",
              "For elapsed-time questions, pass reference_time and use tool-calculated elapsed_seconds"))),
-    ToolDefinition("web_fetch", "general", enabled_by_default=True, args_schema=WebFetchRequest,
+    ToolDefinition("web_fetch", "general", enabled_by_default=True, max_batch_calls=8, args_schema=WebFetchRequest,
         planning=CapabilitySemantics(
             "Read text content from a known public web URL", ("url: required public page URL",),
             ("final URL, page title, extracted text, retrieval metadata",),
             ("Public HTTP/HTTPS only; HTML only; not a search engine",
              "JavaScript-rendered content may be incomplete",
              "Text may be truncated; no continuation; response limited to 2 MiB"),
-            use_when="A specific web page URL is known and the user only needs its current content.",
+            use_when="A specific web page URL is known and the user only needs its current content. Preferred cheap path for ordinary/static pages; choose rendered_web_fetch explicitly when JavaScript rendering is required.",
             avoid_when="Reading saved baseline metadata (source_status), saving/comparing a source baseline, URL discovery, PDF/binary files, or browser interaction/JavaScript execution is required.")),
+    ToolDefinition("rendered_web_fetch", "general", enabled_by_default=True, max_batch_calls=2, args_schema=RenderedWebFetchRequest,
+        planning=CapabilitySemantics(
+            "Read rendered text from one known public JavaScript-dependent HTML page",
+            ("url: required public HTTP/HTTPS page URL",),
+            ("final URL, title, text, capture status, completion reason, truncation and timing",),
+            ("Optional Playwright/Chromium installation; expensive isolated browser call",
+             "No interactions, login, downloads, persistent state or continuation",
+             "GET/HEAD only; bounded settling does not prove complete content",
+             "Public-address checks are not socket-pinned SSRF protection"),
+            use_when="JavaScript rendering is known to be required, including after an explicitly insufficient static fetch.",
+            avoid_when="Prefer web_fetch for ordinary/static pages. Not for URL discovery, private URLs, browser interaction or source baselines.")),
     ToolDefinition("source_snapshot", "general", mutating=True, enabled_by_default=True, args_schema=SourceUrlRequest,
         planning=CapabilitySemantics(
             "Save the current complete text of a known public web source as a baseline for future comparisons",
@@ -347,6 +358,7 @@ def build_tool_registry(workspace_root, knowledge_root, rag_service, model, *, r
     from tools.scada_ops import get_scada_tools
     from tools.vision_ops import get_vision_tools
     from tools.web_ops import get_web_tools
+    from tools.rendered_web_ops import get_rendered_web_tools
     from tools.source_ops import get_source_tools
 
     registry = ToolRegistry.from_tools([
@@ -361,6 +373,7 @@ def build_tool_registry(workspace_root, knowledge_root, rag_service, model, *, r
         *get_comfy_tools(workspace_root, resource_coordinator=resource_coordinator),
         *get_discovery_tools(workspace_root),
         *get_web_tools(),
+        *get_rendered_web_tools(),
         *get_source_tools(workspace_root, knowledge_root),
     ])
     definitions = {definition.name for definition in TOOL_DEFINITIONS}

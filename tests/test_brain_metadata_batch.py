@@ -65,9 +65,10 @@ def test_only_explicit_metadata_enables_batches():
     assert {definition.name: definition.max_batch_calls
             for definition in registry_module.TOOL_DEFINITIONS if definition.max_batch_calls > 1} == {
         "read_file": 24, "find_files": 24, "list_files": 24,
+        "web_fetch": 8, "rendered_web_fetch": 2,
     }
     assert all(definition.max_batch_calls == 1 for definition in registry_module.TOOL_DEFINITIONS
-               if definition.name not in {"read_file", "find_files", "list_files"})
+               if definition.name not in {"read_file", "find_files", "list_files", "web_fetch", "rendered_web_fetch"})
 
 
 @pytest.mark.parametrize("name,count", [
