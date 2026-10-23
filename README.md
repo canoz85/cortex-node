@@ -129,6 +129,44 @@ pip install -r requirements.txt
 
 Interactive mode:
 
+On an interactive terminal, CortexNode uses its v2 `prompt_toolkit` shell:
+permanent events, compact OK/FAIL tool results, and final answers go to the host
+terminal's normal scrollback. A five-line multiline editor and live status row
+remain below the output. Mouse reporting and alternate-screen mode are disabled.
+
+The terminal owns wheel scrolling, ordinary drag selection, Copy, scrollback
+retention, and navigation. In VS Code on Windows, drag normally and use Ctrl+C
+to copy selected text; Alt is not required. When there is no terminal selection,
+Ctrl+C keeps the application's clear-draft behavior. Browsing older scrollback
+can move the live editor out of view; return to the bottom to continue editing.
+There is no application output pane, output focus, or output scrolling mode.
+PageUp/PageDown and Ctrl-Home/Ctrl-End have no CortexNode output bindings; use the
+host's normal scrollback shortcuts (for example, VS Code Shift-PageUp/PageDown).
+
+**Enter** inserts a newline. **F2** or **Alt-Enter** submits the whole prompt.
+You can prepare the next draft while a turn runs, but only one turn executes at
+a time. Output is queued and printed above the editor with prompt_toolkit's
+`run_in_terminal`, preserving the active draft and cursor. **Ctrl-Up/Ctrl-Down**
+recall in-memory prompt history; plain Up/Down move within the draft.
+**Ctrl-Q**, **Ctrl-D** on an empty editor, or submitting `exit`/`quit` exits;
+when busy, Ctrl-Q waits for the active turn and its queued output to finish.
+
+Vi editing is disabled by default. Enable it with `--vim-mode`,
+`CORTEX_VIM_MODE=true`, or `"vim_mode": true` in JSON config. The library supplies
+standard Vi navigation and insert mode. Use `--no-vim-mode` to override config.
+Use `--plain` / `--no-tui`, `CORTEX_TUI=false`, or `"tui": false` for the existing
+plain console, including `/multi`. Redirected streams, dumb terminals, and a
+missing dependency also select plain mode. Single-prompt and MQTT paths are
+unchanged. Configuration precedence remains defaults -> environment -> JSON -> CLI.
+
+The live status row refreshes in place: RUNNING/IDLE, phase, current step/title,
+active tool, elapsed time, available token/invocation metrics, and editing mode.
+Idle status retains the last runtime outcome and token total. Runtime completion
+does not imply the request was fulfilled; the final answer remains authoritative.
+Progress refreshes are never printed into scrollback. Raw diagnostic files and
+renderer semantics are unchanged. Runtime cancellation is not implemented.
+See [TUI v2 architecture and Windows validation](docs/implementation/tui-native-selection.md).
+
 ```bash
 python main.py
 ```

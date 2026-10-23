@@ -164,11 +164,11 @@ def test_run_prompt_renders_portable_controller_tool_result_concisely(capsys):
     run_prompt(app, "list files")
 
     output = capsys.readouterr().out
-    assert output.count("[brain]") == 1
-    assert "Calling list_files" in output
+    assert "[brain]" not in output
+    assert "Calling list_files" not in output
     assert "Calling list_files with" not in output
     assert output.count("[tool:list_files]") == 1
-    assert "Listing for ." in output
+    assert "OK — Listing for ." in output
     assert "<tool_result_json>" not in output
     assert "large-entry-99" not in output
     assert "stdout that must stay private" not in output

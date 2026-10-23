@@ -36,6 +36,8 @@ DEFAULT_SETTINGS = {
     "raw_llm": False,
     "show_summary": False,
     "verbose": False,
+    "tui": True,
+    "vim_mode": False,
     "log_level": "WARNING",
     "json_logs": False,
     "gpu_telemetry": True,
@@ -85,6 +87,8 @@ def _build_settings(args: argparse.Namespace) -> dict:
         "raw_llm": _env_bool("CORTEX_RAW_LLM"),
         "show_summary": _env_bool("CORTEX_SHOW_SUMMARY"),
         "verbose": _env_bool("CORTEX_VERBOSE"),
+        "tui": _env_bool("CORTEX_TUI"),
+        "vim_mode": _env_bool("CORTEX_VIM_MODE"),
         "json_logs": _env_bool("CORTEX_JSON_LOGS"),
         "gpu_telemetry": _env_bool("CORTEX_GPU_TELEMETRY"),
         "gpu_handoff": _env_bool("CORTEX_GPU_HANDOFF"),
@@ -111,6 +115,8 @@ def _build_settings(args: argparse.Namespace) -> dict:
         "raw_llm": args.raw_llm,
         "show_summary": args.show_summary,
         "verbose": args.verbose,
+        "tui": getattr(args, "tui", None),
+        "vim_mode": getattr(args, "vim_mode", None),
         "log_level": args.log_level,
         "json_logs": args.json_logs,
         "gpu_telemetry": args.gpu_telemetry,
@@ -174,6 +180,18 @@ def parse_args() -> argparse.Namespace:
         "--prompt",
         default="",
         help="Single prompt to run. If omitted, interactive mode starts.",
+    )
+    input_group.add_argument(
+        "--tui", action=argparse.BooleanOptionalAction, default=None,
+        help="Use the terminal UI when all console streams are interactive (default: enabled).",
+    )
+    input_group.add_argument(
+        "--plain", dest="tui", action="store_false", default=None,
+        help="Use the existing plain console instead of the terminal UI.",
+    )
+    input_group.add_argument(
+        "--vim-mode", action=argparse.BooleanOptionalAction, default=None,
+        help="Use prompt_toolkit Vi editing in the TUI prompt (default: disabled).",
     )
 
     mqtt_group = parser.add_argument_group("mqtt")
@@ -416,6 +434,23 @@ def save_session(
             file=sys.stderr,
         )
 
+
+def run_interactive_tui(complete_turn, settings: dict) -> bool:
+    """Select the optional shell only for an interactive terminal."""
+    if (not settings.get("tui", True)
+            or os.getenv("TERM") == "dumb"
+            or not all(getattr(stream, "isatty", lambda: False)()
+                       for stream in (sys.stdin, sys.stdout, sys.stderr))):
+        return False
+    try:
+        from core.tui import CortexTUI
+    except ImportError:
+        render_system_message("Terminal UI unavailable; using plain console. Install prompt_toolkit to enable it.")
+        return False
+    CortexTUI(complete_turn, vim_mode=bool(settings.get("vim_mode", False))).run()
+    return True
+
+
 def main():
     args = parse_args()
     settings = _build_settings(args)
@@ -619,8 +654,8 @@ def main():
 
         return first_line.strip()
 
-    def complete_turn(user_prompt: str) -> str:
-        live_status = LiveStatus()
+    def complete_turn(user_prompt: str, live_status: LiveStatus | None = None) -> str:
+        live_status = live_status or LiveStatus()
         live_status.start("planner")
         try:
             return _complete_turn(user_prompt, live_status)
@@ -645,6 +680,9 @@ def main():
             complete_turn(args.prompt)
             return
 
+        if run_interactive_tui(complete_turn, settings):
+            return
+
         print("Interactive mode: type 'exit' to quit.")
         while True:
             try:
@@ -659,7 +697,7 @@ def main():
 
                 complete_turn(user_prompt)
                 
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, EOFError):
                 print("\nStopping CortexNode.")
                 break
     finally:

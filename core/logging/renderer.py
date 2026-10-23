@@ -14,7 +14,6 @@ from .formatter import (
     format_accepted_plan,
     format_ai_message,
     format_planner_plan,
-    format_tool_call_preview,
     format_tool_result,
 )
 from .live_status import current_live_status
@@ -57,12 +56,10 @@ def _render_node_update(node_update: NodeUpdate, *, verbose: bool = False) -> No
         node_update.brain_result is not None
         and node_update.brain_result.outcome == BrainOutcome.TOOL_REQUEST
     ):
-        _render_tool_request(node_update)
         _render_controller_events(node_update, prefix="Tool requested", verbose=verbose)
 
     if node_update.finalization_result is not None:
-        _render_controller_event(node_update, "Execution completed", verbose=verbose)
-        _render_ai_text(node_update, label="finalizer")
+        _render_finalization(node_update)
         return
 
     if (
@@ -105,7 +102,7 @@ def _update_live_status(node_update: NodeUpdate, *, verbose: bool) -> bool:
         request = node_update.brain_result.tool_request
         if request is None:
             return False
-        status.update(request.tool_name)
+        status.update_tool(request.tool_name)
     elif node_update.planner_result is not None:
         status.update("planner", "planning")
     else:
@@ -214,32 +211,30 @@ def _render_planner(node_update: NodeUpdate) -> None:
     print()
 
 
-def _render_tool_request(node_update: NodeUpdate) -> None:
-
-    step_id = node_update.brain_result.step_id if node_update.brain_result is not None else None
-    context = f" [{step_id}]" if step_id else ""
-    print(f"\n{ANSI_CYAN}[brain]{context}{ANSI_RESET}")
-
-    request = (
-        node_update.brain_result.tool_request
-        if node_update.brain_result is not None
-        else None
-    )
-    if request is not None:
-        print(f"Calling {request.tool_name}")
-    elif node_update.ai_message is not None:
-        print(format_tool_call_preview(node_update.ai_message))
-
-    print()
-
-
 def _render_tool_result(node_update: NodeUpdate) -> None:
 
     label = f"tool:{node_update.tool_name}" if node_update.tool_name else "tool"
     context = f" [{node_update.active_step_id}]" if node_update.active_step_id else ""
-    print(f"\n{ANSI_CYAN}[{label}]{context}{ANSI_RESET}")
-    print(format_tool_result(node_update.tool_result))
-    print()
+    print(f"{ANSI_CYAN}[{label}]{context}{ANSI_RESET} {format_tool_result(node_update.tool_result)}")
+
+
+def _render_finalization(node_update: NodeUpdate) -> None:
+    result = node_update.finalization_result
+    runtime_status = result.execution_summary.status.value
+    status = current_live_status()
+    if status is not None:
+        outcome = f"Runtime {runtime_status}"
+        if result.final_answer_error:
+            outcome += "; answer unavailable"
+        status.set_outcome(outcome)
+    print(f"\n[runtime:{runtime_status}] Runtime {runtime_status}.")
+    if result.final_answer_error:
+        print("Final answer unavailable: rendering failed.")
+    elif runtime_status == "completed":
+        # Completion is a runtime fact, not evidence that the user's goal was met.
+        print("Request outcome is described in the final answer.")
+    print(f"{ANSI_LIGHT_BLUE}[finalizer]{ANSI_RESET}")
+    print(f"{ANSI_LIGHT_BLUE}{result.final_answer}{ANSI_RESET}\n")
 
 
 def _render_ai_text(node_update: NodeUpdate, *, label: str = "brain") -> None:

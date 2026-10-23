@@ -32,25 +32,25 @@ def test_plan_step_display_resets_invocations_and_preserves_turn_total():
         assert status.provider_invocations_by_worker == {}
         assert status.stage == "planner"
         assert status.begin_provider_invocation(worker="brain") == 1
-        assert status.detail == "plan step 1/3 · invocation 1"
+        assert status.detail == "plan step 1/3: discover · invocation 1"
         status.update("find_files", "Snake")
         status.set_brain_step_context(execution_id="execution", plan=accepted, step_id="discover")
         assert status.begin_provider_invocation(worker="brain") == 2
-        assert status.detail == "plan step 1/3 · invocation 2"
+        assert status.detail == "plan step 1/3: discover · invocation 2"
         status.set_brain_step_context(execution_id="execution", plan=accepted, step_id="inspect")
         assert status.begin_provider_invocation(worker="brain") == 3
-        assert status.detail == "plan step 2/3 · invocation 1"
+        assert status.detail == "plan step 2/3: inspect · invocation 1"
         assert status.provider_invocations_by_worker == {"brain": 3}
         status.set_brain_step_context(execution_id="execution", plan=accepted, step_id="discover")
         status.begin_provider_invocation(worker="brain")
-        assert status.detail == "plan step 1/3 · invocation 1"
+        assert status.detail == "plan step 1/3: discover · invocation 1"
         assert status.usage_by_worker == {}
     finally:
         status.stop()
     output = stream.getvalue()
-    assert "brain · plan step 1/3 · invocation 1" in output
-    assert "brain · plan step 1/3 · invocation 2" in output
-    assert "brain · plan step 2/3 · invocation 1" in output
+    assert "brain · plan step 1/3: discover · invocation 1" in output
+    assert "brain · plan step 1/3: discover · invocation 2" in output
+    assert "brain · plan step 2/3: inspect · invocation 1" in output
     assert "attempt" not in output
 
 
@@ -68,7 +68,7 @@ def test_new_execution_or_plan_scope_resets_display_counter(change):
     status.set_brain_step_context(execution_id="another-execution" if change == "execution" else "execution",
                                   plan=accepted, step_id="inspect")
     assert status.begin_provider_invocation(worker="brain") == 3
-    assert status.detail == "plan step 2/3 · invocation 1"
+    assert status.detail == "plan step 2/3: inspect · invocation 1"
 
 
 @pytest.mark.parametrize("unresolved", ["no_plan", "unknown_step", "duplicate_step", "empty_plan"])
@@ -104,7 +104,7 @@ def test_other_workers_do_not_reset_brain_invocations():
     status.begin_provider_invocation(worker="planner")
     assert (status.stage, status.detail) == ("planner", "")
     status.begin_provider_invocation(worker="brain")
-    assert (status.stage, status.detail) == ("brain", "plan step 2/3 · invocation 2")
+    assert (status.stage, status.detail) == ("brain", "plan step 2/3: inspect · invocation 2")
     assert status.provider_invocations_by_worker == {"brain": 2, "planner": 1}
 
 
@@ -138,10 +138,10 @@ def test_provider_counts_correction_calls_and_same_step_retries_without_behavior
     status.start("planner")
     try:
         outcomes = [provider.generate(value, ()) for value in contexts]
-        assert observed == [("brain", "plan step 1/3 · invocation 1"),
-                            ("brain", "plan step 1/3 · invocation 2"),
-                            ("brain", "plan step 1/3 · invocation 3"),
-                            ("brain", "plan step 2/3 · invocation 1")]
+        assert observed == [("brain", "plan step 1/3: discover · invocation 1"),
+                            ("brain", "plan step 1/3: discover · invocation 2"),
+                            ("brain", "plan step 1/3: discover · invocation 3"),
+                            ("brain", "plan step 2/3: inspect · invocation 1")]
         assert status.provider_invocations_by_worker == {"brain": 4}
         assert status.usage_by_worker["brain"]["calls"] == 4
     finally:
@@ -153,7 +153,7 @@ def test_provider_counts_correction_calls_and_same_step_retries_without_behavior
     assert [value.model_dump(mode="json") for value in contexts] == snapshots
 
 
-def test_tool_headers_include_existing_stable_step_context_without_arguments(capsys):
+def test_tool_execution_retains_only_one_result_line_without_arguments(capsys):
     render_node_update(NodeUpdate(
         from_node="brain", to_node="controller",
         brain_result=BrainOutcome(outcome=BrainOutcomeKind.TOOL_REQUESTED, step_id="step2",
@@ -165,7 +165,9 @@ def test_tool_headers_include_existing_stable_step_context_without_arguments(cap
                                data={"private": "hidden payload"}),
     ))
     output = capsys.readouterr().out
-    assert "[brain] [step2]" in output
-    assert "Calling find_files" in output
+    assert "[brain]" not in output
+    assert "Calling find_files" not in output
     assert "[tool:find_files] [step2]" in output
+    assert "OK — Found workspace files" in output
+    assert len(output.splitlines()) == 1
     assert "private-path" not in output and "hidden payload" not in output

@@ -1,5 +1,6 @@
 import io
 
+import pytest
 from langchain_core.messages import AIMessage
 
 from core.logging.live_status import LiveStatus, format_compact_tokens, format_token_count
@@ -8,10 +9,10 @@ from core.logging.renderer import (
     _update_live_status, render_node_update,
     render_usage_summary,
 )
-from core.protocol.enums import BrainOutcomeKind, PlannerOutcome
+from core.protocol.enums import BrainOutcomeKind, ExecutionStatus, PlannerOutcome
 from core.protocol.models import (
-    BrainOutcome, ExecutionPlan, ExecutionStep, PlannerResult, ToolRequest,
-    ToolResult,
+    BrainOutcome, ExecutionPlan, ExecutionStep, ExecutionSummary, FinalizationResult,
+    PlannerResult, ToolRequest, ToolResult,
 )
 
 
@@ -133,7 +134,7 @@ def test_normal_live_progress_maps_semantic_workers_and_replaces_stale_detail():
         status.stop()
 
 
-def test_brain_tool_call_is_printed_before_tool_stage_redraw(capsys):
+def test_brain_tool_call_only_updates_temporary_status(capsys):
     status = LiveStatus(refresh_interval=60, enabled=True)
     status.start("brain", "invocation 1")
     capsys.readouterr()
@@ -148,7 +149,10 @@ def test_brain_tool_call_is_printed_before_tool_stage_redraw(capsys):
             ),
         ))
         added = capsys.readouterr().out
-        assert added.index("[brain]") < added.rindex("list_files")
+        assert "[brain]" not in added
+        assert "Calling" not in added
+        assert "list_files" in added
+        assert "\n" not in added
         assert (status.stage, status.detail) == ("list_files", "")
     finally:
         status.stop()
@@ -214,7 +218,13 @@ def test_finalizer_output_precedes_finalizer_redraw(capsys):
     try:
         render_node_update(NodeUpdate(
             from_node="controller", to_node="controller",
-            finalization_result=object(), ai_message=AIMessage(content="Done."),
+            finalization_result=FinalizationResult(
+                execution_summary=ExecutionSummary(
+                    execution_id="test", status=ExecutionStatus.COMPLETED,
+                    summary_text="Completed.",
+                ),
+                final_answer="Done.",
+            ), ai_message=AIMessage(content="Done."),
         ))
         output = capsys.readouterr().out
         assert output.index("[finalizer]") < output.rindex("finalizer")
@@ -275,16 +285,92 @@ def test_stop_clears_status_and_stops_redraw():
     assert stream.getvalue() == stopped
 
 
-def test_renderer_semantics_are_unchanged_without_live_status(capsys):
+def test_clear_erases_once_without_adding_scrollback():
+    status, stream = status_stream()
+    status.start("brain")
+    try:
+        before = len(stream.getvalue())
+        status.clear()
+        status.clear()
+        assert stream.getvalue()[before:] == "\r\033[2K"
+    finally:
+        status.stop()
+
+
+def test_progress_snapshot_reads_existing_state_without_output_or_counter_changes(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("core.logging.live_status.time.perf_counter", lambda: clock[0])
+    stream = io.StringIO()
+    status = LiveStatus(stream=stream, enabled=False)
+    status.start("planner")
+    try:
+        status.set_brain_step_context(execution_id="snapshot", step_id="inspect",
+            plan=ExecutionPlan(plan_id="p", steps=(
+                ExecutionStep(step_id="inspect", title="Inspect runtime logs"),
+            )))
+        status.begin_provider_invocation(worker="brain")
+        snapshot = status.snapshot()
+        assert snapshot.invocation_count == 1
+        assert snapshot.step_label == "plan step 1/1: Inspect runtime logs"
+        status.update_tool("read_file", "runtime.log")
+        status.add_usage({"total_tokens": 36700}, worker="brain")
+        clock[0] = 118.4
+        snapshot = status.snapshot()
+        assert snapshot.stage == snapshot.active_tool == "read_file"
+        assert snapshot.step_label == "plan step 1/1: Inspect runtime logs"
+        assert snapshot.elapsed_seconds == pytest.approx(18.4)
+        assert snapshot.total_tokens == 36700
+        status.set_outcome("Runtime completed")
+        assert status.snapshot().outcome == "Runtime completed"
+        assert status.provider_invocations_by_worker == {"brain": 1}
+        assert status.usage_by_worker["brain"]["calls"] == 1
+        assert stream.getvalue() == ""
+    finally:
+        status.stop()
+    clock[0] = 500.0
+    assert status.snapshot().elapsed_seconds == pytest.approx(18.4)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_tool_status_keeps_step_title_across_request_and_dispatch(enabled):
+    stream = io.StringIO()
+    status = LiveStatus(stream=stream, enabled=enabled, refresh_interval=60)
+    status.start("planner")
+    try:
+        status.set_brain_step_context(
+            execution_id="test", step_id="read",
+            plan=ExecutionPlan(plan_id="p", steps=(
+                ExecutionStep(step_id="read", title="Read the page"),
+                ExecutionStep(step_id="answer", title="Answer the question"),
+            )),
+        )
+        _update_live_status(NodeUpdate(
+            from_node="brain", to_node="controller",
+            brain_result=BrainOutcome(
+                outcome=BrainOutcomeKind.TOOL_REQUESTED, step_id="read",
+                tool_request=ToolRequest(request_id="read-1", tool_name="read_file"),
+            ),
+        ), verbose=False)
+        assert (status.stage, status.detail) == ("read_file", "plan step 1/2: Read the page")
+        status.update_tool("read_file", "page.txt")
+        assert status.detail == "plan step 1/2: Read the page · page.txt"
+        if enabled:
+            assert "read_file · plan step 1/2: Read the page · page.txt" in stream.getvalue()
+        else:
+            assert stream.getvalue() == ""
+        assert status.provider_invocations_by_worker == {}
+    finally:
+        status.stop()
+
+
+def test_tool_request_does_not_leave_a_permanent_block_without_live_status(capsys):
     request = ToolRequest(request_id="r1", tool_name="read_file", arguments={"path": "README.md"})
     render_node_update(NodeUpdate(
         from_node="controller", to_node="brain",
         brain_result=BrainOutcome(outcome=BrainOutcomeKind.TOOL_REQUESTED, tool_request=request),
     ))
     output = capsys.readouterr().out
-    assert "[brain]" in output
-    assert "Calling read_file" in output
-    assert "\r\033[2K" not in output
+    assert output == ""
 
 
 def test_retryable_planner_failure_updates_status_without_permanent_block():

@@ -13,7 +13,7 @@ MAX_DEFAULT_TOOL_RESULT_CHARS = 500
 
 
 def _compact_tool_message(message: str) -> str:
-    text = message.strip()
+    text = " ".join(message.split())
     if len(text) <= MAX_DEFAULT_TOOL_RESULT_CHARS:
         return text
     return text[:MAX_DEFAULT_TOOL_RESULT_CHARS].rstrip() + "..."
@@ -77,23 +77,14 @@ def format_tool_call_preview(message: BaseMessage | None) -> str:
 
 
 def format_tool_result(tool_result: ToolResult | str | None) -> str:
-    """Return a human-readable tool result."""
+    """Return one bounded console line with an explicit result status."""
 
     if tool_result is None:
         return ""
 
-    if isinstance(tool_result, ToolResult):
-        message = _compact_tool_message(tool_result.message)
-        if message:
-            return message
-        return "Completed." if tool_result.success else "Failed."
-
-    parsed = parse_tool_output(tool_result)
-
-    if parsed is not None:
-        message = _compact_tool_message(parsed.message)
-        if message:
-            return message
-        return "Completed." if parsed.success else "Failed."
-
-    return "Completed."
+    parsed = tool_result if isinstance(tool_result, ToolResult) else parse_tool_output(tool_result)
+    if parsed is None:
+        return "UNKNOWN — Result status unavailable."
+    status = "OK" if parsed.success else "FAIL"
+    message = _compact_tool_message(parsed.message)
+    return f"{status} — {message or ('Completed.' if parsed.success else 'Failed.')}"

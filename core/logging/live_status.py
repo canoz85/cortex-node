@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, TextIO
 
 if TYPE_CHECKING:
@@ -54,6 +55,18 @@ def set_brain_step_context(*, execution_id: str, plan: ExecutionPlan | None, ste
         status.set_brain_step_context(execution_id=execution_id, plan=plan, step_id=step_id)
 
 
+@dataclass(frozen=True, slots=True)
+class LiveStatusSnapshot:
+    stage: str
+    detail: str
+    step_label: str
+    active_tool: str
+    elapsed_seconds: float
+    total_tokens: int
+    invocation_count: int
+    outcome: str
+
+
 class LiveStatus:
     _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -78,6 +91,9 @@ class LiveStatus:
         self._accounted_response_ids: set[int] = set()
         self._accounted_responses: list[object] = []
         self._started_at = 0.0
+        self._stopped_at = 0.0
+        self._active_tool = ""
+        self._outcome = ""
         self._frame = 0
         self._running = False
         self._visible = False
@@ -93,6 +109,9 @@ class LiveStatus:
                 return
             self.stage, self.detail = stage, detail
             self._started_at = time.perf_counter()
+            self._stopped_at = 0.0
+            self._active_tool = ""
+            self._outcome = ""
             self._running = True
             self._stop_event.clear()
             self._token = _CURRENT.set(self)
@@ -106,8 +125,35 @@ class LiveStatus:
     def update(self, stage: str, detail: str = "") -> None:
         with self._lock:
             self.stage, self.detail = str(stage), str(detail or "")
+            self._active_tool = ""
             if self._running and self.enabled:
                 self.redraw()
+
+    def update_tool(self, tool_name: str, detail: str = "") -> None:
+        """Keep accepted step context visible throughout a tool invocation."""
+        with self._lock:
+            detail = " · ".join(part for part in (self._brain_step_label, detail) if part)
+            self.update(tool_name, detail)
+            self._active_tool = tool_name
+
+    def set_outcome(self, outcome: str) -> None:
+        """Record a presentation-only outcome without interpreting final-answer text."""
+        with self._lock:
+            self._outcome = outcome
+
+    def snapshot(self) -> LiveStatusSnapshot:
+        """Read existing progress atomically; never print or increment counters."""
+        with self._lock:
+            end = time.perf_counter() if self._running else self._stopped_at
+            elapsed = max(0.0, end - self._started_at) if self._started_at else 0.0
+            invocation = (self._brain_step_invocations if self.stage == "brain"
+                          else self.provider_invocations_by_worker.get(self.stage, 0))
+            return LiveStatusSnapshot(
+                stage=self.stage, detail=self.detail, step_label=self._brain_step_label,
+                active_tool=self._active_tool, elapsed_seconds=elapsed,
+                total_tokens=self.total_tokens, invocation_count=invocation,
+                outcome=self._outcome,
+            )
 
     def set_brain_step_context(self, *, execution_id: str, plan: ExecutionPlan | None, step_id: str | None) -> None:
         """Reset display numbering on a new plan step, independently of retries."""
@@ -117,7 +163,8 @@ class LiveStatus:
         if plan is not None and step_id:
             positions = [index for index, step in enumerate(plan.steps, 1) if step.step_id == step_id]
             if len(positions) == 1:
-                label = f"plan step {positions[0]}/{len(plan.steps)}"
+                title = " ".join(plan.steps[positions[0] - 1].title.split())
+                label = f"plan step {positions[0]}/{len(plan.steps)}: {title}"
         with self._lock:
             if scope != self._brain_step_scope:
                 self._brain_step_scope = scope
@@ -201,8 +248,7 @@ class LiveStatus:
     def clear(self) -> None:
         with self._lock:
             if self._visible:
-                # self.stream.write("\r\033[2K")
-                self.stream.write("\n")
+                self.stream.write("\r\033[2K")
                 self.stream.flush()
                 self._visible = False
 
@@ -237,6 +283,7 @@ class LiveStatus:
             if not self._running:
                 return
             self._running = False
+            self._stopped_at = time.perf_counter()
             self._stop_event.set()
             self.clear()
         thread = self._thread

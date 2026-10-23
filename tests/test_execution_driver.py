@@ -195,6 +195,44 @@ class FinalizerWorker:
     def finalize(self, request):
         self.trace.invoked("finalizer", ControllerDecisionType.TERMINATE)
         return self.delegate.finalize(request)
+
+
+def test_tool_dispatch_preserves_plan_context_without_changing_execution():
+    from core.logging.live_status import LiveStatus
+
+    trace = AuthorizationTrace()
+    status = LiveStatus(enabled=False)
+    observations = []
+
+    class ObservedToolRuntime(ToolRuntime):
+        def execute(self, request):
+            observations.append((status.stage, status.detail))
+            return super().execute(request)
+
+    driver = ExecutionDriver(
+        coordinator=ControllerCoordinator(TracedController(CortexController(
+            max_reasoning_steps=10,
+            planning_capabilities=PlanningCapabilities(available_tools=("read_file",)),
+        ), trace)),
+        planner=Planner(trace), brain=Brain(trace),
+        tool_runtime=ObservedToolRuntime(trace), finalizer=FinalizerWorker(trace),
+    )
+    state, result = initial_state(), None
+    status.start("planner")
+    try:
+        for _ in range(6):
+            turn = driver.turn(state, controller_input(state, result))
+            state, result = turn.execution_state, turn.worker_result
+            if turn.decision.terminal:
+                break
+        assert turn.decision.terminal
+        assert observations == [("read_file", "plan step 1/1: Read target · target.txt")]
+        assert state.protocol_visible.status == ExecutionStatus.COMPLETED
+        assert status.provider_invocations_by_worker == {}
+    finally:
+        status.stop()
+
+
 def test_complete_non_graph_lifecycle_is_controller_authorized():
     trace = AuthorizationTrace()
     controller = TracedController(

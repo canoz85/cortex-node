@@ -216,13 +216,19 @@ class ExecutionDriver:
                 from core.logging.live_status import current_live_status
                 status = current_live_status()
                 if status is not None:
+                    active_step = execution_state.protocol_visible.active_step
+                    status.set_brain_step_context(
+                        execution_id=execution_state.protocol_visible.identity.execution_id,
+                        plan=plan,
+                        step_id=active_step.step_id if active_step is not None else None,
+                    )
                     detail = ""
                     for key in ("path", "file", "filename"):
                         value = request.arguments.get(key)
                         if isinstance(value, str) and value:
                             detail = value[:60]
                             break
-                    status.update(request.tool_name, detail)
+                    status.update_tool(request.tool_name, detail)
                 execute_authorized = getattr(
                     selected_tool_runtime, "execute_authorized", None
                 )

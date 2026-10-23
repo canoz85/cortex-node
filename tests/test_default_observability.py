@@ -1,3 +1,4 @@
+import pytest
 from langchain_core.messages import AIMessage
 
 from core.logging.node_update import extract_node_update
@@ -92,7 +93,7 @@ def render(value):
     render_node_update(update)
 
 
-def test_default_renders_accepted_plan_and_coalesced_brain_tool_call(capsys):
+def test_default_does_not_retain_redundant_plan_and_tool_request_blocks(capsys):
     accepted_plan = plan()
     request = ToolRequest(
         request_id="read-1",
@@ -124,15 +125,7 @@ def test_default_renders_accepted_plan_and_coalesced_brain_tool_call(capsys):
     })
 
     output = capsys.readouterr().out
-    assert "[planner]" in output
-    assert "1. Retrieve file list" in output
-    assert "tool: list_files" in output
-    assert "2. Explain the findings" in output
-    assert "tool: None" not in output
-    assert "[brain]" in output
-    assert "Calling read_file" in output
-    assert "private.py" not in output
-    assert "offset" not in output
+    assert output == ""
 
 
 def test_default_renders_direct_portable_tool_result_without_large_payload(capsys):
@@ -157,6 +150,8 @@ def test_default_renders_direct_portable_tool_result_without_large_payload(capsy
 
     output = capsys.readouterr().out
     assert "[tool:read_file]" in output
+    assert "OK — Read file:" in output
+    assert len(output.splitlines()) == 1
     assert "Read file: anomaly_detection.py" in output
     assert "PRIVATE FILE CONTENT" not in output
     assert "secret-path.txt" not in output
@@ -264,6 +259,74 @@ def test_default_preserves_finalizer_attribution(capsys):
     output = capsys.readouterr().out
     assert "[finalizer]" in output
     assert answer in output
+
+
+@pytest.mark.parametrize("success,message,expected", [
+    (True, "Fetched page\n\tOne question found", "OK — Fetched page One question found"),
+    (False, "Page unavailable\r\nTimeout", "FAIL — Page unavailable Timeout"),
+    (True, "", "OK — Completed."),
+    (False, "", "FAIL — Failed."),
+])
+def test_tool_result_is_one_explicit_status_line(capsys, success, message, expected):
+    result = ToolResult(request_id="call-1", success=success, message=message)
+    execution_state, request = state_with_result("read_file", result)
+    render({"execution_state": execution_state, "controller_decision": ControllerDecision(
+        decision_type=ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
+        next_worker=WorkerRole.TOOL_RUNTIME, pending_tool_request=request,
+    )})
+    output = capsys.readouterr().out
+    assert expected in output
+    assert "[tool:read_file] [list]" in output
+    assert len(output.splitlines()) == 1
+
+
+def test_tool_result_message_stays_bounded_and_payload_is_hidden(capsys):
+    result = ToolResult(request_id="long", success=False, message="x" * 1000,
+                        data={"private": "hidden payload"}, rendered_output="private stdout")
+    execution_state, request = state_with_result("read_file", result)
+    render({"execution_state": execution_state, "controller_decision": ControllerDecision(
+        decision_type=ControllerDecisionType.DISPATCH_TOOL_RUNTIME,
+        next_worker=WorkerRole.TOOL_RUNTIME, pending_tool_request=request,
+    )})
+    output = capsys.readouterr().out
+    assert "FAIL — " + "x" * 500 + "..." in output
+    assert "x" * 501 not in output
+    assert "hidden payload" not in output and "private stdout" not in output
+    assert len(output.splitlines()) == 1
+
+
+@pytest.mark.parametrize("status", [
+    ExecutionStatus.COMPLETED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED,
+])
+def test_terminal_console_reports_runtime_status_without_claiming_fulfillment(capsys, status):
+    answer = "Question 2 is absent from the page and could not be solved."
+    result = FinalizationResult(execution_summary=ExecutionSummary(
+        execution_id=IDENTITY.execution_id, status=status, summary_text="Terminal facts.",
+    ), final_answer=answer)
+    before = result.model_dump(mode="json")
+    # The authoritative answer must also render without a mirrored AIMessage.
+    render({"finalization_result": result})
+    output = capsys.readouterr().out
+    assert f"[runtime:{status.value}] Runtime {status.value}." in output
+    assert output.count(answer) == 1
+    if status == ExecutionStatus.COMPLETED:
+        assert "Request outcome is described in the final answer." in output
+    assert "SUCCESS" not in output and "DONE" not in output
+    assert result.model_dump(mode="json") == before
+
+
+def test_completed_runtime_with_final_answer_rendering_error_is_explicit(capsys):
+    result = FinalizationResult(execution_summary=ExecutionSummary(
+        execution_id=IDENTITY.execution_id, status=ExecutionStatus.COMPLETED,
+        summary_text="Completed.",
+    ), final_answer="Execution finished, but the final answer could not be rendered.",
+        final_answer_error="RuntimeError: private provider diagnostics")
+    render({"finalization_result": result})
+    output = capsys.readouterr().out
+    assert "[runtime:completed]" in output
+    assert "Final answer unavailable: rendering failed." in output
+    assert "private provider diagnostics" not in output
+    assert output.count(result.final_answer) == 1
 
 
 def test_controller_transitions_are_verbose_only_and_semantic(capsys):
