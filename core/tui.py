@@ -9,6 +9,8 @@ import logging
 from queue import Empty, SimpleQueue
 import sys
 import threading
+import time
+import math
 from typing import Callable
 
 from prompt_toolkit import Application
@@ -22,9 +24,12 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.widgets import Frame, TextArea
 from prompt_toolkit.utils import get_cwidth
+from prompt_toolkit.styles import DynamicStyle, Style
+from prompt_toolkit.layout import HSplit, VSplit, Layout, Window
 
 from core.logging.live_status import LiveStatus, format_token_count
 
+USE_SWEEP_BORDER = True
 
 class TerminalStream(io.TextIOBase):
     """Batch console lines for safe printing above the editor on the UI thread."""
@@ -81,7 +86,7 @@ class CortexTUI:
         self._closing = False
         self.editor = TextArea(
             multiline=True, height=Dimension.exact(5), wrap_lines=True,
-            history=InMemoryHistory(), name="prompt",
+            history=InMemoryHistory(), name="prompt", style="class:prompt-area",
         )
         bindings = KeyBindings()
 
@@ -110,18 +115,258 @@ class CortexTUI:
         def quit_shell(event):
             self.request_exit()
 
+        prompt_container = (
+            self._build_sweep_prompt()
+            if USE_SWEEP_BORDER
+            else self._build_pulse_prompt()
+        )
+
         self.app = Application(
             layout=Layout(HSplit([
-                Frame(self.editor, title="Prompt · Enter: newline · F2 / Alt-Enter: submit"),
+                prompt_container,
                 Window(FormattedTextControl(self.status_text), height=1),
             ]), focused_element=self.editor),
             key_bindings=bindings,
             editing_mode=EditingMode.VI if vim_mode else EditingMode.EMACS,
-            full_screen=False, mouse_support=False, refresh_interval=0.1,
+            full_screen=False, mouse_support=False, refresh_interval=0.05,
             erase_when_done=True, enable_page_navigation_bindings=False,
+            style=DynamicStyle(self.tui_style),
             input=input, output=output,
         )
         self.stream = TerminalStream()
+
+    def _border_color(self, position: int, perimeter: int) -> str:
+        if not self.running:
+            return "#4b5563"
+
+        head = int(time.monotonic() * 30) % perimeter
+        distance = (position - head) % perimeter
+
+        if distance <= 2:
+            return "#dbeafe"
+        if distance <= 5:
+            return "#bfdbfe"
+        if distance <= 9:
+            return "#93c5fd"
+        if distance <= 14:
+            return "#60a5fa"
+        if distance <= 20:
+            return "#3b82f6"
+        if distance <= 28:
+            return "#2563eb"
+
+        return "#4b5563"
+
+    def _border_geometry(self):
+        width = max(10, self.app.output.get_size().columns)
+        height = 5
+
+        title = " Prompt · Enter: newline · F2 / Alt-Enter: submit "
+        if len(title) > width - 4:
+            title = title[:width - 5] + "…"
+
+        title_start = max(1, (width - len(title)) // 2)
+        title_end = title_start + len(title)
+
+        top_left_len = title_start
+        top_right_len = width - title_end
+
+        top_len = top_left_len + top_right_len
+
+        right_start = top_len
+        bottom_start = right_start + height
+        left_start = bottom_start + width
+
+        perimeter = left_start + height
+
+        return {
+            "width": width,
+            "height": height,
+            "title": title,
+            "title_start": title_start,
+            "title_end": title_end,
+            "top_left_len": top_left_len,
+            "top_right_len": top_right_len,
+            "right_start": right_start,
+            "bottom_start": bottom_start,
+            "left_start": left_start,
+            "perimeter": perimeter,
+        }
+        
+    def _horizontal_border(self, top: bool):
+        g = self._border_geometry()
+
+        width = g["width"]
+        title = g["title"]
+        title_start = g["title_start"]
+        title_end = g["title_end"]
+        perimeter = g["perimeter"]
+
+        fragments = []
+
+        for x in range(width):
+            in_title = top and title_start <= x < title_end
+
+            if top:
+                if x < title_start:
+                    pos = x
+                elif x >= title_end:
+                    pos = title_start + (x - title_end)
+                else:
+                    pos = None
+            else:
+                pos = g["bottom_start"] + (width - 1 - x)
+
+            if in_title:
+                fragments.append(("fg:#9ca3af", title[x - title_start]))
+                continue
+
+            color = self._border_color(pos, perimeter)
+
+            is_bright = color in {
+                "#e0f2fe",
+                "#bae6fd",
+                "#7dd3fc",
+            }
+
+            if x == 0:
+                char = "╔" if is_bright else ("╭" if top else "╰")
+            elif x == width - 1:
+                char = "╗" if is_bright else ("╮" if top else "╯")
+            else:
+                char = "═" if is_bright else "─"
+
+            if is_bright:
+                style = f"fg:{color} bold"
+            else:
+                style = f"fg:{color}"
+
+            fragments.append((style, char))
+
+        return fragments
+
+    def _vertical_border_text(self, left: bool):
+        g = self._border_geometry()
+
+        fragments = []
+
+        for row in range(g["height"]):
+            if row > 0:
+                fragments.append(("", "\n"))
+
+            if left:
+                pos = g["left_start"] + (g["height"] - 1 - row)
+            else:
+                pos = g["right_start"] + row
+
+            color = self._border_color(pos, g["perimeter"])
+
+            is_bright = color in {
+                "#e0f2fe",
+                "#bae6fd",
+                "#7dd3fc",
+            }
+
+            char = "║" if is_bright else "│"
+
+            if is_bright:
+                style = f"fg:{color} bold"
+            else:
+                style = f"fg:{color}"
+
+            fragments.append((style, char))
+
+        return fragments
+    
+    def _build_sweep_prompt(self):
+        left_border = Window(
+            FormattedTextControl(
+                lambda: self._vertical_border_text(left=True)
+            ),
+            width=1,
+            height=Dimension.exact(5),
+        )
+
+        right_border = Window(
+            FormattedTextControl(
+                lambda: self._vertical_border_text(left=False)
+            ),
+            width=1,
+            height=Dimension.exact(5),
+        )
+
+        top_border = Window(
+            FormattedTextControl(
+                lambda: self._horizontal_border(top=True)
+            ),
+            height=1,
+        )
+
+        bottom_border = Window(
+            FormattedTextControl(
+                lambda: self._horizontal_border(top=False)
+            ),
+            height=1,
+        )
+
+        return HSplit([
+            top_border,
+            VSplit([
+                left_border,
+                self.editor,
+                right_border,
+            ]),
+            bottom_border,
+        ])
+
+    def _build_pulse_prompt(self):
+        return Frame(
+            self.editor,
+            title="Prompt · Enter: newline · F2 / Alt-Enter: submit",
+        )
+
+    def tui_style(self) -> Style:
+        if self.running:
+            # 0.0 -> 1.0 -> 0.0 şeklinde yumuşak pulse
+            pulse = (math.sin(time.monotonic() * 2.5) + 1.0) / 2.0
+
+            dark = (37, 99, 235)
+            light = (147, 197, 253)
+
+            r = int(dark[0] + (light[0] - dark[0]) * pulse)
+            g = int(dark[1] + (light[1] - dark[1]) * pulse)
+            b = int(dark[2] + (light[2] - dark[2]) * pulse)
+
+            frame_color = f"#{r:02x}{g:02x}{b:02x}"
+        else:
+            frame_color = "#6b7280"
+
+        return Style.from_dict({
+            "frame": f"fg:{frame_color}",
+            "prompt-area": "bg:#24272e fg:#e5e7eb",
+            "status-running": "fg:#22d3ee bold",
+            "status-idle": "fg:#6b7280",
+
+        })
+
+    def _format_status_fragments(self, parts: list[str]):
+        fragments = []
+
+        for index, part in enumerate(parts):
+            if index > 0:
+                fragments.append(("class:status-separator", " · "))
+
+            if index == 0:
+                style = (
+                    "class:status-running"
+                    if self.running
+                    else "class:status-idle"
+                )
+                fragments.append((style, part))
+            else:
+                fragments.append(("", part))
+
+        return fragments
 
     def status_text(self) -> str:
         mode = "Emacs"
@@ -164,7 +409,7 @@ class CortexTUI:
             while len(step) > 12 and get_cwidth(" · ".join(parts)) > width:
                 step = step[:-1]
                 parts[step_index] = step + "…"
-        return " · ".join(parts)
+        return self._format_status_fragments(parts)
 
     def _write_terminal(self, text: str) -> None:
         # Called only with the editor suspended (or after it has exited).
