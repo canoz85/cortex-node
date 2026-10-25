@@ -42,13 +42,19 @@ def test_eligible_read_file_normalizes_defaults_and_coercion_from_executable():
 def test_read_only_metadata_does_not_grant_batch_eligibility():
     assert get_tool_definition("git_status").mutating is False
     with pytest.raises(ValueError, match="tool_not_batch_eligible"):
-        policy.validate_read_only_batch([("git_status", {}), ("git_status", {})], {"git_status"})
+        policy.validate_tool_batch([("git_status", {}), ("git_status", {})], {"git_status"})
 
 
-def test_registry_mutating_metadata_vetoes_an_eligible_tool(monkeypatch):
+def test_registry_mutating_metadata_does_not_veto_explicit_batch_opt_in(monkeypatch):
     change_read_definition(monkeypatch, mutating=True)
+    assert policy.normalized_batch_arguments("read_file", {"path": "a"})["path"] == "a"
+
+
+def test_mutating_tool_requires_explicit_batch_opt_in():
+    definition = get_tool_definition("make_directory")
+    assert definition.mutating and definition.max_batch_calls == 1
     with pytest.raises(ValueError, match="tool_not_batch_eligible"):
-        policy.normalized_batch_arguments("read_file", {"path": "a"})
+        policy.normalized_batch_arguments("make_directory", {"path": "a"})
 
 
 def test_changed_authoritative_schema_is_shared_by_executable_policy_and_provider(monkeypatch):
@@ -145,7 +151,7 @@ def test_controller_capability_ceiling_is_independent_of_batch_policy(monkeypatc
     state = state.model_copy(update={"protocol_visible": state.protocol_visible.model_copy(
         update={"active_plan": plan},
     )})
-    monkeypatch.setattr(controller_module, "validate_read_only_batch", lambda *args, **kwargs: ())
+    monkeypatch.setattr(controller_module, "validate_tool_batch", lambda *args, **kwargs: ())
     decision = CortexController(24).decide(input_for(state, action))
     assert decision.decision_type == Decision.TERMINATE
     assert decision.pending_tool_request is None
@@ -153,7 +159,7 @@ def test_controller_capability_ceiling_is_independent_of_batch_policy(monkeypatc
 
 def test_controller_scope_validation_is_independent_of_batch_policy(monkeypatch):
     action = proposal().model_copy(update={"step_id": "another-step"})
-    monkeypatch.setattr(controller_module, "validate_read_only_batch", lambda *args, **kwargs: ())
+    monkeypatch.setattr(controller_module, "validate_tool_batch", lambda *args, **kwargs: ())
     with pytest.raises(ValueError, match="step does not match active step"):
         CortexController(24).decide(input_for(initial_state(), action))
 

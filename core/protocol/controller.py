@@ -53,7 +53,7 @@ from core.planner_validation import (
 )
 from core.planner_progress import build_planner_progress
 from core.planner_feedback import planner_retry_feedback
-from core.brain_batch_policy import validate_read_only_batch, normalized_batch_arguments
+from core.brain_batch_policy import validate_tool_batch, normalized_batch_arguments
 from tools.registry import get_tool_definition
 from core.tool_call_guard import (
     DUPLICATE_SUCCESSFUL_CALL, DuplicateSuccessfulCall, reject_duplicate_successful_calls,
@@ -859,7 +859,7 @@ class CortexController:
             return self._terminate(context.cursor, "tool_batch_has_pending_request")
         authorized = plan.available_tools or ()
         try:
-            validate_read_only_batch(
+            validate_tool_batch(
                 [(request.tool_name, request.arguments) for request in requests], authorized,
                 argument_schema_for=self._argument_schema_for,
             )

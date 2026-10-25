@@ -18,7 +18,7 @@ from test_brain_read_file_batch import native_batch
 from test_duplicate_successful_call import execute_once, input_for, setup
 
 
-PSEUDO = AIMessage(content='brain_step_completed{"message":"Used prior evidence."}')
+PSEUDO = AIMessage(content='brain_step_completed{"message":"Used prior evidence."} trailing prose')
 DONE = native_action("brain_step_completed", {"message": "Used prior evidence."})
 VALID = native_action("schema_probe", {"path": "repaired"})
 INVALID = native_action("schema_probe", {"path": 12})
@@ -145,7 +145,7 @@ def test_all_three_exchanges_are_raw_logged_and_counted_before_canonicalization(
 def test_second_correction_survives_real_native_binding_without_schema_changes():
     provider, requests = boundary([
         {"content": "No native action."},
-        {"content": 'brain_step_completed{"message":"Done"}'},
+        {"content": 'brain_step_completed{"message":"Done"} trailing prose'},
         native("brain_step_completed", {"message": "Done"}),
     ])
     outcome = provider.generate(git_brain_input(), ())

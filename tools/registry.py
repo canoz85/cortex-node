@@ -114,10 +114,11 @@ TOOL_DEFINITIONS = (
             pagination="offset/limit in characters; continue truncated content",
             use_when="Read a known workspace text file, continuing partial reads when needed.",
             avoid_when="The path still needs discovery or the target is not a text file.")),
-    ToolDefinition("write_file", "workspace", mutating=True, enabled_by_default=True, planning=CapabilitySemantics(
-        "Write workspace text", ("path and content: required",),
-        ("path, characters_written",),
-        ("Creates parents; replaces existing content by default", "Write receipt does not independently verify content"))),
+    ToolDefinition("write_file", "workspace", mutating=True, enabled_by_default=True, max_batch_calls=24,
+        planning=CapabilitySemantics(
+            "Write workspace text", ("path and content: required",),
+            ("path, characters_written",),
+            ("Creates parents; replaces existing content by default", "Write receipt does not independently verify content"))),
     ToolDefinition("apply_patch", "workspace", mutating=True, enabled_by_default=True,
         args_schema=ApplyPatchRequest, planning=CapabilitySemantics(
             "Apply a small exact text replacement to an existing workspace file", ("path, old_text, new_text: required",),

@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from conftest import get_tool, parse_result
 from core.brain import BrainService
-from core.brain_batch_policy import batch_call_limit, validate_read_only_batch
+from core.brain_batch_policy import batch_call_limit, validate_tool_batch
 from core.brain_provider import LangChainBrainProvider
 from core.error_codes import (FILE_FILE_NOT_FOUND, FILE_PATCH_FAILED, FILE_PATCH_MATCH_COUNT,
                               FILE_PATCH_NOT_TEXT, FILE_PATCH_TARGET_CHANGED)
@@ -246,7 +246,7 @@ def test_registry_metadata_schema_and_batch_policy(tmp_path):
     with pytest.raises(ValueError, match="tool_not_batch_eligible"):
         batch_call_limit("apply_patch")
     with pytest.raises(ValueError, match="tool_not_batch_eligible"):
-        validate_read_only_batch(
+        validate_tool_batch(
             [("apply_patch", {"path": "source.py", "old_text": "old", "new_text": "new"}),
              ("read_file", {"path": "source.py"})], registry.names)
 

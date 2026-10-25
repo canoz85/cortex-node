@@ -48,7 +48,7 @@ def native(name, args):
 ])
 @pytest.mark.parametrize("retry", [False, True])
 def test_native_actions_survive_real_ollama_boundary(name, args, kind, retry):
-    replies = ([{"content": 'brain_step_completed{"message":"Done"}'}]
+    replies = ([{"content": 'brain_step_completed{"message":"Done"} trailing prose'}]
                if retry else []) + [native(name, args)]
     provider, requests = boundary(replies)
     protocol = BRAIN_OUTPUT_PROTOCOL
@@ -86,8 +86,8 @@ def test_native_actions_survive_real_ollama_boundary(name, args, kind, retry):
         assert "same active-step decision" not in correction
 
 
-def test_exhausted_textual_pseudo_calls_are_typed_failure():
-    provider, requests = boundary([{"content": 'brain_step_completed{"message":"Done"}'}] * 3)
+def test_exhausted_textual_calls_with_prose_are_typed_failure():
+    provider, requests = boundary([{"content": 'brain_step_completed{"message":"Done"} trailing prose'}] * 3)
     outcome = provider.generate(git_brain_input(), ())
     assert outcome.kind == Kind.INVALID_OUTPUT
     assert outcome.error_code == "unexpected_response_content"

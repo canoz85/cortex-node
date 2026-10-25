@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from typing import Callable
 
 from pydantic import ValidationError
-from core.brain_batch_policy import validate_read_only_batch
+from core.brain_batch_policy import validate_tool_batch
 from core.tool_call_guard import (
     DUPLICATE_SUCCESSFUL_CALL, DuplicateSuccessfulCall, reject_duplicate_successful_calls,
 )
@@ -121,7 +121,7 @@ def _native_outcome(
                 if "id" in call and (not isinstance(call["id"], str) or not call["id"].strip()):
                     raise InvalidBrainOutput("invalid_tool_call_id")
                 candidates.append((name, arguments))
-            validate_read_only_batch(candidates, allowed_tools, argument_schema_for=argument_schema_for)
+            validate_tool_batch(candidates, allowed_tools, argument_schema_for=argument_schema_for)
         except ValueError as exc:
             raise InvalidBrainOutput("exactly_one_tool_call_required") from exc
         reject_duplicate_successful_calls(candidates, brain_input, argument_schema_for=argument_schema_for)
@@ -129,7 +129,7 @@ def _native_outcome(
             outcome=Kind.TOOL_REQUESTED, step_id=brain_input.active_step.step_id,
             tool_requests=tuple(_tool_request(name, arguments, brain_input, allowed_tools)
                                 for name, arguments in candidates),
-            message="Brain requested independent read-only tool execution.",
+            message="Brain requested independent tool execution.",
         )
     name, arguments = validate_native_call(calls[0], allowed_tools)
     if name in allowed_tools:

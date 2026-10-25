@@ -8,7 +8,7 @@ import pytest
 from pydantic import BaseModel
 
 import tools.registry as registry_module
-from core.brain_batch_policy import validate_read_only_batch, is_oversized_read_only_batch
+from core.brain_batch_policy import validate_tool_batch, is_oversized_tool_batch
 from core.brain_normalization import normalize_brain_output
 from core.brain_provider import LangChainBrainProvider, _is_permitted_native_batch
 from core.protocol.completion_identity import evidence_identity
@@ -64,11 +64,13 @@ def test_only_explicit_metadata_enables_batches():
     assert ToolDefinition("future", "workspace").max_batch_calls == 1
     assert {definition.name: definition.max_batch_calls
             for definition in registry_module.TOOL_DEFINITIONS if definition.max_batch_calls > 1} == {
-        "read_file": 24, "find_files": 24, "list_files": 24,
+        "read_file": 24, "find_files": 24, "list_files": 24, "write_file": 24,
         "web_fetch": 8, "rendered_web_fetch": 2,
     }
     assert all(definition.max_batch_calls == 1 for definition in registry_module.TOOL_DEFINITIONS
-               if definition.name not in {"read_file", "find_files", "list_files", "web_fetch", "rendered_web_fetch"})
+               if definition.name not in {"read_file", "find_files", "list_files", "write_file", "web_fetch", "rendered_web_fetch"})
+    assert {definition.name for definition in registry_module.TOOL_DEFINITIONS
+            if definition.mutating and definition.max_batch_calls > 1} == {"write_file"}
 
 
 @pytest.mark.parametrize("name,count", [
@@ -146,6 +148,9 @@ def test_changed_metadata_drives_guidance_correction_and_all_limits(monkeypatch,
     (("read_file", "find_files"), ("read_file", "find_files"), "read_file", ("find_files",)),
     (("list_files",), ("list_files",), None, ("list_files",)),
     (("search_text",), ("search_text",), None, ()),
+    (("write_file",), ("write_file",), None, ("write_file",)),
+    (("read_file",), ("read_file", "write_file"), None, ("read_file",)),
+    (("write_file",), ("write_file",), "write_file", ()),
 ])
 def test_guidance_only_advertises_authorized_bound_schema_valid_tools(executables, authorized, bound,
                                                                     missing_schema, expected):
@@ -164,7 +169,7 @@ def test_guidance_only_advertises_authorized_bound_schema_valid_tools(executable
     assert {tool.name for tool in model.bound_tools if hasattr(tool, "name")} == set(authorized) & set(bound)
 
 
-@pytest.mark.parametrize("invalid", ["unauthorized", "malformed", "duplicate", "mutating",
+@pytest.mark.parametrize("invalid", ["unauthorized", "malformed", "duplicate", "mutating_without_opt_in",
                                      "singleton_only", "schema_missing", "invalid_args"])
 def test_invalid_batches_fail_closed_at_all_boundaries(executables, monkeypatch, invalid):
     tools, schema_for = executables
@@ -177,9 +182,9 @@ def test_invalid_batches_fail_closed_at_all_boundaries(executables, monkeypatch,
     elif invalid == "duplicate":
         raw = group("find_files", arguments=[{"pattern": "*.py"},
                     {"path": ".", "pattern": "*.py", "recursive": True, "offset": "0", "limit": 100}])
-    elif invalid == "mutating":
+    elif invalid == "mutating_without_opt_in":
         monkeypatch.setattr(registry_module, "TOOL_DEFINITIONS", tuple(
-            replace(definition, max_batch_calls=24) if definition.name == "write_file" else definition
+            replace(definition, max_batch_calls=1) if definition.name == "write_file" else definition
             for definition in registry_module.TOOL_DEFINITIONS
         ))
         raw = group("write_file", arguments=[{"path": "a", "content": "x"}, {"path": "b", "content": "y"}])
@@ -217,14 +222,14 @@ def test_explicit_missing_schema_never_falls_back_to_read_file_declaration(execu
     assert decision.decision_type == Decision.TERMINATE
 
 
-@pytest.mark.parametrize("unusable", ["json_schema", "mutating"])
-def test_guidance_excludes_unsupported_schema_or_mutating_metadata(executables, monkeypatch, unusable):
+@pytest.mark.parametrize("unusable", ["json_schema", "singleton_only"])
+def test_guidance_excludes_unsupported_schema_or_missing_opt_in(executables, monkeypatch, unusable):
     tools, _ = executables
     if unusable == "json_schema":
         tools = [SimpleNamespace(name="read_file", args_schema={"type": "object"})]
     else:
         monkeypatch.setattr(registry_module, "TOOL_DEFINITIONS", tuple(
-            replace(definition, mutating=True) if definition.name == "read_file" else definition
+            replace(definition, max_batch_calls=1) if definition.name == "read_file" else definition
             for definition in registry_module.TOOL_DEFINITIONS
         ))
     model = SequenceModel(native_action("brain_step_failed", {"message": "Finished test"}))
@@ -247,7 +252,7 @@ def test_duplicate_detection_supports_pathless_tools(monkeypatch, duplicate):
     normalized = normalize_brain_output(raw, context, {"lookup"}, argument_schema_for=schema_for)
     if duplicate:
         with pytest.raises(ValueError, match="duplicate_effective"):
-            validate_read_only_batch([(call["name"], call["args"]) for call in raw.tool_calls], {"lookup"},
+            validate_tool_batch([(call["name"], call["args"]) for call in raw.tool_calls], {"lookup"},
                                      argument_schema_for=schema_for)
         assert normalized.kind == Kind.INVALID_OUTPUT
     else:
@@ -342,7 +347,7 @@ def test_find_files_schema_is_rechecked_on_resume_and_continuation(executables, 
 
 def test_singleton_only_tool_is_not_classified_as_size_only(executables):
     _, schema_for = executables
-    assert not is_oversized_read_only_batch([("search_text", {"query": "a"}), ("search_text", {"query": "b"})],
+    assert not is_oversized_tool_batch([("search_text", {"query": "a"}), ("search_text", {"query": "b"})],
                                            {"search_text"}, argument_schema_for=schema_for)
 
 
@@ -386,7 +391,7 @@ def test_list_files_batches_reject_invalid_groups_at_all_boundaries(executables,
     authorized = {tool.name: tool for tool in tools if tool.name in context.active_plan.available_tools}
     candidates = [(call["name"], call["args"]) for call in raw.tool_calls]
     with pytest.raises(ValueError):
-        validate_read_only_batch(candidates, authorized, argument_schema_for=schema_for)
+        validate_tool_batch(candidates, authorized, argument_schema_for=schema_for)
     assert not _is_permitted_native_batch(raw, authorized, argument_schema_for=schema_for)
     model = SequenceModel(raw, raw, raw)
     output = LangChainBrainProvider(brain_llm=model, executable_tools=tools).generate(context, ())

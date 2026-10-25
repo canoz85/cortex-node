@@ -12,7 +12,7 @@ MAX_BATCH_CALLS = 24
 
 def _batch_execution_metadata(name, argument_schema_for):
     definition = get_tool_definition(name)
-    if definition is None or definition.mutating or definition.max_batch_calls <= 1:
+    if definition is None or definition.max_batch_calls <= 1:
         raise ValueError("tool_not_batch_eligible")
     lookup = get_tool_argument_schema if argument_schema_for is None else argument_schema_for
     schema = lookup(name)
@@ -33,18 +33,19 @@ def normalized_batch_arguments(
     return schema.model_validate(arguments).model_dump(mode="json")
 
 
-def validate_read_only_batch(
+def validate_tool_batch(
     candidates, authorized_names, *, argument_schema_for: Callable[[str], type | None] | None = None,
 ):
     """Validate the entire ordered group; return default-normalized arguments.
 
-    Explicit metadata opts tools into independent synchronous execution.
+    max_batch_calls > 1 explicitly opts tools into independent synchronous execution,
+    regardless of whether they mutate state.
     Caller supplies the accepted execution's capability ceiling and schemas.
     Returned arguments are for validation, never replacements for requests.
     """
     if not isinstance(candidates, (list, tuple)) or len(candidates) < 2:
         raise ValueError("invalid_batch_size")
-    normalized = _normalized_read_only_batch_members(
+    normalized = _normalized_tool_batch_members(
         candidates, authorized_names, argument_schema_for=argument_schema_for,
     )
     if _exceeds_batch_limits(candidates, argument_schema_for=argument_schema_for):
@@ -52,7 +53,7 @@ def validate_read_only_batch(
     return normalized
 
 
-def is_oversized_read_only_batch(
+def is_oversized_tool_batch(
     candidates, authorized_names, *, argument_schema_for: Callable[[str], type | None] | None = None,
 ):
     """Correction classification only: size is the group's sole disqualifier.
@@ -63,7 +64,7 @@ def is_oversized_read_only_batch(
     if not isinstance(candidates, (list, tuple)) or len(candidates) < 2:
         return False
     try:
-        _normalized_read_only_batch_members(
+        _normalized_tool_batch_members(
             candidates, authorized_names, argument_schema_for=argument_schema_for,
         )
         return _exceeds_batch_limits(candidates, argument_schema_for=argument_schema_for)
@@ -78,7 +79,7 @@ def _exceeds_batch_limits(candidates, *, argument_schema_for):
     )
 
 
-def _normalized_read_only_batch_members(candidates, authorized_names, *, argument_schema_for):
+def _normalized_tool_batch_members(candidates, authorized_names, *, argument_schema_for):
     if any(not isinstance(name, str) or not isinstance(arguments, dict)
            for name, arguments in candidates):
         raise ValueError("malformed_batch_invocation")

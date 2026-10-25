@@ -16,7 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from core import error_codes as codes
-from core.brain_batch_policy import validate_read_only_batch
+from core.brain_batch_policy import validate_tool_batch
 from core.models import RenderedWebFetchRequest
 from core.tool_output import _normalize_transport_payload
 from tools import rendered_web_ops as ops
@@ -129,11 +129,11 @@ def test_registry_batch_and_integrity(tmp_path):
     card, = planning_capability_projection(("rendered_web_fetch",))
     assert "pagination" not in card and "JavaScript" in card["use_when"]
     calls = [("rendered_web_fetch", {"url": f"https://example.com/{i}"}) for i in range(3)]
-    validate_read_only_batch(calls[:2], {"rendered_web_fetch"})
+    validate_tool_batch(calls[:2], {"rendered_web_fetch"})
     with pytest.raises(ValueError, match="invalid_batch_size"):
-        validate_read_only_batch(calls, {"rendered_web_fetch"})
+        validate_tool_batch(calls, {"rendered_web_fetch"})
     with pytest.raises(ValueError, match="not_authorized"):
-        validate_read_only_batch(calls[:2], {"web_fetch"})
+        validate_tool_batch(calls[:2], {"web_fetch"})
     data = ops.result_data("https://example.com")
     data.update(text="Ω", returned_chars=1, total_chars=2, total_text_bytes=4, truncated=True, completion_reason="text_stable")
     result = _normalize_transport_payload(ops.envelope(data, None, time.monotonic()).to_tool_output(), tool_name="rendered_web_fetch")

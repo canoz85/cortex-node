@@ -23,7 +23,7 @@ READ_FILE_BATCH_LIMIT = get_tool_definition("read_file").max_batch_calls
 def expected_oversized_instruction(count):
     return (
         f"The previous response contained {count} calls in an otherwise valid "
-        "independent read-only batch, but a call limit was exceeded. "
+        "independent tool batch, but a call limit was exceeded. "
         f"Return one native action containing at most {READ_FILE_BATCH_LIMIT} of those useful calls. "
         f"Per-tool call limits: read_file: {READ_FILE_BATCH_LIMIT}. Do not add new calls. Leave content empty."
     )
@@ -79,14 +79,18 @@ def test_oversized_correction_output_is_revalidated_with_shared_budget(corrected
         assert outcome.tool_request is None
 
 
-@pytest.mark.parametrize("disqualifier", ["duplicate", "mutating", "ineligible", "lifecycle"])
+@pytest.mark.parametrize("disqualifier", ["duplicate", "mutating_without_opt_in", "ineligible", "lifecycle"])
 def test_oversized_group_with_another_disqualifier_keeps_choose_one_correction(disqualifier, monkeypatch):
     count = READ_FILE_BATCH_LIMIT + 1
     raw = native_batch(count)
     if disqualifier == "duplicate":
         # Duplicate appears beyond the maximum, after effective default normalization.
         raw.tool_calls[-1]["args"] = {"path": "file-0.txt", "offset": 0, "limit": 1}
-    elif disqualifier == "mutating":
+    elif disqualifier == "mutating_without_opt_in":
+        monkeypatch.setattr(registry_module, "TOOL_DEFINITIONS", tuple(
+            replace(definition, max_batch_calls=1) if definition.name == "write_file" else definition
+            for definition in registry_module.TOOL_DEFINITIONS
+        ))
         raw = native_batch(count, names=["write_file"] * count, args=[
             {"path": f"file-{i}", "content": "x"} for i in range(count)
         ])

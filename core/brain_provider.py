@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from copy import copy
 from functools import partial
 from typing import Callable
@@ -22,7 +23,7 @@ from core.debug import log_llm_exchange
 from core.logging.live_status import add_response_usage, begin_provider_invocation, set_brain_step_context
 from tools.registry import ToolRegistry, get_tool_argument_schema
 from core.brain_batch_policy import (
-    MAX_BATCH_CALLS, batch_call_limit, is_oversized_read_only_batch, validate_read_only_batch,
+    MAX_BATCH_CALLS, batch_call_limit, is_oversized_tool_batch, validate_tool_batch,
 )
 
 
@@ -37,7 +38,7 @@ def _native_argument_feedback(raw, authorized_tools, *, argument_schema_for):
     """Diagnose executable arguments only, without creating runtime requests.
 
     Malformed/unauthorized calls and invalid lifecycle actions retain their
-    existing strict normalization path. Never recover text or invalid_tool_calls.
+    existing strict normalization path. Never recover invalid_tool_calls.
     """
     calls = getattr(raw, "tool_calls", None)
     if (not isinstance(calls, (list, tuple)) or not calls
@@ -154,7 +155,7 @@ def _ensure_native_call(
             )
             instruction = (
                 f"The previous response contained {len(calls)} calls in an otherwise valid "
-                "independent read-only batch, but a call limit was exceeded. "
+                "independent tool batch, but a call limit was exceeded. "
                 f"Return one native action containing at most {MAX_BATCH_CALLS} of those useful calls. "
                 f"Per-tool call limits: {limits}. Do not add new calls. Leave content empty."
             )
@@ -222,7 +223,7 @@ def _is_permitted_native_batch(
             get_tool_argument_schema, registry=ToolRegistry.from_tools(authorized_tools.values()),
         )
     try:
-        validate_read_only_batch(
+        validate_tool_batch(
             [(call["name"], call["args"]) for call in raw.tool_calls], authorized_tools,
             argument_schema_for=argument_schema_for,
         )
@@ -241,7 +242,7 @@ def _is_oversized_native_batch(
         argument_schema_for = partial(
             get_tool_argument_schema, registry=ToolRegistry.from_tools(authorized_tools.values()),
         )
-    return is_oversized_read_only_batch(
+    return is_oversized_tool_batch(
         [(call["name"], call["args"]) for call in raw.tool_calls], authorized_tools,
         argument_schema_for=argument_schema_for,
     )
@@ -278,12 +279,55 @@ def _are_valid_native_calls(
     return True
 
 
-def _canonical_brain_response(raw, authorized_tools: dict[str, object]):
-    """Discard incidental text beside valid native candidates; preserve the raw log.
+def _recover_textual_call(raw, authorized_tools: dict[str, object]):
+    """Adapt one exact textual bound action; leave validation to the native path."""
+    content = getattr(raw, "content", None)
+    if (getattr(raw, "tool_calls", None) or getattr(raw, "invalid_tool_calls", None)
+            or not isinstance(content, str) or not content):
+        return raw
+    match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*(\{.*\})", content, re.DOTALL)
+    if match is None:
+        return raw
+    name, encoded = match.groups()
+    bound_names = set(authorized_tools) | {
+        schema["function"]["name"] for schema in LIFECYCLE_ACTION_SCHEMAS
+    }
+    if name not in bound_names:
+        return raw
 
-    This validates candidates, not batch eligibility. Classification still checks
-    the complete group against the existing execution safety policy.
+    def reject_constant(value):
+        raise ValueError("Non-JSON constant")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate JSON key")
+            result[key] = value
+        return result
+
+    try:
+        arguments = json.loads(encoded, parse_constant=reject_constant, object_pairs_hook=unique_object)
+        # Reject overflow to non-finite floats as well as NaN/Infinity tokens.
+        json.dumps(arguments, allow_nan=False)
+    except (ValueError, TypeError, RecursionError):
+        return raw
+    canonical = copy(raw)
+    canonical.content = ""
+    canonical.tool_calls = [{"name": name, "args": arguments,
+                             "id": "textual-recovery", "type": "tool_call"}]
+    logger.debug("Brain textual-call recovery: recovered_from_text=True tool_call_name=%s", name)
+    return canonical
+
+
+def _canonical_brain_response(raw, authorized_tools: dict[str, object]):
+    """Adapt strict textual actions or discard incidental text beside native calls.
+
+    Preserve the raw log. Candidates still pass the existing argument validation,
+    normalization, and execution safety policy.
     """
+    if not getattr(raw, "tool_calls", None):
+        return _recover_textual_call(raw, authorized_tools)
     calls = getattr(raw, "tool_calls", None)
     if (
         not getattr(raw, "content", None)

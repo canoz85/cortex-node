@@ -7,7 +7,7 @@ import pytest
 from pydantic import BaseModel
 
 import tools.registry as registry_module
-from core.brain_batch_policy import is_oversized_read_only_batch, validate_read_only_batch
+from core.brain_batch_policy import is_oversized_tool_batch, validate_tool_batch
 from core.brain_normalization import normalize_brain_output
 from core.brain_provider import LangChainBrainProvider, _is_permitted_native_batch
 from core.protocol.completion_identity import evidence_identity
@@ -33,10 +33,10 @@ def assert_boundaries(raw, tools, schema_for, *, accepted, context=None):
     authorized = {tool.name: tool for tool in tools if tool.name in context.active_plan.available_tools}
     candidates = [(call["name"], call["args"]) for call in raw.tool_calls]
     if accepted:
-        validate_read_only_batch(candidates, authorized, argument_schema_for=schema_for)
+        validate_tool_batch(candidates, authorized, argument_schema_for=schema_for)
     else:
         with pytest.raises(ValueError):
-            validate_read_only_batch(candidates, authorized, argument_schema_for=schema_for)
+            validate_tool_batch(candidates, authorized, argument_schema_for=schema_for)
     assert _is_permitted_native_batch(raw, authorized, argument_schema_for=schema_for) is accepted
     model = SequenceModel(raw, raw, raw)
     output = LangChainBrainProvider(brain_llm=model, executable_tools=tools).generate(context, ())
@@ -80,7 +80,7 @@ def test_snake_example_preserves_exact_arguments_and_order(executables):
 
 
 @pytest.mark.parametrize("invalid", [
-    "unauthorized_first", "unauthorized_last", "singleton_only", "mutating", "unregistered",
+    "unauthorized_first", "unauthorized_last", "singleton_only", "mutating_without_opt_in", "unregistered",
     "schema_missing", "invalid_args", "malformed", "duplicate",
     "brain_step_completed", "brain_step_failed", "brain_replan_requested",
 ])
@@ -92,9 +92,9 @@ def test_one_invalid_member_rejects_entire_mixed_group(executables, monkeypatch,
         context = context_for(("read_file",) if invalid.endswith("first") else ("list_files",))
     elif invalid == "singleton_only":
         raw.tool_calls[1].update(name="search_text", args={"query": "Snake"})
-    elif invalid == "mutating":
+    elif invalid == "mutating_without_opt_in":
         monkeypatch.setattr(registry_module, "TOOL_DEFINITIONS", tuple(
-            replace(definition, max_batch_calls=24) if definition.name == "write_file" else definition
+            replace(definition, max_batch_calls=1) if definition.name == "write_file" else definition
             for definition in registry_module.TOOL_DEFINITIONS
         ))
         raw.tool_calls[1].update(name="write_file", args={"path": "a", "content": "x"})
@@ -172,7 +172,7 @@ def test_mixed_size_only_correction_retains_limits_selection_and_one_retry(execu
         names = ("list_files",) + ("read_file",) * 24
     raw = mixed_group(names)
     candidates = [(call["name"], call["args"]) for call in raw.tool_calls]
-    assert is_oversized_read_only_batch(candidates, context_for().active_plan.available_tools,
+    assert is_oversized_tool_batch(candidates, context_for().active_plan.available_tools,
                                        argument_schema_for=schema_for)
     corrected = raw.model_copy(update={"tool_calls": raw.tool_calls[:-2] + raw.tool_calls[-1:]})
     model = SequenceModel(raw, corrected)

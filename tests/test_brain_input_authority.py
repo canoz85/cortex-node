@@ -76,6 +76,43 @@ def test_execution_request_is_context_and_only_current_step_is_instruction():
     assert context.active_plan.steps[1].description not in rendered
 
 
+@pytest.mark.parametrize("prior_success", [False, True])
+def test_action_selection_instructions_reach_brain_with_or_without_successful_evidence(prior_success):
+    """Check the delivered prompt contract, not a scripted model's judgment."""
+    service, model, context = setup()
+    step = context.active_plan.steps[1]
+    history = (ToolExecutionRecord(
+        step_id=step.step_id, tool_name="list_files", arguments={"path": "."},
+        result=ToolResult(request_id="observed", success=True, message="Listed",
+                          data={"entries": ["unrelated.txt"]}),
+    ),) if prior_success else ()
+    context = context.model_copy(update={
+        "active_step": step, "cursor": context.cursor.model_copy(update={"step_id": step.step_id}),
+        "tool_execution_history": history,
+    })
+    model.reply = AIMessage(content="", tool_calls=[{
+        "name": "read_file", "args": {"path": "c.py"}, "id": "next-action",
+    }])
+    outcome = service.run(context)
+    assert outcome.kind == BrainOutcomeKind.TOOL_REQUESTED
+    assert len(model.calls) == 1
+    policy = model.calls[0][0].content
+    assert "Prefer direct execution using the primary capability when the step provides sufficient execution intent" in policy
+    assert "no unresolved uncertainty, safety concern, missing prerequisite or observed failure blocks execution" in policy
+    assert "Do not replace or delay that action with unrelated preparation." in policy
+    assert "Use observation or discovery only to materially reduce uncertainty, establish a required prerequisite, perform verification required by the step, or investigate an observed failure or blocker." in policy
+    assert "Tool availability alone is not a reason to observe." in policy
+    assert "primary_tool is a hint, not an allowlist." in policy
+    assert "Tool success proves only that the tool call succeeded, not that the active step succeeded." in policy
+    assert "Call brain_step_completed only when accumulated evidence materially supports that the active step's requested result or effect has actually been achieved." in policy
+    assert "Successful but irrelevant tool calls do not support completion." in policy
+    brief = json.loads(model.calls[0][-1].content.split("\n", 1)[1])
+    assert brief["primary_tool"] == step.primary_tool
+    if prior_success:
+        evidence = next(m.content for m in model.calls[0] if m.content.startswith("Execution evidence v1:"))
+        assert json.loads(evidence.split("\n", 1)[1])["current_attempts"][0]["success"] is True
+
+
 def test_execution_context_renders_clarification_separately_from_root_request():
     service, model, context = setup()
     context = context.model_copy(update={
@@ -219,7 +256,7 @@ def test_successful_read_is_grounded_before_brain_can_repeat_the_same_call():
             "evidence": {"path": ".cortex_session.json", "content": "session evidence"},
             "record_index": 0,
         }
-        assert "Call brain_step_completed only when the available evidence fully satisfies the active step." in rendered
+        assert "Call brain_step_completed only when accumulated evidence materially supports that the active step's requested result or effect has actually been achieved." in rendered
         assert "Do not repeat an identical successful call" in rendered
         return AIMessage(content="", tool_calls=[{
             "name": "brain_step_completed",
