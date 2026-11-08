@@ -227,6 +227,8 @@ def _render_finalization(node_update: NodeUpdate) -> None:
         if result.final_answer_error:
             outcome += "; answer unavailable"
         status.set_outcome(outcome)
+        if not result.final_answer_error:
+            status.record_final_answer(result.final_answer)
     print(f"\n[runtime:{runtime_status}] Runtime {runtime_status}.")
     if result.final_answer_error:
         print("Final answer unavailable: rendering failed.")

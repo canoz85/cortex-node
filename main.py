@@ -435,7 +435,28 @@ def save_session(
         )
 
 
-def run_interactive_tui(complete_turn, settings: dict) -> bool:
+def tui_session_status(settings: dict, session: ApplicationSession | None) -> list[tuple[str, object]]:
+    """Allowlisted display metadata only; never serialize configuration or history."""
+    rows = [('Provider', 'Ollama')]
+    for label, key in (('Brain / Finalizer model', 'model'),
+                       ('Planner / router model', 'model_planner'),
+                       ('Embedding model', 'embedding_model')):
+        if settings.get(key):
+            rows.append((label, settings[key]))
+    if settings.get('memory_llm_enabled'):
+        rows.append(('Memory model', settings.get('model_planner', 'Unavailable')))
+    if settings.get('session_file'):
+        rows.append(('Session file', settings['session_file']))
+    if session is not None:
+        rows.extend([
+            ('Session completed turns', session.completed_turn_count),
+            ('Retained conversation messages', len(session.recent_conversation)),
+            ('Memory enrichment', session.last_enrichment_status),
+        ])
+    return rows
+
+
+def run_interactive_tui(complete_turn, settings: dict, *, session_provider=None) -> bool:
     """Select the optional shell only for an interactive terminal."""
     if (not settings.get("tui", True)
             or os.getenv("TERM") == "dumb"
@@ -447,7 +468,12 @@ def run_interactive_tui(complete_turn, settings: dict) -> bool:
     except ImportError:
         render_system_message("Terminal UI unavailable; using plain console. Install prompt_toolkit to enable it.")
         return False
-    CortexTUI(complete_turn, vim_mode=bool(settings.get("vim_mode", False))).run()
+    CortexTUI(
+        complete_turn, vim_mode=bool(settings.get("vim_mode", False)),
+        status_provider=lambda: tui_session_status(
+            settings, session_provider() if session_provider is not None else None,
+        ),
+    ).run()
     return True
 
 
@@ -680,7 +706,7 @@ def main():
             complete_turn(args.prompt)
             return
 
-        if run_interactive_tui(complete_turn, settings):
+        if run_interactive_tui(complete_turn, settings, session_provider=lambda: session):
             return
 
         print("Interactive mode: type 'exit' to quit.")

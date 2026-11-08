@@ -94,6 +94,7 @@ class LiveStatus:
         self._stopped_at = 0.0
         self._active_tool = ""
         self._outcome = ""
+        self._final_answer: str | None = None
         self._frame = 0
         self._running = False
         self._visible = False
@@ -140,6 +141,22 @@ class LiveStatus:
         """Record a presentation-only outcome without interpreting final-answer text."""
         with self._lock:
             self._outcome = outcome
+
+    def record_final_answer(self, answer: str) -> None:
+        """Retain undecorated, successfully rendered Finalizer text for the UI."""
+        with self._lock:
+            self._final_answer = answer
+
+    def command_snapshot(self) -> dict:
+        """Read existing turn-local metrics and answer without mutating state."""
+        with self._lock:
+            return {
+                'stage': self.stage,
+                'total_tokens': self.total_tokens,
+                'usage': {worker: dict(usage) for worker, usage in self.usage_by_worker.items()},
+                'invocations': dict(self.provider_invocations_by_worker),
+                'final_answer': self._final_answer,
+            }
 
     def snapshot(self) -> LiveStatusSnapshot:
         """Read existing progress atomically; never print or increment counters."""

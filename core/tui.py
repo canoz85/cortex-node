@@ -21,6 +21,7 @@ from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.containers import VerticalAlign
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.widgets import Frame, TextArea
 from prompt_toolkit.utils import get_cwidth
@@ -28,14 +29,38 @@ from prompt_toolkit.styles import DynamicStyle, Style
 from prompt_toolkit.layout import HSplit, VSplit, Layout, Window
 
 from core.logging.live_status import LiveStatus, format_token_count
+from core.terminal_style import TerminalStyle
+from core.tui_commands import LocalCommands
 
 USE_SWEEP_BORDER = True
+
+class _TUIApplication(Application):
+    _observed_size = None
+    _resize_at = 0.0
+
+    def _on_resize(self) -> None:
+        # Defer erasure to before_render, where the old screen is still available
+        # to account for host reflow. The default handler erases it too early.
+        self.invalidate()
+
+    def _redraw(self, render_as_done: bool = False) -> None:
+        if not render_as_done and self.is_running and not self._running_in_terminal:
+            size = self.output.get_size()
+            if self._observed_size is not None and size != self._observed_size:
+                self._resize_at = time.monotonic()
+            self._observed_size = size
+            # The existing refresh timer retries. Avoid painting intermediate
+            # widths while the host is still reflowing a resize drag.
+            if time.monotonic() - self._resize_at < 0.15:
+                return
+        super()._redraw(render_as_done=render_as_done)
+
 
 class TerminalStream(io.TextIOBase):
     """Batch console lines for safe printing above the editor on the UI thread."""
 
     def __init__(self):
-        self.pending: SimpleQueue[str] = SimpleQueue()
+        self.pending: SimpleQueue[str | Callable[[], None]] = SimpleQueue()
         self._buffer = ""
         self._lock = threading.RLock()
 
@@ -60,21 +85,30 @@ class TerminalStream(io.TextIOBase):
                 self.pending.put(self._buffer)
                 self._buffer = ""
 
-    def take(self) -> str:
+    def enqueue_action(self, action: Callable[[], None]) -> None:
+        # Keep partial output before the action, and later writes after it.
+        with self._lock:
+            self.flush()
+            self.pending.put(action)
+
+    def take(self) -> list[str | Callable[[], None]]:
         chunks = []
         while True:
             try:
                 chunks.append(self.pending.get_nowait())
             except Empty:
-                return "".join(chunks)
+                return chunks
 
 
 class CortexTUI:
     """Normal terminal scrollback with a multiline editor and live status row."""
 
     def __init__(self, complete_turn: Callable[[str, LiveStatus], str], *,
-                 vim_mode: bool = False, input=None, output=None):
+                 vim_mode: bool = False, input=None, output=None, status_provider=None):
         self.complete_turn = complete_turn
+        self.status_provider = status_provider
+        self.latest_final_answer: str | None = None
+        self._local_tasks: set[asyncio.Task] = set()
         self.running = False
         self.exit_when_idle = False
         self.last_outcome = "Ready"
@@ -84,6 +118,7 @@ class CortexTUI:
         self._printer_running = False
         self._printing = False
         self._closing = False
+        self._render_size = None
         self.editor = TextArea(
             multiline=True, height=Dimension.exact(5), wrap_lines=True,
             history=InMemoryHistory(), name="prompt", style="class:prompt-area",
@@ -121,19 +156,63 @@ class CortexTUI:
             else self._build_pulse_prompt()
         )
 
-        self.app = Application(
+        self.app = _TUIApplication(
             layout=Layout(HSplit([
                 prompt_container,
                 Window(FormattedTextControl(self.status_text), height=1),
-            ]), focused_element=self.editor),
+            ], align=VerticalAlign.BOTTOM), focused_element=self.editor),
             key_bindings=bindings,
             editing_mode=EditingMode.VI if vim_mode else EditingMode.EMACS,
             full_screen=False, mouse_support=False, refresh_interval=0.05,
             erase_when_done=True, enable_page_navigation_bindings=False,
             style=DynamicStyle(self.tui_style),
+            before_render=self._prepare_render,
             input=input, output=output,
         )
         self.stream = TerminalStream()
+        self.command_style = TerminalStyle(self.app.output)
+        self.commands = LocalCommands(self)
+
+    def start_local_task(self, coroutine) -> None:
+        task = asyncio.create_task(coroutine)
+        self._local_tasks.add(task)
+        task.add_done_callback(self._local_tasks.discard)
+
+    def _prepare_render(self, app: Application) -> None:
+        size = app.output.get_size()
+        previous_size = self._render_size
+        self._render_size = size
+        if (previous_size is not None and size != previous_size
+                and app.renderer.last_rendered_screen is not None):
+            self._rewind_reflowed_rows(app, previous_size, size)
+            # Refresh can beat Application's resize polling (notably on Windows).
+            # Reset at the old prompt origin before rendering the new dimensions,
+            # using the same erase/request sequence as Application's resize path.
+            # erase() clears only from that origin down, preserving scrollback.
+            app.renderer.erase(leave_alternate_screen=False)
+            if not app.is_done and not app.key_processor.input_queue:
+                app.renderer.request_absolute_cursor_position()
+
+    def _rewind_reflowed_rows(self, app, previous_size, size) -> None:
+        # Windows/ConPTY reflows even hard-ended console rows on width shrink.
+        # Its physical width includes the right-margin column that PTK reserves.
+        get_info = getattr(app.output, "get_win32_screen_buffer_info", None)
+        if size.columns >= previous_size.columns or get_info is None:
+            return
+        width = max(1, get_info().dwSize.X)
+        screen = app.renderer.last_rendered_screen
+        cursor = screen.get_cursor_position(self.editor.window)
+        # Match PTK's painted width: layout-only styles (e.g. last-line on
+        # bottom-alignment padding) do not paint or reflow trailing spaces.
+        has_style = app.renderer._style_string_has_style
+        extra_rows = cursor.x // width
+        for y in range(cursor.y):
+            used = max((x + max(1, cell.width)
+                        for x, cell in screen.data_buffer[y].items()
+                        if cell.char != " " or has_style[cell.style]), default=0)
+            extra_rows += max(0, (used - 1) // width)
+        # Only compensate for rows inside our previous prompt, never history.
+        app.output.cursor_up(extra_rows)
 
     def _border_color(self, position: int, perimeter: int) -> str:
         if not self.running:
@@ -158,12 +237,13 @@ class CortexTUI:
         return "#4b5563"
 
     def _border_geometry(self):
-        width = max(10, self.app.output.get_size().columns)
+        width = max(1, self.app.output.get_size().columns)
         height = 5
 
         title = " Prompt · Enter: newline · F2 / Alt-Enter: submit "
-        if len(title) > width - 4:
-            title = title[:width - 5] + "…"
+        title_width = max(0, width - 4)
+        if len(title) > title_width:
+            title = title[:title_width - 1] + "…" if title_width else ""
 
         title_start = max(1, (width - len(title)) // 2)
         title_end = title_start + len(title)
@@ -416,15 +496,35 @@ class CortexTUI:
         # Preserve renderer ANSI/text and raw-console diagnostics verbatim.
         self.app.output.enable_autowrap()
         self.app.output.write_raw(text)
+        # run_in_terminal resumes with a column-zero renderer origin. A flushed
+        # partial line must not leave the next frame starting partway across it.
+        if text and not text.endswith("\n"):
+            self.app.output.write_raw("\r\n")
         self.app.output.flush()
 
     async def _print_output(self) -> None:
         while self._printer_running or not self.stream.pending.empty():
-            text = self.stream.take()
-            if text:
+            chunks = self.stream.take()
+            if chunks:
                 self._printing = True
                 try:
-                    await run_in_terminal(lambda: self._write_terminal(text))
+                    # run_in_terminal also erases the old frame. Account for a
+                    # resize before it does so, including during a resize drag.
+                    self._prepare_render(self.app)
+                    def print_chunks(chunks=chunks):
+                        text = []
+                        for chunk in chunks:
+                            if isinstance(chunk, str):
+                                text.append(chunk)
+                            else:
+                                if text:
+                                    self._write_terminal(''.join(text))
+                                    text.clear()
+                                chunk()
+                        if text:
+                            self._write_terminal(''.join(text))
+
+                    await run_in_terminal(print_chunks)
                 finally:
                     self._printing = False
             else:
@@ -442,6 +542,10 @@ class CortexTUI:
     def submit(self) -> bool:
         """Submit exactly one multiline draft; drafts remain editable while busy."""
         prompt = self.editor.text
+        if prompt.lstrip().startswith('/') and not self._closing:
+            self.commands.dispatch(prompt)
+            self.editor.buffer.reset()
+            return True
         if self.running or not prompt.strip() or self.exit_when_idle:
             return False
         if prompt.strip().lower() in {"exit", "quit"}:
@@ -464,6 +568,9 @@ class CortexTUI:
         else:
             self.last_outcome = status.snapshot().outcome or "Turn ended"
         finally:
+            answer = status.command_snapshot()['final_answer']
+            if answer is not None:
+                self.latest_final_answer = answer
             self.running = False
             self.app.invalidate()
             if self.exit_when_idle and self.app.is_running:
@@ -478,6 +585,8 @@ class CortexTUI:
             self.app.create_background_task(self._finish_exit())
 
     async def _finish_exit(self) -> None:
+        if self._local_tasks:
+            await asyncio.gather(*self._local_tasks)
         await self.flush_output()
         self.app.exit()
 
@@ -512,6 +621,8 @@ class CortexTUI:
                 # Never abandon a synchronous turn because terminal input closed.
                 if self.worker is not None:
                     await asyncio.shield(self.worker)
+                if self._local_tasks:
+                    await asyncio.gather(*self._local_tasks)
                 self.stream.flush()
                 self._printer_running = False
                 if self._printer is not None:
