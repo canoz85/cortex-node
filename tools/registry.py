@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Iterable, Literal
 
-from core.models import ApplyPatchRequest, CurrentTimeRequest, ReadFileRequest, SourceUrlRequest, WebFetchRequest, RenderedWebFetchRequest
+from core.models import ApplyPatchRequest, CurrentTimeRequest, NexFolioMEventsRequest, ReadFileRequest, SourceUrlRequest, WebFetchRequest, RenderedWebFetchRequest
+from tools.sql_ops import SqlQueryRequest
 
 
 @dataclass(frozen=True)
@@ -268,6 +269,23 @@ TOOL_DEFINITIONS = (
         ("May be queued/running; absent history is not success", "Does not download outputs"), async_kind="poll",
         use_when="Inspect a submitted Comfy job using a known prompt ID and discover its outputs.",
         avoid_when="No job identity exists or the output image itself must be downloaded.")),
+    ToolDefinition("get_nexfoliom_events", "general", enabled_by_default=True,
+        args_schema=NexFolioMEventsRequest,
+        exact_collection_outputs=(ExactCollectionOutput(("data", "rows")),), planning=CapabilitySemantics(
+        "Retrieve normalized financial event rows from the local NexFolioM API",
+        ("optional positive accountId, from, to filters",),
+        ("data.rows: event rows; data.truncated: API truncation indicator",),
+        ("Read-only local HTTP API request; no financial event type reinterpretation",),
+        use_when="Retrieve NexFolioM event rows with optional API-supported filters.",
+        avoid_when="The local API is unavailable or a database-level query is required.")),
+    ToolDefinition("sql_get_schema", "general", enabled_by_default=True,
+        planning=CapabilitySemantics("Retrieve the active SQL datasource schema", (), ("schema object",),
+        ("Read-only datasource request",), use_when="Inspect available SQL data structures.")),
+    ToolDefinition("sql_query", "general", enabled_by_default=True,
+        args_schema=SqlQueryRequest,
+        planning=CapabilitySemantics("Run a read-only SQL query through the active datasource", ("sql: query string",),
+        ("rows and datasource metadata",), ("Datasource validates and executes the query",),
+        use_when="Retrieve rows using SQL from the active datasource.")),
     ToolDefinition("find_files", "workspace", enabled_by_default=True, max_batch_calls=24,
         exact_collection_outputs=(ExactCollectionOutput(("files",)),), planning=CapabilitySemantics(
         "Discover workspace paths by basename glob, optionally recursive", (),
@@ -345,7 +363,7 @@ def get_tool_argument_schema(name: str, *, registry: ToolRegistry | None = None)
     return schema
 
 
-def build_tool_registry(workspace_root, knowledge_root, rag_service, model, *, resource_coordinator=None):
+def build_tool_registry(workspace_root, knowledge_root, rag_service, model, *, resource_coordinator=None, sql_datasource=None):
     # Imports are construction-time only; the inventory and generic registry do
     # not initialize tools or register anything as an import side effect.
     from tools.comfy_ops import get_comfy_tools
@@ -354,6 +372,11 @@ def build_tool_registry(workspace_root, knowledge_root, rag_service, model, *, r
     from tools.file_ops import get_file_tools
     from tools.git_ops import get_git_tools
     from tools.info_ops import get_info_tools
+    from tools.nexfoliom_ops import get_nexfoliom_tools
+    from tools.sql_ops import get_sql_tools
+    if sql_datasource is None:
+        from datasource.nexfoliom_http import NexFolioMHttpDataSource
+        sql_datasource = NexFolioMHttpDataSource()
     from tools.rag_ops import get_rag_tools
     from tools.sap_ops import get_sap_tools
     from tools.scada_ops import get_scada_tools
@@ -367,6 +390,8 @@ def build_tool_registry(workspace_root, knowledge_root, rag_service, model, *, r
         *get_exec_tools(workspace_root),
         *get_git_tools(workspace_root),
         *get_info_tools(model=model, workspace_dir=workspace_root),
+        *get_nexfoliom_tools(),
+        *get_sql_tools(sql_datasource),
         *get_rag_tools(rag_service),
         *get_sap_tools(workspace_root),
         *get_scada_tools(workspace_root),

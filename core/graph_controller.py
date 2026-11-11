@@ -34,6 +34,7 @@ def create_controller_node(
     planning_capabilities: PlanningCapabilities | None = None,
     worker_ports=None,
     argument_schema_for: Callable[[str], type | None] | None = None,
+    shadow_verifier=None,
 ):
     completion_service = completion_service or CompletionService()
     controller = controller or CortexController(
@@ -51,6 +52,7 @@ def create_controller_node(
             brain=deferred,
             tool_runtime=deferred,
             finalizer=finalizer,
+            shadow_verifier=shadow_verifier,
         ),
         completion_service=completion_service,
     )

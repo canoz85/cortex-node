@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 _MAX_ARGUMENT_ISSUES = 8
 _MAX_ARGUMENT_FEEDBACK_CHARS = 4000
 _MAX_NATIVE_CORRECTIONS = 2
+_MAX_TEXTUAL_LIFECYCLE_CHARS = 16_384
 
 
 def _native_argument_feedback(raw, authorized_tools, *, argument_schema_for):
@@ -172,8 +173,10 @@ def _ensure_native_call(
         else:
             instruction = (
                 "The previous response contained no native call and was not accepted. "
-                "Return exactly one native tool call using a currently bound tool, "
-                "with its required arguments and empty content."
+                "Return exactly one native action: either one authorized executable tool call, "
+                "or one lifecycle action: brain_step_completed, brain_step_failed, or "
+                "brain_replan_requested. Supply exactly the arguments required by its bound schema. "
+                "Leave assistant content empty."
             )
             rejected_response = [AIMessage(content=raw.content)] if isinstance(raw, AIMessage) else []
         provider_messages = [
@@ -285,6 +288,10 @@ def _recover_textual_call(raw, authorized_tools: dict[str, object]):
     if (getattr(raw, "tool_calls", None) or getattr(raw, "invalid_tool_calls", None)
             or not isinstance(content, str) or not content):
         return raw
+    lifecycle = _parse_textual_lifecycle_call(content)
+    if lifecycle is not None:
+        name, arguments = lifecycle
+        return _make_textual_call(raw, name, arguments)
     match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*(\{.*\})", content, re.DOTALL)
     if match is None:
         return raw
@@ -312,12 +319,111 @@ def _recover_textual_call(raw, authorized_tools: dict[str, object]):
         json.dumps(arguments, allow_nan=False)
     except (ValueError, TypeError, RecursionError):
         return raw
+    return _make_textual_call(raw, name, arguments)
+
+
+def _make_textual_call(raw, name: str, arguments: dict):
     canonical = copy(raw)
     canonical.content = ""
     canonical.tool_calls = [{"name": name, "args": arguments,
                              "id": "textual-recovery", "type": "tool_call"}]
     logger.debug("Brain textual-call recovery: recovered_from_text=True tool_call_name=%s", name)
     return canonical
+
+
+def _parse_textual_lifecycle_call(content: str) -> tuple[str, dict] | None:
+    """Parse one lifecycle call with only schema-shaped string/list literals."""
+    text = content.strip()
+    if len(text) > _MAX_TEXTUAL_LIFECYCLE_CHARS:
+        return None
+    head = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", text)
+    if head is None:
+        return None
+    name = head.group(1)
+    schemas = {
+        schema["function"]["name"]: schema["function"]["parameters"]
+        for schema in LIFECYCLE_ACTION_SCHEMAS
+    }
+    schema = schemas.get(name)
+    if schema is None:
+        return None
+
+    decoder = json.JSONDecoder()
+    index = head.end()
+    arguments = {}
+
+    def skip_space(position):
+        while position < len(text) and text[position].isspace():
+            position += 1
+        return position
+
+    def parse_string(position):
+        if position >= len(text) or text[position] != '"':
+            raise ValueError("Expected a quoted string literal")
+        value, end = decoder.raw_decode(text, position)
+        if not isinstance(value, str):
+            raise ValueError("Expected a string literal")
+        return value, end
+
+    try:
+        index = skip_space(index)
+        if index < len(text) and text[index] == ")":
+            index += 1
+        else:
+            while True:
+                match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", text[index:])
+                if match is None:
+                    return None
+                argument_name = match.group(1)
+                index += match.end()
+                if argument_name not in schema["properties"] or argument_name in arguments:
+                    return None
+                index = skip_space(index)
+                if index >= len(text) or text[index] != "=":
+                    return None
+                index = skip_space(index + 1)
+
+                if schema["properties"][argument_name]["type"] == "array":
+                    if index >= len(text) or text[index] != "[":
+                        return None
+                    index = skip_space(index + 1)
+                    values = []
+                    if index < len(text) and text[index] == "]":
+                        index += 1
+                    else:
+                        while True:
+                            value, index = parse_string(index)
+                            values.append(value)
+                            if len(values) > 64:
+                                return None
+                            index = skip_space(index)
+                            if index < len(text) and text[index] == "]":
+                                index += 1
+                                break
+                            if index >= len(text) or text[index] != ",":
+                                return None
+                            index = skip_space(index + 1)
+                    arguments[argument_name] = values
+                else:
+                    value, index = parse_string(index)
+                    arguments[argument_name] = value
+
+                index = skip_space(index)
+                if index < len(text) and text[index] == ")":
+                    index += 1
+                    break
+                if index >= len(text) or text[index] != ",":
+                    return None
+                index = skip_space(index + 1)
+
+        index = skip_space(index)
+        if index != len(text):
+            return None
+        if set(arguments) != set(schema["required"]):
+            return None
+        return name, arguments
+    except (ValueError, TypeError, RecursionError):
+        return None
 
 
 def _canonical_brain_response(raw, authorized_tools: dict[str, object]):

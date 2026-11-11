@@ -59,12 +59,14 @@ class ExecutionDriver:
         brain: BrainPort,
         tool_runtime: ToolRuntimePort,
         finalizer: FinalizerPort,
+        shadow_verifier=None,
     ) -> None:
         self._coordinator = coordinator
         self._planner = planner
         self._brain = brain
         self._tool_runtime = tool_runtime
         self._finalizer = finalizer
+        self._shadow_verifier = shadow_verifier
 
     def turn(
         self,
@@ -97,6 +99,12 @@ class ExecutionDriver:
         """Produce and apply one authorization without dispatching it."""
 
         value = self._coordinator.transition(execution_state, controller_input)
+        if self._shadow_verifier is not None:
+            try:
+                self._shadow_verifier.observe(execution_state, value.execution_state, controller_input)
+            except Exception:
+                # Audit scheduling cannot change an already applied authorization.
+                pass
         return ExecutionDriverTurn(
             execution_state=value.execution_state,
             decision=value.decision,

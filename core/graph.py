@@ -60,10 +60,12 @@ def _default_tool_list_factory(
     model: str,
     *,
     resource_coordinator: GpuResourceCoordinator | None = None,
+    sql_datasource=None,
 ) -> list[Any]:
     registry = build_tool_registry(
         workspace_root, knowledge_root, rag_service, model,
         resource_coordinator=resource_coordinator,
+        sql_datasource=sql_datasource,
     )
     return default_enabled_tools(registry)
 
@@ -76,6 +78,7 @@ def _build_tools(
     model: str,
     *,
     resource_coordinator: GpuResourceCoordinator | None = None,
+    sql_datasource=None,
 ) -> list[Any]:
     if tool_list_factory is _default_tool_list_factory:
         return _default_tool_list_factory(
@@ -84,6 +87,7 @@ def _build_tools(
             rag_service,
             model,
             resource_coordinator=resource_coordinator,
+            sql_datasource=sql_datasource,
         )
 
     return tool_list_factory(workspace_root, knowledge_root, rag_service, model)
@@ -268,6 +272,7 @@ def build_app(
     workspace_dir: str = "workspace",
     model: str = "gpt-oss:20b",
     model_planner: str = "gpt-oss:20b",
+    model_verifier: str = "gpt-oss:20b",
     knowledge_dir: str = "knowledge",
     embedding_model: str = "nomic-embed-text",
     rag_top_k: int = 4,
@@ -281,6 +286,7 @@ def build_app(
     checkpointer_factory: Callable[[], Any] = InMemorySaver,
     gpu_resource_policy: GpuResourcePolicy | None = None,
     gpu_resource_coordinator: GpuResourceCoordinator | None = None,
+    sql_datasource=None,
 ) -> CheckpointedGraphApp:
     app_root = project_root or Path(__file__).resolve().parents[1]
     workspace_root = Path(workspace_dir).resolve()
@@ -302,6 +308,7 @@ def build_app(
         rag_service,
         model,
         resource_coordinator=resource_coordinator,
+        sql_datasource=sql_datasource,
     )
     # This registry contains the deployment's enabled selection, including any
     # injected factory filter. The full production inventory is not authority.
@@ -314,6 +321,7 @@ def build_app(
 
     planner_llm = chat_model_factory(model_planner, 0)
     brain_llm = chat_model_factory(model, 0)
+    verifier_llm = chat_model_factory(model_verifier, 0)
 
     direct_tool_runtime = (
         SerializedToolRuntimePort(tools, require_structured=False)
@@ -325,6 +333,7 @@ def build_app(
         brain_llm=brain_llm,
         executable_tools=tools,
         planner_llm=planner_llm,
+        verifier_llm=verifier_llm,
         rag_service=rag_service,
         rag_top_k=rag_top_k,
         agent_system_prompt=agent_system_prompt,

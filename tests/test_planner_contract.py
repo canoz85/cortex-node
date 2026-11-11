@@ -68,6 +68,20 @@ def test_system_policy_exposes_only_semantic_proposal_outcomes():
     assert "For the three non-plan outcomes, steps must be empty" in prompt
 
 
+@pytest.mark.parametrize(("user_prompt", "semantic_result"), [
+    ("analyze x.txt as a financial history", "reconstruct its chronology"),
+    ("find the likely root cause in this log", "infer the likely root cause"),
+    ("compare these records and identify inconsistencies", "identify inconsistencies"),
+])
+def test_system_prompt_preserves_analysis_objectives_in_evidence_steps(user_prompt, semantic_result):
+    # These representative requests must guide a single evidence-acquiring step
+    # to state its intended analysis outcome, not just that it reads a source.
+    assert user_prompt
+    assert semantic_result in PLANNER_SYSTEM_PROMPT
+    assert "both the evidence to acquire" in PLANNER_SYSTEM_PROMPT
+    assert "same step" in PLANNER_SYSTEM_PROMPT
+
+
 @pytest.mark.parametrize("payload", [
     {"result": "PLAN_PROPOSED", "steps": []},
     {"result": "NEEDS_INPUT", "message": "Which file?", "steps": [{"step_id": "s",

@@ -468,7 +468,7 @@ def test_provider_rejects_registered_tool_not_authorized_by_active_plan():
 
 
 @pytest.mark.parametrize("first_text", [
-    'brain_step_completed(message="Do not reuse me")',
+    'brain_step_completed(message="Do not reuse me"',
     "I have completed the step.",
 ])
 @pytest.mark.parametrize("retry", [False, True])
@@ -491,8 +491,12 @@ def test_native_compliance_uses_bound_model_and_only_native_response(first_text,
         assert bound.calls[1][-2].tool_calls == []
         instruction = bound.calls[1][-1].content
         assert "previous response contained no native call" in instruction
-        assert "Return exactly one native tool call" in instruction
-        assert "currently bound tool" in instruction
+        assert "Return exactly one native action" in instruction
+        assert "authorized executable tool call" in instruction
+        assert "brain_step_completed" in instruction
+        assert "brain_step_failed" in instruction
+        assert "brain_replan_requested" in instruction
+        assert "assistant content empty" in instruction
         assert "evidence_refs were invalid" not in instruction
         assert first_text not in instruction
 
@@ -544,20 +548,22 @@ def test_brain_live_invocations_count_each_actual_provider_call():
         status.stop()
 
 
-@pytest.mark.parametrize("name, arguments", [
-    ("brain_step_completed", 'message="Done"'),
-    ("brain_step_failed", 'message="Failed"'),
-    ("brain_replan_requested", 'reason="Changed", constraints=[]'),
+@pytest.mark.parametrize("name, arguments,kind", [
+    ("brain_step_completed", 'message="Done"', Kind.STEP_COMPLETED),
+    ("brain_step_failed", 'message="Failed"', Kind.STEP_FAILED),
+    ("brain_replan_requested", 'reason="Changed", constraints=[]', Kind.REPLAN_REQUESTED),
 ])
-def test_textual_lifecycle_is_never_salvaged_after_compliance_retry(name, arguments):
+def test_python_style_textual_lifecycle_is_recovered_without_compliance_retry(name, arguments, kind):
     text = AIMessage(content=f"{name}({arguments})")
     model = SequenceModel(text, text, text)
     provider = LangChainBrainProvider(brain_llm=model, executable_tools=executable_tools("read_file"))
     result = provider.generate(brain_input(), ())
-    assert len(model.calls) == 3
-    assert result.kind == Kind.INVALID_OUTPUT
-    assert result.error_code == "unexpected_response_content"
-    assert result.completion_evidence is None
+    assert len(model.calls) == 1
+    assert result.kind == kind
+    if kind == Kind.STEP_COMPLETED:
+        assert result.completion_evidence.summary == "Done"
+    else:
+        assert result.completion_evidence is None
     assert result.tool_request is None
 
 

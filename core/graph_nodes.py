@@ -13,6 +13,7 @@ from core.graph_planner import create_planner_node
 from core.protocol.models import PlanningCapabilities
 
 from core.rag import WorkspaceRAG
+from core.shadow_verifier import ShadowEvidenceVerifier
 from tools.registry import ToolRegistry, get_tool_argument_schema
 
 def create_graph_nodes(
@@ -20,6 +21,7 @@ def create_graph_nodes(
     brain_llm: ChatOllama,
     executable_tools,
     planner_llm: ChatOllama,
+    verifier_llm: ChatOllama,
     rag_service: WorkspaceRAG,
     rag_top_k: int,
     agent_system_prompt: str,
@@ -40,6 +42,7 @@ def create_graph_nodes(
         finalizer=Finalizer(answer_renderer=LangChainFinalAnswerRenderer(
             llm=brain_llm, show_raw_llm=show_raw_llm,
         ), show_raw_llm=show_raw_llm), worker_ports=worker_ports,
+        shadow_verifier=ShadowEvidenceVerifier.for_ollama(verifier_llm),
     )
     
     planner_node = create_planner_node(

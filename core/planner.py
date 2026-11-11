@@ -67,6 +67,14 @@ STEP SEMANTICS:
   step's title or description. Describe the intended result rather than tool-call syntax.
   Any value required for execution must appear in the responsible step semantics.
   A conditional mutation may correctly make no change when its guard is false.
+- When a request asks for analysis, interpretation, inference, comparison, diagnosis,
+  chronology, recommendations or anomaly detection, describe both the evidence to acquire
+  and the semantic result that evidence should support in the same step. For example,
+  say "Read the financial history and reconstruct its chronology," not only "Read the file";
+  say "Examine the log and infer the likely root cause," not only "Read the log";
+  say "Compare the records and identify inconsistencies," not only "Read the records."
+  Keep such steps outcome-oriented and do not add a separate reasoning-only step when
+  the evidence-acquiring stage can produce the requested result.
 - Classify each intended step answer with deliverable_kind. Use semantic for a
   derived finding, explanation, selected item or interpretation. Use
   exact_enumeration when the collection itself is requested as the answer: every

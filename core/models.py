@@ -103,6 +103,19 @@ class CurrentTimeRequest(BaseModel):
     )
 
 
+class NexFolioMEventsRequest(BaseModel):
+    """Optional filters supported by the local NexFolioM events endpoint."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    accountId: int | None = Field(
+        default=None, ge=1, le=9007199254740991,
+        description="Filter by positive NexFolioM account ID.",
+    )
+    from_: str | None = Field(default=None, alias="from", description="Inclusive start filter accepted by the API.")
+    to: str | None = Field(default=None, description="End filter accepted by the API.")
+
+
 class WriteFileRequest(BaseModel):
     """Validated arguments for the write_file tool."""
 

@@ -82,7 +82,11 @@ def test_native_actions_survive_real_ollama_boundary(name, args, kind, retry):
         assert requests[1]["messages"][-2]["content"].startswith('brain_step_completed{')
         correction = requests[1]["messages"][-1]["content"]
         assert "previous response contained no native call and was not accepted" in correction
-        assert "exactly one native tool call" in correction
+        assert "exactly one native action" in correction
+        assert "brain_step_completed" in correction
+        assert "brain_step_failed" in correction
+        assert "brain_replan_requested" in correction
+        assert "assistant content empty" in correction
         assert "same active-step decision" not in correction
 
 

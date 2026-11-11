@@ -29,8 +29,9 @@ from core.runtime.gpu_resources import GpuResourceMode, GpuResourcePolicy
 DEFAULT_SETTINGS = {
     "workspace": "workspace",
     "knowledge_dir": "knowledge",
-    "model": "devstral-small-2:24b", #qwen3.8:27b", #"gemma4:26b", #"qwen2.5-coder:14b", #
+    "model": "gemma4:26b", #qwen3.8:27b", #"gemma4:26b", #"qwen2.5-coder:14b", #devstral-small-2:24b
     "model_planner": "qwen3.8:27b", # qwen2.5:7b
+    "model_verifier": "gemma4:26b", # qwen2.5:7b
     "embedding_model": "nomic-embed-text",
     "rag_top_k": 4,
     "raw_llm": False,
@@ -487,6 +488,7 @@ def main():
         workspace_dir=str(settings["workspace"]),
         model=str(settings["model"]),
         model_planner=str(settings["model_planner"]),
+        model_verifier=str(settings.get("model_verifier", settings["model_planner"])),
         knowledge_dir=str(settings["knowledge_dir"]),
         embedding_model=str(settings["embedding_model"]),
         rag_top_k=int(settings["rag_top_k"]),
@@ -504,6 +506,7 @@ def main():
     print("--- CortexNode initialized ---")
     print(f"Model: {settings['model']}")
     print(f"Planner Model: {settings['model_planner']}")
+    print(f"Verifier Model: {settings.get('model_verifier', settings['model_planner'])}")
     print(f"Sandbox: {settings['workspace']}")
     print(f"Knowledge: {settings['knowledge_dir']}")
     print(

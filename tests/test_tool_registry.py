@@ -34,7 +34,7 @@ def test_registry_rejects_duplicates_mismatches_and_unknown_names():
 
 def test_production_tools_all_registered_and_enabled_explicitly(tmp_path):
     registry = build_tool_registry(str(tmp_path), str(tmp_path), SimpleNamespace(), "test")
-    assert len(registry.names) == len(TOOL_DEFINITIONS) == 34
+    assert len(registry.names) == len(TOOL_DEFINITIONS) == 35
     assert registry.names == {entry.name for entry in TOOL_DEFINITIONS}
     assert {tool.name for tool in default_enabled_tools(registry)} == {
         entry.name for entry in TOOL_DEFINITIONS if entry.enabled_by_default
