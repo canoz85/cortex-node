@@ -171,13 +171,25 @@ def _ensure_native_call(
             )
             rejected_response = [raw] if isinstance(raw, AIMessage) else []
         else:
-            instruction = (
-                "The previous response contained no native call and was not accepted. "
-                "Return exactly one native action: either one authorized executable tool call, "
-                "or one lifecycle action: brain_step_completed, brain_step_failed, or "
-                "brain_replan_requested. Supply exactly the arguments required by its bound schema. "
-                "Leave assistant content empty."
-            )
+            intended = _recognizable_intended_action(raw, authorized_tools)
+            if intended is not None:
+                instruction = (
+                    f"Serialization repair only for the previous intended action {intended}. "
+                    "Repair only the previous response into native-call format. Preserve the same "
+                    "intended action and arguments exactly. Do not reconsider the task or choose "
+                    "another action. Do not write the action as assistant text. Do not output "
+                    "textual function-call syntax such as action(...). Invoke the already-bound intended "
+                    "action natively so it is returned as a native tool call. Leave assistant "
+                    "content empty. Do not continue execution."
+                )
+            else:
+                instruction = (
+                    "The previous response contained no native call and was not accepted. "
+                    "Return exactly one native action: either one authorized executable tool call, "
+                    "or one lifecycle action: brain_step_completed, brain_step_failed, or "
+                    "brain_replan_requested. Supply exactly the arguments required by its bound schema. "
+                    "Leave assistant content empty."
+                )
             rejected_response = [AIMessage(content=raw.content)] if isinstance(raw, AIMessage) else []
         provider_messages = [
             *provider_messages,
@@ -288,6 +300,10 @@ def _recover_textual_call(raw, authorized_tools: dict[str, object]):
     if (getattr(raw, "tool_calls", None) or getattr(raw, "invalid_tool_calls", None)
             or not isinstance(content, str) or not content):
         return raw
+    colon_lifecycle = _parse_colon_lifecycle_call(content)
+    if colon_lifecycle is not None:
+        name, arguments = colon_lifecycle
+        return _make_textual_call(raw, name, arguments)
     lifecycle = _parse_textual_lifecycle_call(content)
     if lifecycle is not None:
         name, arguments = lifecycle
@@ -322,6 +338,48 @@ def _recover_textual_call(raw, authorized_tools: dict[str, object]):
     return _make_textual_call(raw, name, arguments)
 
 
+def _parse_colon_lifecycle_call(content: str) -> tuple[str, dict] | None:
+    """Recover exactly one plain colon-style lifecycle outcome."""
+    if len(content) > _MAX_TEXTUAL_LIFECYCLE_CHARS:
+        return None
+    match = re.fullmatch(
+        r"\s*(brain_step_completed|brain_step_failed|brain_replan_requested)\s*:\s*(.*?)\s*",
+        content, re.DOTALL,
+    )
+    if match is None:
+        return None
+    name, message = match.groups()
+    message = message.strip()
+    if not message:
+        return None
+    if re.search(
+        r"(?:^|\n)\s*brain_(?:step_completed|step_failed|replan_requested)\s*:",
+        message,
+    ):
+        return None
+    if name == "brain_replan_requested":
+        arguments = {"reason": message, "constraints": []}
+    else:
+        arguments = {"message": message}
+    return name, arguments
+
+
+def _recognizable_intended_action(raw, authorized_tools: dict[str, object]) -> str | None:
+    """Identify a leading action label without interpreting prose as an action."""
+    if getattr(raw, "invalid_tool_calls", None):
+        return None
+    content = getattr(raw, "content", None)
+    if not isinstance(content, str):
+        return None
+    names = set(authorized_tools) | {
+        schema["function"]["name"] for schema in LIFECYCLE_ACTION_SCHEMAS
+    }
+    match = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?=[:({{\s])", content)
+    if match is None or match.group(1) not in names:
+        return None
+    return match.group(1)
+
+
 def _make_textual_call(raw, name: str, arguments: dict):
     canonical = copy(raw)
     canonical.content = ""
@@ -332,14 +390,15 @@ def _make_textual_call(raw, name: str, arguments: dict):
 
 
 def _parse_textual_lifecycle_call(content: str) -> tuple[str, dict] | None:
-    """Parse one lifecycle call with only schema-shaped string/list literals."""
+    """Parse one strict Python-style or Gemma-style lifecycle serialization."""
     text = content.strip()
     if len(text) > _MAX_TEXTUAL_LIFECYCLE_CHARS:
         return None
-    head = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", text)
+    head = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*([({])", text)
     if head is None:
         return None
     name = head.group(1)
+    opening = head.group(2)
     schemas = {
         schema["function"]["name"]: schema["function"]["parameters"]
         for schema in LIFECYCLE_ACTION_SCHEMAS
@@ -348,7 +407,9 @@ def _parse_textual_lifecycle_call(content: str) -> tuple[str, dict] | None:
     if schema is None:
         return None
 
-    decoder = json.JSONDecoder()
+    if opening == "{":
+        return _parse_gemma_lifecycle_arguments(text, head.end(), name, schema)
+
     index = head.end()
     arguments = {}
 
@@ -358,12 +419,25 @@ def _parse_textual_lifecycle_call(content: str) -> tuple[str, dict] | None:
         return position
 
     def parse_string(position):
-        if position >= len(text) or text[position] != '"':
+        if position >= len(text) or text[position] not in "\"'":
             raise ValueError("Expected a quoted string literal")
-        value, end = decoder.raw_decode(text, position)
-        if not isinstance(value, str):
-            raise ValueError("Expected a string literal")
-        return value, end
+        quote = text[position]
+        index = position + 1
+        value = []
+        escapes = {"\\": "\\", "n": "\n", "r": "\r", "t": "\t", "'": "'", '"': '"'}
+        while index < len(text):
+            char = text[index]
+            if char == quote:
+                return "".join(value), index + 1
+            if char == "\\":
+                index += 1
+                if index >= len(text) or text[index] not in escapes:
+                    raise ValueError("Invalid string escape")
+                value.append(escapes[text[index]])
+            else:
+                value.append(char)
+            index += 1
+        raise ValueError("Unclosed string literal")
 
     try:
         index = skip_space(index)
@@ -420,6 +494,84 @@ def _parse_textual_lifecycle_call(content: str) -> tuple[str, dict] | None:
         if index != len(text):
             return None
         if set(arguments) != set(schema["required"]):
+            return None
+        return name, arguments
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+
+def _parse_gemma_lifecycle_arguments(text: str, index: int, name: str, schema: dict):
+    """Parse Gemma fields as delimited strings and schema-declared string lists."""
+    delimiter = '<|"|>'
+    arguments = {}
+
+    def skip_space(position):
+        while position < len(text) and text[position].isspace():
+            position += 1
+        return position
+
+    def parse_gemma_string(position):
+        if not text.startswith(delimiter, position):
+            raise ValueError("Expected Gemma string delimiter")
+        start = position + len(delimiter)
+        end = text.find(delimiter, start)
+        if end < 0:
+            raise ValueError("Unclosed Gemma string delimiter")
+        return text[start:end], end + len(delimiter)
+
+    try:
+        index = skip_space(index)
+        if index < len(text) and text[index] == "}":
+            index += 1
+        else:
+            while True:
+                match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", text[index:])
+                if match is None:
+                    return None
+                argument_name = match.group(1)
+                index += match.end()
+                if argument_name not in schema["properties"] or argument_name in arguments:
+                    return None
+                index = skip_space(index)
+                if index >= len(text) or text[index] != ":":
+                    return None
+                index = skip_space(index + 1)
+
+                if schema["properties"][argument_name]["type"] == "array":
+                    if index >= len(text) or text[index] != "[":
+                        return None
+                    index = skip_space(index + 1)
+                    values = []
+                    if index < len(text) and text[index] == "]":
+                        index += 1
+                    else:
+                        while True:
+                            value, index = parse_gemma_string(index)
+                            values.append(value)
+                            if len(values) > 64:
+                                return None
+                            index = skip_space(index)
+                            if index < len(text) and text[index] == "]":
+                                index += 1
+                                break
+                            if index >= len(text) or text[index] != ",":
+                                return None
+                            index = skip_space(index + 1)
+                    arguments[argument_name] = values
+                else:
+                    value, index = parse_gemma_string(index)
+                    arguments[argument_name] = value
+
+                index = skip_space(index)
+                if index < len(text) and text[index] == "}":
+                    index += 1
+                    break
+                if index >= len(text) or text[index] != ",":
+                    return None
+                index = skip_space(index + 1)
+
+        index = skip_space(index)
+        if index != len(text) or set(arguments) != set(schema["required"]):
             return None
         return name, arguments
     except (ValueError, TypeError, RecursionError):

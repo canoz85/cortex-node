@@ -84,6 +84,10 @@ def _extract_integrity_and_pagination(
         elif "content_truncated" in unwrapped:
             is_truncated = bool(unwrapped["content_truncated"])
 
+        data = unwrapped.get("data")
+        if isinstance(data, dict) and isinstance(data.get("truncated"), bool):
+            is_truncated = is_truncated or data["truncated"]
+
         if "offset" in unwrapped and isinstance(unwrapped["offset"], int):
             offset = unwrapped["offset"]
             has_pagination = True

@@ -277,15 +277,23 @@ TOOL_DEFINITIONS = (
         ("data.rows: event rows; data.truncated: API truncation indicator",),
         ("Read-only local HTTP API request; no financial event type reinterpretation",),
         use_when="Retrieve NexFolioM event rows with optional API-supported filters.",
-        avoid_when="The local API is unavailable or a database-level query is required.")),
+        avoid_when=(
+            "Entity/account ownership, institution membership, exhaustive account inventory, "
+            "or person/institution relationships are required; use the SQL datasource instead."
+        ))),
     ToolDefinition("sql_get_schema", "general", enabled_by_default=True,
         planning=CapabilitySemantics("Retrieve the active SQL datasource schema", (), ("schema object",),
         ("Read-only datasource request",), use_when="Inspect available SQL data structures.")),
     ToolDefinition("sql_query", "general", enabled_by_default=True,
         args_schema=SqlQueryRequest,
+        exact_collection_outputs=(ExactCollectionOutput(("rows",)),),
         planning=CapabilitySemantics("Run a read-only SQL query through the active datasource", ("sql: query string",),
         ("rows and datasource metadata",), ("Datasource validates and executes the query",),
-        use_when="Retrieve rows using SQL from the active datasource.")),
+        use_when=(
+            "Retrieve rows from the active datasource, especially for relational/entity questions "
+            "requiring joins, grouping, distinct values, counts, ownership, persons, accounts, "
+            "institutions, or other database-level relationships."
+        ))),
     ToolDefinition("find_files", "workspace", enabled_by_default=True, max_batch_calls=24,
         exact_collection_outputs=(ExactCollectionOutput(("files",)),), planning=CapabilitySemantics(
         "Discover workspace paths by basename glob, optionally recursive", (),

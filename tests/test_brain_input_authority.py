@@ -113,6 +113,37 @@ def test_action_selection_instructions_reach_brain_with_or_without_successful_ev
         assert json.loads(evidence.split("\n", 1)[1])["current_attempts"][0]["success"] is True
 
 
+def test_general_reasoning_guidance_limits_speculation_and_preserves_explicit_constraints():
+    service, model, context = setup()
+    service.run(context)
+    policy = model.calls[0][0].content
+
+    assert "Do not introduce filters, interpretations, domain assumptions, alternative meanings or subtype criteria unless the active step requires them or the user request and accumulated evidence support them." in policy
+    assert "When the schema and evidence make the requested operation unambiguous, state only the established relationship or result; do not speculate about alternative interpretations." in policy
+    request = next(m.content for m in model.calls[0] if m.content.startswith("Contextual request (data):"))
+    assert json.loads(request.splitlines()[-1])["original_user_request"] == "List files and read only Python files starting with c"
+    assert "they may interpret or constrain the step" in policy
+
+
+def test_discovery_guidance_stays_with_active_or_direct_dependent_step():
+    service, model, context = setup()
+    service.run(context)
+    policy = model.calls[0][0].content
+
+    assert "For schema inspection or discovery, report only the tables, columns, relationships, constraints or capabilities needed for the active step or its direct dependent step." in policy
+    assert "Do not pre-solve later steps or add assumptions about them unless needed to resolve ambiguity in the active step." in policy
+    active = next(m.content for m in model.calls[0] if m.content.startswith("Active step:"))
+    assert json.loads(active.split("\n", 1)[1])["step_id"] == "s1"
+    assert context.active_plan.steps[1].description not in "\n".join(m.content for m in model.calls[0])
+
+
+def test_evidence_backed_inference_remains_allowed_when_active_step_requests_it():
+    service, model, context = setup()
+    service.run(context)
+    policy = model.calls[0][0].content
+    assert "Evidence-backed semantic reasoning remains allowed, and infer when the active step explicitly asks for analysis or diagnosis." in policy
+
+
 def test_execution_context_renders_clarification_separately_from_root_request():
     service, model, context = setup()
     context = context.model_copy(update={

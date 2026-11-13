@@ -12,6 +12,7 @@ from core.brain_evidence_policy import MAX_CURRENT_ATTEMPT_RECORDS
 from core.brain_provider import LangChainBrainProvider
 from core.finalizer import Finalizer
 from core.finalizer_provider import LangChainFinalAnswerRenderer
+from core.models import ToolOutputEnvelope
 from core.planner import PlannerService
 from core.planner_normalization import normalize_planner_proposal
 from core.planner_validation import PlanValidationError, validate_execution_plan
@@ -26,6 +27,7 @@ from core.protocol.models import (
 from core.runtime.controller_transition import ControllerCoordinator
 from core.runtime.execution_driver import ExecutionDriver
 from core.runtime.tool_result_integration import SerializedToolRuntimePort, integrate_tool_result
+from core.tool_output import normalize_tool_output
 from test_brain_outcomes import SequenceModel, brain_input, controller_input, native_action
 from test_execution_driver import controller_input as state_input, initial_state
 from test_finalizer_rendering import Model
@@ -71,7 +73,8 @@ def test_normalizer_rejects_missing_kind_and_legacy_checkpoint_defaults_to_seman
 
 def test_registry_declares_only_trusted_output_locations_and_hides_mechanics_from_planner():
     expected = {"list_files": "entries", "find_files": "files",
-                "git_changed_files": "changed_files", "search_text": "matches"}
+                "git_changed_files": "changed_files", "search_text": "matches",
+                "sql_query": "rows"}
     for name, field in expected.items():
         assert get_tool_definition(name).exact_collection_outputs == (ExactCollectionOutput((field,)),)
     assert ToolDefinition("future", "workspace").exact_collection_outputs == ()
@@ -100,6 +103,58 @@ def complete(context, records):
                            message="A summary that omits every filename.")
     return CortexController(24).decide(controller_input(context, outcome).model_copy(
         update={"tool_execution_history": tuple(records)}))
+
+
+def normalized_sql_record(context, *, rows, truncated):
+    request = ToolRequest(request_id="sql-query", tool_name="sql_query", arguments={"sql": "SELECT 1"})
+    output = ToolOutputEnvelope(
+        success=True, message="SQL query completed.",
+        data={"rows": rows, "truncated": truncated},
+    ).to_tool_output()
+    result = normalize_tool_output(raw_content=output, request=request)
+    return record(context, "sql_query", request_id=request.request_id).model_copy(
+        update={"result": result},
+    )
+
+
+def test_complete_normalized_sql_rows_bind_as_exact_collection():
+    context = brain_input(deliverable_kind="exact_enumeration")
+    rows = [{"name": "AHE", "account_count": 1}, {"name": "YKB", "account_count": 1}]
+    source = normalized_sql_record(context, rows=rows, truncated=False)
+    assert source.result.data == {"rows": rows, "truncated": False}
+    assert source.result.integrity.is_truncated is False
+
+    decision = complete(context, [source])
+
+    assert decision.completion_evidence.exact_collection.data_path == ("rows",)
+    assert decision.completion_evidence.exact_collection.source_request_id == "sql-query"
+    assert decision.completion_evidence.exact_collection.items == tuple(rows)
+
+
+def test_nested_data_truncated_controls_integrity_and_exact_collection_eligibility():
+    context = brain_input(deliverable_kind="exact_enumeration")
+    truncated = normalized_sql_record(context, rows=[{"name": "AHE"}], truncated=True)
+    complete_result = normalized_sql_record(context, rows=[{"name": "AHE"}], truncated=False)
+
+    assert truncated.result.integrity.is_truncated is True
+    assert complete_result.result.integrity.is_truncated is False
+    decision = complete(context, [truncated])
+    assert decision.reason == "exact_collection_unresolved"
+    assert "found 0" in decision.failure_reason
+
+
+def test_undeclared_sql_like_list_output_is_not_trusted(monkeypatch):
+    import tools.registry as registry
+
+    undeclared = ToolDefinition("future_rows", "general")
+    monkeypatch.setattr(registry, "TOOL_DEFINITIONS", (*registry.TOOL_DEFINITIONS, undeclared))
+    context = brain_input(deliverable_kind="exact_enumeration")
+    source = record(context, "future_rows", {"rows": [{"name": "AHE"}], "truncated": False})
+
+    decision = complete(context, [source])
+
+    assert decision.reason == "exact_collection_unresolved"
+    assert "found 0" in decision.failure_reason
 
 
 def rendered(context, decision, *, provider=False):
