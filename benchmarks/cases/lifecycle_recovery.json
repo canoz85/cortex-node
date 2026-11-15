@@ -1,0 +1,5 @@
+{
+  "id": "lifecycle_recovery", "mode": "provider_boundary",
+  "serialized_action": "brain_replan_requested(reason='Use the updated plan', constraints=['Keep scope', 'Use new evidence'])",
+  "expect": {"kind": "replan_request", "reason": "Use the updated plan", "constraints": ["Keep scope", "Use new evidence"]}
+}

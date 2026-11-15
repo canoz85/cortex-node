@@ -35,7 +35,7 @@ def setup():
     service = BrainService(
         provider=LangChainBrainProvider(
             brain_llm=model,
-            executable_tools=[SimpleNamespace(name="list_files"), SimpleNamespace(name="read_file")],
+            executable_tools=[SimpleNamespace(name="list_files"), SimpleNamespace(name="read_file"), SimpleNamespace(name="current_time")],
         ),
         agent_system_prompt=SYSTEM_PROMPT_TEMPLATE.format(model="test", workspace_dir="workspace", knowledge_dir="knowledge"),
     )
@@ -49,7 +49,7 @@ def setup():
         context=ExecutionContext(user_request="List files and read only Python files starting with c"),
         active_plan=ExecutionPlan(
             plan_id="p1", objective="Full objective", steps=steps,
-            available_tools=("list_files", "read_file"),
+            available_tools=("list_files", "read_file", "current_time"),
         ),
         active_step=steps[0],
     )
@@ -135,6 +135,63 @@ def test_discovery_guidance_stays_with_active_or_direct_dependent_step():
     active = next(m.content for m in model.calls[0] if m.content.startswith("Active step:"))
     assert json.loads(active.split("\n", 1)[1])["step_id"] == "s1"
     assert context.active_plan.steps[1].description not in "\n".join(m.content for m in model.calls[0])
+
+
+def test_brain_limits_alternatives_to_direct_evidence_based_paths():
+    service, model, context = setup()
+    service.run(context)
+    policy = model.calls[0][0].content
+
+    assert "Do not search the full capability set after the primary path proves insufficient." in policy
+    assert "Try an alternative only when it directly advances the active step and concrete evidence explains why it should work." in policy
+    assert "Do not probe unrelated workspace/file discovery, RAG, SQL/schema, or other tool families as guesses." in policy
+    assert "request replanning with brain_replan_requested" in policy
+    assert "A focused alternative remains appropriate when observed evidence gives it a direct, concrete reason to succeed." in policy
+
+
+def test_absolute_date_from_relative_evidence_requires_runtime_time():
+    service, model, context = setup()
+    step = context.active_plan.steps[1].model_copy(update={
+        "title": "Determine release date",
+        "description": "Answer the absolute calendar date of release from the evidence.",
+    })
+    history = (ToolExecutionRecord(
+        step_id="s1", tool_name="read_file", arguments={"path": "release.txt"},
+        result=ToolResult(request_id="release", success=True, message="Read release note",
+                          data={"text": "Released 4 days ago."}),
+    ),)
+    context = context.model_copy(update={
+        "context": context.context.model_copy(update={"user_request": "What date was it released?"}),
+        "active_step": step,
+        "cursor": context.cursor.model_copy(update={"step_id": step.step_id}),
+        "tool_execution_history": history,
+    })
+    model.reply = AIMessage(content="", tool_calls=[{
+        "name": "current_time", "args": {}, "id": "runtime-clock",
+    }])
+    outcome = service.run(context)
+    policy = model.calls[0][0].content
+    evidence = next(m.content for m in model.calls[0] if m.content.startswith("Execution evidence v1:"))
+
+    assert outcome.kind == BrainOutcomeKind.TOOL_REQUESTED
+    assert model.calls[0][-1].content  # The execution brief contains the question, not an injected date.
+    assert "2026-11-14" not in "\n".join(message.content for message in model.calls[0])
+    assert "When a relative-time expression materially affects" in policy
+    assert "obtain the runtime value with `current_time` before conversion" in policy
+    assert "Released 4 days ago." in evidence
+    assert "never infer today's date from model knowledge, prompt metadata, or assumptions" in policy
+
+
+def test_relative_wording_without_absolute_conversion_does_not_force_clock():
+    service, model, context = setup()
+    context = context.model_copy(update={
+        "context": context.context.model_copy(update={"user_request": "What changed 4 days ago?"}),
+    })
+    service.run(context)
+    policy = model.calls[0][0].content
+
+    assert "The presence of a phrase such as “4 days ago” alone does not require `current_time`." in policy
+    assert "Obtain runtime time" not in model.calls[0][-1].content
 
 
 def test_evidence_backed_inference_remains_allowed_when_active_step_requests_it():

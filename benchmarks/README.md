@@ -1,3 +1,66 @@
+# Local Cortex benchmarks
+
+Run from the repository root with the project environment and a running local
+Ollama model:
+
+```console
+python -m benchmarks run --model gpt-oss:20b --planner gpt-oss:20b
+python -m benchmarks run --case relative_time --output benchmarks/runs/time.json
+python -m benchmarks compare benchmarks/runs/first.json benchmarks/runs/second.json
+```
+
+Runs return a nonzero exit code if any case fails or encounters a harness error.
+Results and isolated workspaces are stored under `benchmarks/runs/`. This suite
+uses real model inference: deterministic fixtures and temperature zero do not
+guarantee deterministic model outputs. It never uses live web or NexFolioM
+tools. Synchronous cases only are supported. The separate provider-boundary case
+is not part of the end-to-end score.
+
+## Adding a case
+
+Add a JSON file under `cases/` with a unique `id`, `mode: "end_to_end"`,
+`prompt`, `tools`, and `expect`. Each `tools` key is a registered Cortex tool
+name; its object may contain `match` (exact selected arguments), `max_calls`
+(default 1), and `response`, a `ToolOutputEnvelope` object with `success`,
+`message`, and optional `data`. Omitting `response` makes every call unexpected.
+No fixture falls back to the real tool. A mismatch, unexpected call, or fixture
+exception is a harness error even if Cortex subsequently handles the exception.
+Use production argument schemas and capability definitions; for tools without a
+registered schema, the current fallback only supports basic discovery arguments.
+
+`expect.outcome` is `completed`, `failed`, or `planning_failed` (a terminal
+failure with an UNPLANNABLE Planner category and no accepted plan). Optional
+execution assertions are `required_tools`, `forbidden_tools`, `max_tool_calls`,
+`max_brain_dispatches`, `max_brain_invocations`, `replanning_allowed`, and `order`, a list of `[before,
+after]` pairs. Tool order means first occurrence. Assertions check integrated
+tool records. Prefer stable tool and ordering expectations to answer wording.
+`truncated_tools` checks integrated integrity flags; `argument_contains` takes
+objects with `tool`, `field` and `value`. `answer_contains` is intended only for
+stable fixture identifiers or values, not natural-language prose.
+
+`provider_boundary` is currently reserved for the lifecycle case, using
+`serialized_action` and expected `kind`, `reason`, and `constraints`.
+
+## Result format and interpretation
+
+Each run is one JSON document with `schema_version`, effective `config`, SHA-256
+`case_hashes`, and `results` keyed by `case_id`. Results include status, outcome,
+terminal reason, sanitized tool sequence, fixture calls, dispatch and provider
+counts, replan requests, authorized revisions, final answer, completion
+provenance, checks, error, and duration. The comparison aligns IDs and reports
+changes; differing configurations or case hashes are flagged.
+
+Brain provider calls use Cortex `LiveStatus` and include correction retries.
+Planner/Router calls use model callbacks and are reported as null if the observer
+cannot classify them. Usage is null when response usage is missing or incomplete;
+duration and usage are informational. Callback classification relies on the
+existing live-status stage and should be validated when changing provider
+bindings. Arguments receive basic secret-key and bearer-token redaction, not a
+general sensitive-data scrub; use synthetic fixture values. Outputs may contain
+model-generated text and should be reviewed before sharing.
+
+---
+
 # Benchmark Skeleton
 
 This folder provides a lightweight benchmark harness for CortexNode.

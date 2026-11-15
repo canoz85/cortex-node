@@ -38,6 +38,7 @@ coverage.json
 logs/
 
 # Benchmark outputs
+benchmarks/runs/
 benchmarks/results/*.json
 benchmarks/results/*.md
 !benchmarks/results/.gitkeep

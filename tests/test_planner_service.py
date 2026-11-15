@@ -311,6 +311,63 @@ def test_empty_authorized_set_is_consistent_and_can_return_unplannable():
     assert result.failure_category == PlanningFailureCategory.UNPLANNABLE
 
 
+def test_unexposed_specialized_runtime_state_fails_without_workspace_fallback():
+    provider = FakeProvider({
+        "result": "PLANNING_FAILED",
+        "message": "No available capability exposes the tracked-source registry.",
+    })
+    request = planner_input(context=ExecutionContext(
+        user_request="List previously tracked web baselines",
+        role=WorkerRole.PLANNER,
+    )).model_copy(update={
+        "capabilities": PlanningCapabilities(available_tools=("list_files", "find_files", "read_file")),
+    })
+
+    result = service(provider, route="info").run(request)
+
+    assert result.outcome == PlannerOutcome.FAILED
+    assert result.failure_category == PlanningFailureCategory.UNPLANNABLE
+    prompt = provider.messages[0][0].content
+    assert "Some requested state is owned by a specialized runtime subsystem" in prompt
+    assert "Do not substitute workspace/file discovery, RAG or" in prompt
+    assert "return PLANNING_FAILED" in prompt
+    assert "find_files" in _planner_facing_tools(provider)  # Exposed, but not semantically valid.
+
+
+def test_legitimate_workspace_discovery_remains_plannable():
+    provider = FakeProvider({"result": "PLAN_PROPOSED", "steps": [{
+        "step_id": "discover", "title": "List workspace files",
+        "description": "List files in the workspace root.",
+        "deliverable_kind": "exact_enumeration", "primary_tool": "list_files",
+    }]})
+    request = planner_input(context=ExecutionContext(
+        user_request="List files in the workspace root", role=WorkerRole.PLANNER,
+    ))
+
+    result = service(provider, route="info").run(request)
+
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert result.proposed_plan.steps[0].primary_tool == "list_files"
+
+
+def test_relative_range_plan_grounds_current_time_before_dependent_query():
+    provider = FakeProvider({"result": "PLAN_PROPOSED", "objective": "Show recent transactions", "steps": [
+        {"step_id": "clock", "title": "Get runtime time", "description": "Obtain runtime time to resolve last 6 months to absolute dates.", "deliverable_kind": "semantic", "primary_tool": "current_time", "dependencies": []},
+        {"step_id": "query", "title": "Query transactions", "description": "Derive the absolute six-calendar-month range from runtime time and query transactions in that range.", "deliverable_kind": "exact_enumeration", "primary_tool": "sql_query", "dependencies": ["clock"]},
+    ]})
+    request = planner_input(context=ExecutionContext(
+        user_request="Show transactions from the last 6 months", role=WorkerRole.PLANNER,
+    )).model_copy(update={"capabilities": PlanningCapabilities(available_tools=("current_time", "sql_query"))})
+
+    result = service(provider, route="info").run(request)
+
+    assert result.outcome == PlannerOutcome.EXECUTION_PLAN
+    assert [step.primary_tool for step in result.proposed_plan.steps] == ["current_time", "sql_query"]
+    assert result.proposed_plan.steps[1].depends_on_step_ids == ("clock",)
+    prompt = provider.messages[0][0].content
+    assert "Never use an assumed current date from model knowledge or prompt metadata." in prompt
+
+
 def test_knowledge_and_uncertain_requests_do_not_enable_ambient_rag():
     cases = (
         (

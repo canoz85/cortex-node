@@ -1,0 +1,9 @@
+{
+  "id": "relative_time", "mode": "end_to_end",
+  "prompt": "List transactions from the last six calendar months using the SQL datasource.",
+  "tools": {
+    "current_time": {"response": {"success": true, "message": "Current time", "data": {"iso": "2026-11-15T12:00:00+03:00", "utc_iso": "2026-11-15T09:00:00+00:00", "utc_offset": "+03:00", "format": "%Y-%m-%d %H:%M:%S", "formatted": "2026-11-15 12:00:00"}}},
+    "sql_query": {"response": {"success": true, "message": "Transactions", "data": {"rows": [{"date": "2026-10-01", "amount": 42}]}}}
+  },
+  "expect": {"outcome": "completed", "required_tools": ["current_time", "sql_query"], "order": [["current_time", "sql_query"]], "argument_contains": [{"tool": "sql_query", "field": "sql", "value": "2026-05-15"}, {"tool": "sql_query", "field": "sql", "value": "2026-11-15"}], "max_tool_calls": 3}
+}

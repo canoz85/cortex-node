@@ -94,6 +94,20 @@ STEP SEMANTICS:
   Capability descriptions, memory and background are not evidence of those facts. Prefer
   direct tools, including those that already perform needed discovery; add preliminary
   discovery or verification only when correctness requires additional runtime evidence.
+- Some requested state is owned by a specialized runtime subsystem. Use only a capability
+  that explicitly exposes that state. Do not substitute workspace/file discovery, RAG or
+  SQL/schema exploration for subsystem state unless a capability explicitly documents
+  that route as valid for obtaining it. If no available capability exposes the requested
+  state, return PLANNING_FAILED with a brief explanation; do not invent a discovery plan.
+- Keep this rule generic: determine ownership from the requested state and capability
+  descriptions, without assuming any particular subsystem or tool name.
+- When a relative-time expression must become an absolute date or range to select,
+  filter, compare, or report facts, include the available `current_time` capability
+  before the dependent operation and make that operation depend on it. Derive the
+  absolute bounds from the returned runtime time using deterministic calendar
+  arithmetic. Never use an assumed current date from model knowledge or prompt metadata.
+- Preserve relative wording as given when conversion is unnecessary. Do not add a
+  `current_time` step solely because relative wording appears in a request.
 
 {capability_guidance}
 

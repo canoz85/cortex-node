@@ -1,0 +1,9 @@
+{
+  "id": "sql_relationship", "mode": "end_to_end",
+  "prompt": "Using SQL, identify the owner of account 17 in NexFolioM. The accounts table has columns id and owner_name.",
+  "tools": {
+    "sql_query": {"response": {"success": true, "message": "Query result", "data": {"rows": [{"owner_name": "Ada", "id": 17}]}}},
+    "get_nexfoliom_events": {}
+  },
+  "expect": {"outcome": "completed", "required_tools": ["sql_query"], "forbidden_tools": ["get_nexfoliom_events"], "answer_contains": ["Ada"], "argument_contains": [{"tool": "sql_query", "field": "sql", "value": "17"}], "max_tool_calls": 1}
+}

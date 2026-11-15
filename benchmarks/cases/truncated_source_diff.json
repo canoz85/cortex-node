@@ -1,0 +1,9 @@
+{
+  "id": "truncated_source_diff", "mode": "end_to_end",
+  "prompt": "Did the tracked page https://example.com/releases add release CORTEX-42 since the saved baseline?",
+  "tools": {
+    "source_diff": {"match": {"url": "https://example.com/releases"}, "response": {"success": true, "message": "Source changed; diff truncated", "data": {"changed": true, "diff": "--- baseline\n+++ current\n+Release CORTEX-42", "diff_truncated": true, "total_diff_bytes": 5000}}},
+    "web_fetch": {}
+  },
+  "expect": {"outcome": "completed", "required_tools": ["source_diff"], "truncated_tools": ["source_diff"], "forbidden_tools": ["web_fetch"], "answer_contains": ["CORTEX-42"], "max_tool_calls": 1}
+}

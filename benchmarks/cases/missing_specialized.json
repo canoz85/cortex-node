@@ -1,0 +1,6 @@
+{
+  "id": "missing_specialized", "mode": "end_to_end",
+  "prompt": "List previously tracked web baselines from the tracked-source registry.",
+  "tools": {"list_files": {}, "find_files": {}, "read_file": {}},
+  "expect": {"outcome": "planning_failed", "max_tool_calls": 0}
+}

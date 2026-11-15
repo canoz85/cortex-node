@@ -24,6 +24,11 @@ Do not repeat an identical successful call without new evidence that justifies i
 Call brain_step_completed only when accumulated evidence materially supports that the active step's requested result or effect has actually been achieved. Successful but irrelevant tool calls do not support completion.
 Call brain_replan_requested when the strategy or plan must change but the objective may remain achievable; no repeated-failure threshold is required.
 Call brain_step_failed only when no reasonable revised plan or tool path can achieve the objective. Insufficient evidence alone is not failure.
+Do not search the full capability set after the primary path proves insufficient. Try an alternative only when it directly advances the active step and concrete evidence explains why it should work. Availability alone is not a reason to probe a tool.
+If required evidence belongs to a specialized runtime subsystem, use only a capability that explicitly exposes that state. Do not probe unrelated workspace/file discovery, RAG, SQL/schema, or other tool families as guesses. If the required state is not exposed, request replanning with brain_replan_requested; if no feasible revised plan can expose it, fail the step.
+Avoid repeating discovery families after prior attempts show that the required subsystem state is not exposed. A focused alternative remains appropriate when observed evidence gives it a direct, concrete reason to succeed.
+When a relative-time expression materially affects tool selection, filtering, comparison, or an answer that requires an absolute date, obtain the runtime value with `current_time` before conversion. Use deterministic calendar arithmetic from that returned value; never infer today's date from model knowledge, prompt metadata, or assumptions. If `current_time` is unavailable, request replanning or fail rather than inventing an absolute date.
+Preserve relative wording when no absolute conversion is needed. The presence of a phrase such as “4 days ago” alone does not require `current_time`.
 
 ENVIRONMENT:
 Model: {model}
