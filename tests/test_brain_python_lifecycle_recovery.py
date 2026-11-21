@@ -163,6 +163,74 @@ def test_textual_json_lifecycle_recovery_is_unchanged():
     tool.invoke.assert_not_called()
 
 
+@pytest.mark.parametrize("content,name,arguments,kind", [
+    ('brain_step_completed{message: "Line 1\\nİstanbul: done"}', "brain_step_completed",
+     {"message": "Line 1\nİstanbul: done"}, Kind.STEP_COMPLETED),
+    ('brain_step_failed{message: failure}', "brain_step_failed", {"message": "failure"}, Kind.STEP_FAILED),
+    ('brain_replan_requested{reason: "new facts", constraints: ["keep scope", "a,b"]}',
+     "brain_replan_requested", {"reason": "new facts", "constraints": ["keep scope", "a,b"]},
+     Kind.REPLAN_REQUESTED),
+])
+def test_unquoted_key_lifecycle_recovery_preserves_native_action(content, name, arguments, kind, monkeypatch):
+    provider, model, tool, raw = provider_for(content)
+    original = raw.model_dump()
+    normalize = Mock(wraps=module.normalize_brain_output)
+    monkeypatch.setattr(module, "normalize_brain_output", normalize)
+    outcome = provider.generate(brain_input(), ())
+    assert outcome.kind == kind and len(model.calls) == 1
+    canonical = normalize.call_args.args[0]
+    assert canonical.content == ""
+    assert canonical.tool_calls[0]["name"] == name
+    assert canonical.tool_calls[0]["args"] == arguments
+    assert raw.model_dump() == original
+    tool.invoke.assert_not_called()
+
+
+@pytest.mark.parametrize("content,arguments", [
+    ('brain_step_completed{message: 42}', {"message": 42}),
+    ('brain_step_completed{message: "done", extra: true}', {"message": "done", "extra": True}),
+    ('brain_step_completed{}', {}),
+])
+def test_unquoted_key_lifecycle_arguments_use_existing_validation(content, arguments, monkeypatch):
+    provider, _, _, _ = provider_for(content)
+    normalize = Mock(wraps=module.normalize_brain_output)
+    monkeypatch.setattr(module, "normalize_brain_output", normalize)
+    outcome = provider.generate(brain_input(), ())
+    assert outcome.kind == Kind.INVALID_OUTPUT
+    assert normalize.call_args.args[0].tool_calls[0]["args"] == arguments
+
+
+@pytest.mark.parametrize("content", [
+    'read_file{path: "secret.txt"}',
+    'brain_unknown{message: "done"}',
+    'brain_step_completed{message: "one", message: "two"}',
+    'brain_step_completed{message: NaN}',
+    'brain_step_completed{message: "done"} trailing',
+    'prefix brain_step_completed{message: "done"}',
+    'brain_step_completed{message: "done"}brain_step_failed{message: "failed"}',
+    'brain_step_completed{message: call("done")}',
+    'brain_step_completed{message: "done",}',
+])
+def test_unquoted_key_recovery_rejects_executable_tools_and_ambiguous_text(content):
+    provider, _, tool, raw = provider_for(content)
+    assert module._canonical_brain_response(raw, {tool.name: tool}) is raw
+    outcome = provider.generate(brain_input(), ())
+    assert outcome.kind == Kind.INVALID_OUTPUT and outcome.tool_request is None
+    tool.invoke.assert_not_called()
+
+
+def test_unquoted_key_recovery_does_not_override_native_channels():
+    provider, _, tool, raw = provider_for('brain_step_completed{message: "text"}')
+    raw.invalid_tool_calls = [{"name": "read_file", "args": "{", "id": "bad", "error": "invalid"}]
+    assert module._canonical_brain_response(raw, {tool.name: tool}) is raw
+    assert provider.generate(brain_input(), ()).error_code == "invalid_native_tool_call"
+    native = native_action("brain_step_completed", {"message": "native"}).model_copy(
+        update={"content": 'brain_step_failed{message: "text"}'})
+    provider.brain_llm = SequenceModel(native)
+    outcome = provider.generate(brain_input(), ())
+    assert outcome.kind == Kind.STEP_COMPLETED and outcome.message == "native"
+
+
 @pytest.mark.parametrize("name,content,kind,expected", [
     ("brain_step_completed", "brain_step_completed:  Done  ", Kind.STEP_COMPLETED, "Done"),
     ("brain_step_failed", "brain_step_failed: Cannot proceed", Kind.STEP_FAILED, "Cannot proceed"),
@@ -237,3 +305,72 @@ def test_unidentifiable_prose_keeps_existing_fallback_instruction():
     correction = provider.brain_llm.calls[1][-1].content
     assert "Return exactly one native action" in correction
     assert "preserve the same intended action" not in correction
+
+
+@pytest.mark.parametrize("name,arguments,kind,result", [
+    ("brain_step_completed", {"message": "The three pages were fetched."},
+     Kind.STEP_COMPLETED, "The three pages were fetched."),
+    ("brain_step_failed", {"message": "The required file is unavailable."},
+     Kind.STEP_FAILED, "The required file is unavailable."),
+    ("brain_replan_requested", {"reason": "The source moved.", "constraints": ["Use the new URL."]},
+     Kind.REPLAN_REQUESTED, "The source moved."),
+])
+def test_bare_lifecycle_prompts_for_missing_arguments_once(name, arguments, kind, result):
+    provider, _, tool, bare = provider_for(name)
+    model = provider.brain_llm = SequenceModel(bare, native_action(name, arguments))
+    outcome = provider.generate(brain_input(), ())
+    assert outcome.kind == kind and outcome.message == result
+    assert len(model.calls) == 2
+    correction = model.calls[1][-1].content
+    assert f"Missing required arguments: {', '.join(arguments)}." in correction
+    assert f"Invoke {name} natively exactly once" in correction
+    assert "Leave assistant content empty" in correction
+    assert "Do not reconsider the task or choose another action" in correction
+    if kind == Kind.STEP_COMPLETED:
+        assert "evidence-grounded semantic result" in correction
+        assert outcome.completion_evidence.summary == result
+    if kind == Kind.REPLAN_REQUESTED:
+        assert outcome.replan_request.constraints == ("Use the new URL.",)
+    tool.invoke.assert_not_called()
+
+
+@pytest.mark.parametrize("reply,code", [
+    (AIMessage(content="brain_step_completed"), "unexpected_response_content"),
+    (native_action("brain_step_completed", {}), "missing_or_invalid_message"),
+    (native_action("brain_step_completed", {"message": "  "}), "missing_or_invalid_message"),
+    (native_action("brain_step_failed", {"message": "Unavailable."}), "lifecycle_repair_action_mismatch"),
+    (native_action("read_file", {"path": "a.txt"}), "lifecycle_repair_action_mismatch"),
+    (AIMessage(content="brain_step_completed: The pages were fetched."), "unexpected_response_content"),
+    (native_action("brain_step_completed", {"message": "Fetched."}).model_copy(update={"content": "Done"}),
+     "unexpected_response_content"),
+])
+def test_unsuccessful_bare_lifecycle_repair_ends_in_invalid_output(reply, code):
+    provider, _, tool, bare = provider_for("brain_step_completed")
+    model = provider.brain_llm = SequenceModel(bare, reply)
+    outcome = provider.generate(brain_input(), ())
+    assert outcome.kind == Kind.INVALID_OUTPUT and outcome.error_code == code
+    assert outcome.tool_request is None and outcome.completion_evidence is None
+    assert len(model.calls) == 2
+    tool.invoke.assert_not_called()
+
+
+@pytest.mark.parametrize("text,correction", [
+    ("read_file", "Return exactly one native action"),
+    ("brain_step_completed(", "Serialization repair only"),
+    ("brain_step_completed ", "Serialization repair only"),
+])
+def test_only_exact_bare_lifecycle_names_get_targeted_repair(text, correction):
+    provider, model, tool, _ = provider_for(text)
+    assert provider.generate(brain_input(), ()).kind == Kind.INVALID_OUTPUT
+    assert len(model.calls) == 3
+    assert correction in model.calls[1][-1].content
+    tool.invoke.assert_not_called()
+
+
+def test_bare_lifecycle_repair_consumes_remaining_retry_budget():
+    provider, _, _, bare = provider_for("brain_step_completed")
+    prose = AIMessage(content="No action yet.")
+    model = provider.brain_llm = SequenceModel(prose, bare, bare)
+    assert provider.generate(brain_input(), ()).kind == Kind.INVALID_OUTPUT
+    assert len(model.calls) == 3
+    assert "Missing required arguments: message." in model.calls[2][-1].content

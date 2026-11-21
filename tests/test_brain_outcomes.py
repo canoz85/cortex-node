@@ -309,7 +309,9 @@ def test_only_visible_current_step_records_receive_refs():
     context = evidence_context(count=MAX_CURRENT_ATTEMPT_RECORDS + 1)
     payload = evidence_prompt(context)
     assert len(payload["current_attempts"]) == MAX_CURRENT_ATTEMPT_RECORDS
-    assert all("evidence_ref" not in record and "request_id" not in record for record in payload["current_attempts"])
+    assert all("evidence_ref" not in record for record in payload["current_attempts"])
+    assert [r["request_id"] for r in payload["current_attempts"]] == [
+        r.result.request_id for r in context.tool_execution_history[1:]]
     assert [record["record_index"] for record in payload["current_attempts"]] == list(range(MAX_CURRENT_ATTEMPT_RECORDS))
 
 
@@ -619,9 +621,9 @@ def test_failure_projection_has_facts_without_controller_retry_or_schedule_state
     record = context.tool_execution_history[0].model_copy(update={"arguments": {"path": "missing.txt"}})
     context = context.model_copy(update={"tool_execution_history": (record,), "retry": RetryMetadata(retry_count=2, max_retries=3)})
     evidence = evidence_prompt(context)
-    assert set(evidence) == {"current_attempts", "prior_facts", "prior_failures"}
+    assert set(evidence) == {"current_attempts", "prior_facts", "prior_failures", "source_observations"}
     assert evidence["current_attempts"] == [{"tool": "read_file", "args": {"path": "missing.txt"},
-        "success": False, "error": {"message": "read"}, "record_index": 0}]
+        "step": "s1", "request_id": "req1", "success": False, "error": {"message": "read"}, "record_index": 0}]
     assert "matching_failure_count" not in json.dumps(evidence)
     assert "signature" not in json.dumps(evidence)
 

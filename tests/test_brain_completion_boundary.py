@@ -92,7 +92,8 @@ def patched_completion(tmp_path):
     evidence_message = next(m for m in model.calls[-1] if m.content.startswith("Execution evidence v1:"))
     displayed = json.loads(evidence_message.content.split("\n", 1)[1])["current_attempts"][2]
     assert displayed["record_index"] == 2
-    assert displayed["artifacts"] == [{"path": "x.txt", "action": "modified"}]
+    assert displayed["artifacts"] == [art.model_dump(exclude_none=True) for art in records[2].artifacts]
+    assert displayed["artifacts"][0]["path"] == "x.txt"
     assert "artifacts" not in displayed["evidence"]
     return SimpleNamespace(driver=driver, controller=controller, state=turn.execution_state,
                            completion=turn.worker_result, calls=calls, target=target, model=model,

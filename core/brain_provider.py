@@ -132,10 +132,22 @@ def _ensure_native_call(
         )
         if correction_reason is None or attempt > _MAX_NATIVE_CORRECTIONS:
             return raw, attempt, correction_reason
-        _log_native_call_attempt(raw, attempt, correction_triggered=True,
-                                 correction_reason=correction_reason, accepted=False)
-
-        if argument_feedback is not None:
+        bare_action = getattr(raw, "content", None)
+        if missing_call and isinstance(bare_action, str) and bare_action in _LIFECYCLE_PARAMETERS:
+            parameters = _LIFECYCLE_PARAMETERS[bare_action]
+            required = parameters["required"]
+            descriptions = "\n".join(
+                f"- {field}: {parameters['properties'][field]['description']}" for field in required
+            )
+            correction_reason = "bare_lifecycle_repair"
+            instruction = (
+                f"You returned the bare lifecycle name {bare_action}. "
+                f"Missing required arguments: {', '.join(required)}.\n{descriptions}\n"
+                f"Invoke {bare_action} natively exactly once with those arguments. "
+                "Leave assistant content empty. Do not reconsider the task or choose another action."
+            )
+            rejected_response = [AIMessage(content=bare_action)]
+        elif argument_feedback is not None:
             instruction = (
                 "The previous native action was rejected; no tool was executed.\n"
                 + json.dumps(argument_feedback, ensure_ascii=True, separators=(",", ":"))
@@ -191,6 +203,8 @@ def _ensure_native_call(
                     "Leave assistant content empty."
                 )
             rejected_response = [AIMessage(content=raw.content)] if isinstance(raw, AIMessage) else []
+        _log_native_call_attempt(raw, attempt, correction_triggered=True,
+                                 correction_reason=correction_reason, accepted=False)
         provider_messages = [
             *provider_messages,
             *rejected_response,
@@ -204,6 +218,13 @@ def _ensure_native_call(
             execution_id=brain_input.identity.execution_id if brain_input is not None else None,
             enabled=show_raw_llm,
         )
+        if correction_reason == "bare_lifecycle_repair":
+            # Inspect the native reply before any textual or incidental-content recovery.
+            calls = getattr(raw, "tool_calls", None)
+            if calls and (not isinstance(calls, (list, tuple)) or len(calls) != 1
+                          or not isinstance(calls[0], dict) or calls[0].get("name") != bare_action):
+                correction_reason = "lifecycle_repair_action_mismatch"
+            return raw, attempt + 1, correction_reason
 
 
 def _is_valid_native_batch(raw, authorized_tools: dict[str, object]) -> bool:
@@ -308,6 +329,10 @@ def _recover_textual_call(raw, authorized_tools: dict[str, object]):
     if lifecycle is not None:
         name, arguments = lifecycle
         return _make_textual_call(raw, name, arguments)
+    lifecycle = _parse_unquoted_key_lifecycle_call(content)
+    if lifecycle is not None:
+        name, arguments = lifecycle
+        return _make_textual_call(raw, name, arguments)
     match = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*(\{.*\})", content, re.DOTALL)
     if match is None:
         return raw
@@ -389,6 +414,78 @@ def _make_textual_call(raw, name: str, arguments: dict):
     return canonical
 
 
+def _parse_unquoted_key_lifecycle_call(content: str) -> tuple[str, dict] | None:
+    """Parse one lifecycle action with bare keys and JSON values.
+
+    Single bare identifiers are also accepted as string values. Schema and
+    lifecycle argument validation remain the native normalization path's job.
+    """
+    text = content.strip()
+    if len(text) > _MAX_TEXTUAL_LIFECYCLE_CHARS:
+        return None
+    head = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*\{", text)
+    names = {schema["function"]["name"] for schema in LIFECYCLE_ACTION_SCHEMAS}
+    if head is None or head.group(1) not in names:
+        return None
+
+    def reject_constant(_value):
+        raise ValueError("Non-JSON constant")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate JSON key")
+            result[key] = value
+        return result
+
+    decoder = json.JSONDecoder(parse_constant=reject_constant, object_pairs_hook=unique_object)
+    index = head.end()
+    arguments = {}
+
+    def skip_space(position):
+        while position < len(text) and text[position].isspace():
+            position += 1
+        return position
+
+    try:
+        index = skip_space(index)
+        if index < len(text) and text[index] == "}":
+            index += 1
+        else:
+            while True:
+                key = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[index:])
+                if key is None or key.group() in arguments:
+                    return None
+                name = key.group()
+                index = skip_space(index + key.end())
+                if index >= len(text) or text[index] != ":":
+                    return None
+                index = skip_space(index + 1)
+                try:
+                    value, index = decoder.raw_decode(text, index)
+                except json.JSONDecodeError:
+                    bare = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[index:])
+                    if bare is None or bare.group() in {"NaN", "Infinity"}:
+                        return None
+                    value = bare.group()
+                    index += bare.end()
+                arguments[name] = value
+                index = skip_space(index)
+                if index < len(text) and text[index] == "}":
+                    index += 1
+                    break
+                if index >= len(text) or text[index] != ",":
+                    return None
+                index = skip_space(index + 1)
+        if skip_space(index) != len(text):
+            return None
+        json.dumps(arguments, allow_nan=False)
+        return head.group(1), arguments
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+
 def _parse_textual_lifecycle_call(content: str) -> tuple[str, dict] | None:
     """Parse one strict Python-style or Gemma-style lifecycle serialization."""
     text = content.strip()
@@ -399,11 +496,7 @@ def _parse_textual_lifecycle_call(content: str) -> tuple[str, dict] | None:
         return None
     name = head.group(1)
     opening = head.group(2)
-    schemas = {
-        schema["function"]["name"]: schema["function"]["parameters"]
-        for schema in LIFECYCLE_ACTION_SCHEMAS
-    }
-    schema = schemas.get(name)
+    schema = _LIFECYCLE_PARAMETERS.get(name)
     if schema is None:
         return None
 
@@ -675,6 +768,10 @@ LIFECYCLE_ACTION_SCHEMAS = (
     },
 )
 
+_LIFECYCLE_PARAMETERS = {
+    schema["function"]["name"]: schema["function"]["parameters"] for schema in LIFECYCLE_ACTION_SCHEMAS
+}
+
 
 def _resolve_authorized_tools(
     brain_input: BrainInput,
@@ -761,16 +858,13 @@ class LangChainBrainProvider:
                 response=raw, execution_id=brain_input.identity.execution_id,
                 enabled=self.show_raw_llm,
             )
-            raw, attempt, correction_reason = _ensure_native_call(
+            canonical, attempt, correction_reason = _ensure_native_call(
                 llm=llm, provider_messages=provider_messages,
                 raw=raw,
                 authorized_tools=authorized_by_name,
                 argument_schema_for=argument_schema_for,
                 brain_input=brain_input,
                 show_raw_llm=self.show_raw_llm,
-            )
-            canonical = _canonical_brain_response(
-                raw, authorized_by_name,
             )
         except Exception as exc:
             # Provider failures are values at the service boundary.
@@ -782,7 +876,14 @@ class LangChainBrainProvider:
                 message=f"Brain provider failed ({type(exc).__name__}).",
             )
 
-        if _native_argument_feedback(canonical, authorized_by_name, argument_schema_for=argument_schema_for):
+        if correction_reason == "lifecycle_repair_action_mismatch":
+            outcome = BrainOutcome(
+                outcome=BrainOutcomeKind.INVALID_OUTPUT,
+                step_id=brain_input.active_step.step_id if brain_input.active_step else None,
+                error_code=correction_reason,
+                message="Lifecycle repair must invoke the originally named action exactly once.",
+            )
+        elif _native_argument_feedback(canonical, authorized_by_name, argument_schema_for=argument_schema_for):
             # Reject invalid arguments after the bounded correction loop before
             # normalization can create ToolRequest identities.
             outcome = BrainOutcome(
@@ -809,10 +910,13 @@ class LangChainBrainProvider:
                 error_code="invalid_native_tool_arguments",
                 message="Brain returned invalid native tool arguments.",
             )
+        repair_finished = correction_reason in {"bare_lifecycle_repair", "lifecycle_repair_action_mismatch"}
         _log_native_call_attempt(
-            raw, attempt, correction_exhausted=(attempt > _MAX_NATIVE_CORRECTIONS
-                                              and outcome.outcome == BrainOutcomeKind.INVALID_OUTPUT),
+            canonical, attempt, correction_exhausted=(
+                outcome.outcome == BrainOutcomeKind.INVALID_OUTPUT
+                and (attempt > _MAX_NATIVE_CORRECTIONS or repair_finished)
+            ),
             correction_reason=correction_reason,
             accepted=outcome.outcome != BrainOutcomeKind.INVALID_OUTPUT,
         )
-        return outcome.model_copy(update={"usage": normalize_brain_usage(raw)})
+        return outcome.model_copy(update={"usage": normalize_brain_usage(canonical)})

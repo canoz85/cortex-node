@@ -6,6 +6,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from core.debug import log_llm_exchange
 from core.finalizer_exact import render_exact_collection_answer
+from core.protocol.completion_identity import eligible_records, evidence_identity
 from core.protocol.enums import ExecutionStatus
 from core.protocol.models import ExecutionSummary, FinalizationRequest
 from core.logging.live_status import add_response_usage, current_live_status
@@ -22,6 +23,16 @@ When needed to fully answer the user's request, you may derive recommendations, 
 Do not introduce new factual claims about the inspected system, files, runtime, environment, or external world unless those claims are supported by the accepted execution facts.
 
 Tool execution records are supporting evidence and details only; do not replace or contradict an accepted conclusion by independently reinterpreting raw tool output.
+
+Preserve the epistemic status of every material claim throughout the answer, including inherited accepted wording and premises embedded in recommendations or decisions.
+FACT requires supplied evidence for the exact entity and context stated; a supported relationship may remain a FACT.
+Separate supported facts do not establish a new relationship: A being true of entity X and B being true generically do not establish B for X without evidence linking them.
+A supported deduction may be stated as INFERENCE; retain its qualification everywhere it is used, including in Decision, without promoting it to an unqualified FACT.
+Treat unestablished relationships, applicability, compatibility, superiority, causality, or other material connections as UNKNOWN.
+Recommendations and decisions may propose testing an UNKNOWN connection, but must not assume it as an established premise to justify the action.
+Apply these rules to accepted step wording too: preserve the accepted semantic action or decision where possible, while qualifying or rewriting inherited premises whose certainty exceeds the supplied evidence.
+This qualification rule does not authorize independently overturning an accepted conclusion merely because supporting evidence permits another interpretation; preserve fully supported accepted conclusions in substance.
+Preserve scope and exclusivity qualifiers only when supported: do not say "only X changed" when the evidence also establishes another kind of change.
 
 Do not invoke tools or emit lifecycle control messages.
 Report failures and cancellations factually.
@@ -108,6 +119,56 @@ def _bounded_step_results(results: list[dict], budget: int):
     return _bounded_value(projected, budget)
 
 
+def _bound_support(request):
+    """Resolve the Controller's ordered binding before excerpting any record."""
+    plan = request.accepted_plan
+    if plan is None:
+        return []
+    eligible = eligible_records(request.identity, plan, request.tool_execution_history)
+    support = []
+    for accepted in request.accepted_step_results:
+        binding = accepted.completion_evidence
+        if (binding.execution_id != request.identity.execution_id or binding.plan_id != plan.plan_id
+                or binding.plan_revision > plan.revision or not binding.tool_request_ids):
+            continue
+        ids = set(binding.tool_request_ids)
+        records = [r for r in eligible if r.step_id == binding.step_id
+                   and r.plan_revision <= binding.plan_revision and r.result.request_id in ids]
+        if (tuple(r.result.request_id for r in records) == binding.tool_request_ids
+                and evidence_identity(records) == binding.evidence_id):
+            support.extend((binding, r) for r in records)
+    return support
+
+
+def _supporting_excerpts(support, budget):
+    selected = support[-MAX_RENDER_RECORDS:]
+    items = []
+    remaining = budget - len(json.dumps({"records": [], "omitted_record_count": len(support)}))
+    for index, (binding, record) in enumerate(selected):
+        result = record.result
+        item = {"execution_id": record.execution_id, "plan_id": record.plan_id,
+                "plan_revision": record.plan_revision, "step_id": record.step_id,
+                "request_id": result.request_id,
+                "evidence_id": binding.evidence_id, "tool": record.tool_name,
+                "success": result.success, "error_code": result.error_code,
+                "integrity": result.integrity.model_dump(exclude_defaults=True)}
+        if result.pagination is not None:
+            item["pagination"] = result.pagination.model_dump()
+        share = remaining // (len(selected) - index)
+        detail = {"arguments": record.arguments, "message": result.message,
+                  "value": result.data if result.data is not None else result.rendered_output}
+        if record.artifacts:
+            detail["artifacts"] = [art.model_dump(exclude_none=True) for art in record.artifacts]
+        item["detail"] = None
+        available = share - len(json.dumps(item)) + len("null") - 2
+        if available < 100:
+            continue
+        item["detail"] = _bounded_value(detail, available)
+        items.append(item)
+        remaining -= len(json.dumps(item)) + 2
+    return {"records": items, "omitted_record_count": len(support) - len(items)}
+
+
 def finalizer_facts(
     request: FinalizationRequest,
     summary: ExecutionSummary,
@@ -139,55 +200,16 @@ def finalizer_facts(
             item["title"] = _bounded_value(titles[step_id], STEP_TITLE_BUDGET)
         accepted_step_results.append(item)
 
+    support = _bound_support(request) if request.status == ExecutionStatus.COMPLETED else []
+    if support:
+        # Give short conclusions their full space. For very long conclusions
+        # reserve a share for independently identifiable supporting passages.
+        room = FACTS_BUDGET - len(json.dumps({**facts, "supporting_evidence": {}}))
+        support_budget = min(EVIDENCE_BUDGET, max(room // 4, room - len(json.dumps(accepted_step_results))))
+        facts["supporting_evidence"] = _supporting_excerpts(support, support_budget)
+
     results_budget = FACTS_BUDGET - len(json.dumps(facts, ensure_ascii=True)) + 2
     facts["accepted_step_results"] = _bounded_step_results(accepted_step_results, results_budget)
-
-    # Accepted semantics are sufficient even when excerpted. Raw output must
-    # never compensate for truncating them. Only legacy requests without any
-    # accepted results need the evidence fallback to convey execution findings.
-    if (request.accepted_step_results
-            or request.status != ExecutionStatus.COMPLETED
-            or not request.tool_execution_history):
-        return facts
-
-    records = request.tool_execution_history[-MAX_RENDER_RECORDS:]
-    facts["tool_execution_history"] = []
-    facts["omitted_earlier_records"] = len(request.tool_execution_history) - len(records)
-    evidence_budget = min(EVIDENCE_BUDGET, FACTS_BUDGET - len(json.dumps(facts, ensure_ascii=True)) + 2)
-    per_record = (evidence_budget - 2 * len(records)) // max(1, len(records))
-
-    tool_execution_history = []
-
-    for record in records:
-        result = record.result
-
-        item = _bounded_value({
-            "step_id": record.step_id,
-            "tool_name": record.tool_name,
-            "arguments": record.arguments,
-            "success": result.success,
-            "message": result.message,
-            "error_code": result.error_code,
-            "evidence": (
-                result.data
-                if result.data is not None
-                else result.rendered_output
-            ),
-            "integrity": result.integrity.model_dump(mode="json"),
-            "pagination": (
-                result.pagination.model_dump(mode="json")
-                if result.pagination is not None
-                else None
-            ),
-            "artifacts": [
-                artifact.model_dump(mode="json")
-                for artifact in record.artifacts
-            ],
-        }, per_record)
-
-        tool_execution_history.append(item)
-
-    facts["tool_execution_history"] = _bounded_value(tool_execution_history, evidence_budget)
     return facts
 
 

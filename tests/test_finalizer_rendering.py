@@ -14,6 +14,7 @@ from core.finalizer_provider import (
     _bounded_value,
     finalizer_facts,
 )
+from core.protocol.completion_identity import evidence_identity
 from core.protocol.enums import CancellationSource, ExecutionStatus, StepStatus
 from core.protocol.models import (
     AcceptedStepResult,
@@ -67,6 +68,19 @@ def accepted_result(
         tool_request_ids=tool_request_ids,
         evidence_id=f"evidence-{step}-{revision}",
     ))
+
+
+def bound_request(records):
+    scoped = tuple(r.model_copy(update={"execution_id": IDENTITY.execution_id,
+                   "plan_id": "plan-1", "plan_revision": 2}) for r in records)
+    accepted = []
+    for step in dict.fromkeys(r.step_id for r in scoped):
+        group = [r for r in scoped if r.step_id == step]
+        binding = accepted_result(step, "Accepted " + step,
+                                  tool_request_ids=tuple(r.result.request_id for r in group))
+        accepted.append(AcceptedStepResult(completion_evidence=binding.completion_evidence.model_copy(
+            update={"evidence_id": evidence_identity(group)})))
+    return request(scoped, tuple(accepted))
 
 
 def exact_result(items, *, label="Files"):
@@ -190,7 +204,7 @@ def test_projection_is_deterministic_and_independent_of_redundant_history():
 
 
 def test_multi_step_success_renders_from_evidence_once_without_mutation():
-    req = request((record("step-1", {"status": "modified"}), record("step-2", {"changes": "updated protocol"})))
+    req = bound_request((record("step-1", {"status": "modified"}), record("step-2", {"changes": "updated protocol"})))
     before = req.model_dump_json()
     result, calls = render(req, AIMessage(content="The repository has protocol updates."))
     assert result.final_answer == "The repository has protocol updates."
@@ -480,7 +494,7 @@ def test_accepted_direct_response_bypasses_model_renderer():
 
 
 def test_oversized_duplicate_evidence_is_bounded_and_marked_before_model_invocation():
-    req = request((record("step-1", {"status": "modified"}),
+    req = bound_request((record("step-1", {"status": "modified"}),
                    record("step-2", {"diff": "HEAD" + "x" * 150000 + "TAIL"}, "DUPLICATE" * 30000)))
     before = req.model_dump_json()
     result, calls = render(req, AIMessage(content="Visible evidence shows modifications."))
@@ -488,20 +502,23 @@ def test_oversized_duplicate_evidence_is_bounded_and_marked_before_model_invocat
     assert len(prompt.encode("utf-8")) < 25000
     assert "DUPLICATE" not in prompt
     facts = json.loads(calls[0][-1].content.split("\n", 1)[1])
-    assert facts["tool_execution_history"][1]["truncated"] is True
-    assert "HEAD" in facts["tool_execution_history"][1]["excerpt"]
-    assert "TAIL" in facts["tool_execution_history"][1]["excerpt"]
+    assert facts["supporting_evidence"]["records"][1]["detail"]["truncated"] is True
+    assert "HEAD" in facts["supporting_evidence"]["records"][1]["detail"]["excerpt"]
+    assert "TAIL" in facts["supporting_evidence"]["records"][1]["detail"]["excerpt"]
     assert req.model_dump_json() == before
     assert result.execution_summary == Finalizer().finalize(req).execution_summary
     assert result.final_answer_error is None
 
 
 def test_many_records_have_explicit_omission_and_global_budget():
-    req = request(tuple(record(f"s{i}", {"value": "x" * 10000}) for i in range(100)))
+    records = tuple(record("step-1", None).model_copy(update={
+        "result": ToolResult(request_id=str(i), message="read", success=True, data={"value": "x" * 10000})
+    }) for i in range(100))
+    req = bound_request(records)
     summary = Finalizer().finalize(req).execution_summary
     facts = finalizer_facts(req, summary)
-    assert facts["omitted_earlier_records"] == 76
-    assert len(facts["tool_execution_history"]) == 24
+    assert facts["supporting_evidence"]["omitted_record_count"] == 76
+    assert len(facts["supporting_evidence"]["records"]) == 24
     assert len(json.dumps(facts)) < 19000
     assert len(req.tool_execution_history) == 100
 
@@ -575,3 +592,120 @@ def test_renderer_failure_applied_by_adapter_keeps_completed_execution():
     assert update["execution_state"].protocol_visible.summary.completed_step_ids == ("s1",)
     assert update["finalization_error"] == "RuntimeError: offline"
     assert update["messages"][0].content == update["finalization_result"].final_answer
+
+def test_prose_renderer_matches_ordered_bound_evidence_and_fingerprint():
+    req = bound_request([record("step-1", {"detail": "canonical passage"})])
+    bound = req.tool_execution_history[0]
+    foreign = bound.model_copy(update={"execution_id": "other", "result": bound.result.model_copy(
+        update={"data": "foreign passage"})})
+    extra = bound.model_copy(update={"result": bound.result.model_copy(
+        update={"request_id": "unbound", "data": "unbound passage"})})
+    augmented = req.model_copy(update={"tool_execution_history": (foreign, extra, bound)})
+    _, calls = render(augmented, AIMessage(content="Rendered."))
+    facts = json.loads(calls[0][-1].content.split("\n", 1)[1])
+    assert facts["accepted_step_results"][0]["semantic_content"] == "Accepted step-1"
+    support, = facts["supporting_evidence"]["records"]
+    assert support["request_id"] == bound.result.request_id
+    assert support["evidence_id"] == evidence_identity([bound])
+    assert support["detail"]["value"] == {"detail": "canonical passage"}
+    assert "foreign passage" not in str(facts) and "unbound passage" not in str(facts)
+    tampered = bound.model_copy(update={"result": foreign.result})
+    for invalid in (req.model_copy(update={"tool_execution_history": (tampered,)}),
+                    req.model_copy(update={"accepted_step_results": ()})):
+        _, calls = render(invalid, AIMessage(content="Rendered."))
+        assert "supporting_evidence" not in calls[0][-1].content
+        assert "canonical passage" not in calls[0][-1].content
+
+
+@pytest.mark.parametrize("evidence,accepted,answer,required_rule", [
+    pytest.param(
+        ["Device X is portable.", "The service supports remote diagnostics."],
+        "Evaluate Device X to use its remote diagnostics in the field.",
+        "Evaluate Device X to determine whether remote diagnostics work in the field.",
+        "preserve the accepted semantic action or decision where possible, while qualifying or rewriting inherited premises",
+        id="inherited-premise-live-run-pattern",
+    ),
+    pytest.param(
+        ["Device X is portable.", "The service supports remote diagnostics."],
+        "Device X is portable. The service supports remote diagnostics.",
+        "Device X is portable. Whether the service supports diagnostics for X is unknown.",
+        "A being true of entity X and B being true generically do not establish B for X without evidence linking them",
+        id="separate-facts",
+    ),
+    pytest.param(
+        ["Device X passed remote diagnostics in the field."],
+        "Device X supports remote diagnostics in the field.",
+        "Device X supports remote diagnostics in the field.",
+        "FACT requires supplied evidence for the exact entity and context stated; a supported relationship may remain a FACT",
+        id="supported-relationship",
+    ),
+    pytest.param(
+        ["Device X completed three field trials with fewer interruptions."],
+        "INFERENCE: X may reduce interruptions. Decision: evaluate X because it may reduce interruptions.",
+        "INFERENCE: X may reduce interruptions. Decision: evaluate X because it may reduce interruptions.",
+        "retain its qualification everywhere it is used, including in Decision, without promoting it to an unqualified FACT",
+        id="inference-qualified-in-decision",
+    ),
+    pytest.param(
+        ["Device X has not been tested in the field."],
+        "UNKNOWN: field suitability. Decision: evaluate X for field use.",
+        "Evaluate X to determine whether it is suitable for field use.",
+        "Recommendations and decisions may propose testing an UNKNOWN connection, but must not assume it as an established premise",
+        id="unknown-motivates-evaluation",
+    ),
+    pytest.param(
+        ["Device X passed the required field test."],
+        "Retain Device X because it passed the required field test.",
+        "Retain Device X because it passed the required field test.",
+        "preserve fully supported accepted conclusions in substance",
+        id="supported-conclusion-preserved",
+    ),
+    pytest.param(
+        ["No comparison establishes that X is better than Y."],
+        "Evaluate X because it is better than Y.",
+        "Evaluate X to determine how it compares with Y.",
+        "Treat unestablished relationships, applicability, compatibility, superiority, causality, or other material connections as UNKNOWN",
+        id="unknown-superiority",
+    ),
+    pytest.param(
+        ["The download count changed.", "The follower count changed."],
+        "Only the download count changed.",
+        "The download count and follower count changed.",
+        'do not say "only X changed" when the evidence also establishes another kind of change',
+        id="exclusive-qualifier",
+    ),
+])
+def test_epistemic_contract_reaches_renderer_with_bound_generic_scenarios(
+    evidence, accepted, answer, required_rule,
+):
+    """Check prompt delivery and adapter behavior, not live model compliance.
+
+    The scripted answer documents an admissible rendering for each scenario.
+    The regression guard is the instruction delivered alongside intact accepted
+    wording and provenance-bound evidence, rather than a simulated claim checker.
+    """
+    req = bound_request((record("step-1", {"observations": evidence}),))
+    binding = req.accepted_step_results[0].completion_evidence.model_copy(
+        update={"summary": accepted},
+    )
+    req = req.model_copy(update={
+        "accepted_step_results": (AcceptedStepResult(completion_evidence=binding),),
+    })
+    before = req.model_dump_json()
+
+    result, calls = render(req, AIMessage(content=answer))
+
+    assert len(calls) == 1
+    instructions = calls[0][0].content
+    assert required_rule in instructions
+    assert "including inherited accepted wording and premises embedded in recommendations or decisions" in instructions
+    assert "does not authorize independently overturning an accepted conclusion" in instructions
+    facts = json.loads(calls[0][-1].content.split("\n", 1)[1])
+    assert facts["accepted_step_results"][0]["semantic_content"] == accepted
+    support, = facts["supporting_evidence"]["records"]
+    assert support["detail"]["value"] == {"observations": evidence}
+    assert support["evidence_id"] == binding.evidence_id
+    assert facts["supporting_evidence"]["omitted_record_count"] == 0
+    assert result.final_answer == answer
+    assert result.final_answer_error is None
+    assert req.model_dump_json() == before

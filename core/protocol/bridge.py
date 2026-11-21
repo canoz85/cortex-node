@@ -11,7 +11,7 @@ from typing import Any, Mapping, Sequence
 from langchain_core.messages import HumanMessage
 
 from core.graph_messages import conversational_messages
-from .enums import WorkerRole
+from .enums import ControllerDecisionType, WorkerRole
 from .models import BrainInput, ControllerInput, ControllerDecision, ExecutionContext, ExecutionState
 
 GraphState = Mapping[str, Any]
@@ -86,15 +86,25 @@ def build_brain_input(state: GraphState) -> BrainInput:
 
     context = build_execution_context(state)
     protocol = execution_state.protocol_visible
+    working = execution_state.working
+    delivered = working.last_tool_result
+    if (delivered is None and working.tool_execution_history
+            and isinstance(controller_decision, ControllerDecision)
+            and controller_decision.decision_type == ControllerDecisionType.DISPATCH_BRAIN
+            and controller_decision.cursor == protocol.cursor
+            and controller_decision.consume_tool_result and controller_decision.retry is None):
+        # Applying the final batch-member transition already cleared the
+        # delivery slot. That dispatch still observes the just-captured result.
+        delivered = working.tool_execution_history[-1].result
     return BrainInput(
         identity=protocol.identity,
         cursor=protocol.cursor,
         context=context,
         active_plan=protocol.active_plan,
         active_step=protocol.active_step,
-        last_tool_result=execution_state.working.last_tool_result,
-        tool_execution_history=execution_state.working.tool_execution_history,
-        coverage_assessment=execution_state.working.coverage_assessment,
+        last_tool_result=delivered,
+        tool_execution_history=working.tool_execution_history,
+        coverage_assessment=working.coverage_assessment,
         retry=protocol.retry,
         direct_response=(
             controller_decision.direct_response

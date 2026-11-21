@@ -377,6 +377,23 @@ def test_actual_read_file_batch_preserves_missing_file_and_later_success(tmp_pat
     assert decision.decision_type == Decision.DISPATCH_BRAIN
 
 
+def test_final_batch_member_is_fresh_only_on_its_delivery_dispatch():
+    state, decision = accepted_first(2)
+    for _ in range(2):
+        result = result_for(decision.pending_tool_request).model_copy(update={"data": "x" * 700})
+        state = integrate_tool_result(state, decision, result)
+        decision = CortexController(24).decide(input_for(state))
+        state = apply_controller_decision_to_state(state, decision)
+    assert decision.decision_type == Decision.DISPATCH_BRAIN
+    assert state.working.last_tool_result is None
+    context = build_brain_input({"execution_state": state, "controller_decision": decision})
+    message, = _build_step_progress_messages(brain_input=context)
+    first, second = json.loads(message.content.split("\n", 1)[1])["current_attempts"]
+    assert first["evidence"]["display_compacted"]
+    assert second["evidence"] == result.data
+    assert build_brain_input({"execution_state": state}).last_tool_result is None
+
+
 @pytest.mark.parametrize("name", ["describe_image", "run_comfy_workflow", "git_status"])
 def test_other_bound_read_only_or_async_tools_are_not_batch_eligible(name):
     model = SequenceModel(native_batch(names=[name, name], args=[{}, {}]),

@@ -338,6 +338,7 @@ def test_successful_read_is_grounded_before_brain_can_repeat_the_same_call():
         )
         attempt = json.loads(evidence_message.split("\n", 1)[1])["current_attempts"][0]
         assert attempt == {
+            "step": step.step_id, "request_id": "read-session", "message": record.result.message,
             "tool": "read_file",
             "args": {"path": ".cortex_session.json"},
             "success": True,
